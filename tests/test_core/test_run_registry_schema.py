@@ -134,22 +134,50 @@ def test_routine_notices_are_quiet_so_an_upgrade_notice_is_not_buried(scratch, c
     dashboards and left the two notices the handler exists to surface as 2
     lines in 15. Routine construction must be silent; the FK repair, which
     MUTATES data and is permitted inside _SCHEMA_DDL only because it says so
-    (owner decision 6), must not be.
+    (owner decision 6), must not be. Neither is the one-shot test_runs ->
+    tests/test_versions collapse (2026-09-07) — it mutates data too, so its
+    own first run is allowed to speak; this test lets that run happen and
+    then checks the schema it leaves behind, not the collapse itself.
     """
     from src.backend.core.run_registry import RunRegistry
     schema, dsn, admin = scratch
     rid = str(uuid.uuid4())
+    admin.execute(f"SET search_path TO {schema}")
 
     reg = RunRegistry(dsn=dsn)          # provisions the schema
     reg.record_start(rid, {"user_id": "u1", "org_id": "org-a",
                            "email": "u1@e.com"}, "q", "passed")
     reg.close()
 
-    # Half one: nothing to upgrade, so nothing to say.
+    # The code is added AFTER the row exists, which is what makes this
+    # PRE-SPLIT history and gives the collapse something to do. Neither
+    # ordinary path reaches that shape: record_start GIVEN robot_code mints
+    # the test itself and disarms the collapse before it can run, and
+    # record_start without it leaves a row the collapse must skip -- no
+    # code, nothing to version, no test (D8).
+    admin.execute("UPDATE test_runs SET robot_code = 'code' WHERE run_id = %s",
+                  (rid,))
+
+    # This row's test_id is NULL and `tests` is still empty, so THIS
+    # construction is the collapse's first chance to fire — let it run to
+    # completion here, outside the assertion window below, so half one
+    # measures the schema it leaves behind rather than racing it.
+    RunRegistry(dsn=dsn).close()
+    tests_after_collapse = admin.execute("SELECT count(*) FROM tests").fetchone()[0]
+    assert tests_after_collapse == 1
+
+    # Half one: a fully-upgraded schema has nothing left to upgrade, so
+    # nothing to say — and the collapse, having already run once above,
+    # does not run again or add another row. caplog accumulates for the
+    # whole test regardless of at_level()'s own window, so the collapse's
+    # own notice just above has to be cleared here or it reads as noise
+    # from THIS construction instead of the previous one.
+    caplog.clear()
     with caplog.at_level("WARNING", logger="src.backend.core.run_registry"):
         reg2 = RunRegistry(dsn=dsn)
     reg2.close()
     assert _registry_warnings(caplog) == []
+    assert admin.execute("SELECT count(*) FROM tests").fetchone()[0] == tests_after_collapse
 
     # Half two: give it something to say, and it still says it.
     admin.execute(f"SET search_path TO {schema}")
@@ -271,9 +299,13 @@ def test_concurrent_add_constraint_race_is_swallowed_not_raised(scratch, caplog)
     admin.execute(f"SET search_path TO {schema}")
     admin.execute("ALTER TABLE test_runs DROP CONSTRAINT fk_test_runs_group")
 
-    fk_guard_ddl = _SCHEMA_DDL[-1]
-    assert "fk_test_runs_group" in fk_guard_ddl, (
-        "_SCHEMA_DDL's last statement changed — this test targets the wrong one")
+    # Selected by CONTENT, not by position: statements are appended to the
+    # tuple as the schema grows, and _SCHEMA_DDL[-1] silently became the
+    # tests/test_versions block on 2026-09-07.
+    fk_guards = [d for d in _SCHEMA_DDL if "fk_test_runs_group" in d]
+    assert len(fk_guards) == 1, (
+        "expected exactly one _SCHEMA_DDL statement naming fk_test_runs_group")
+    fk_guard_ddl = fk_guards[0]
 
     t1 = psycopg.connect(dsn, autocommit=False)
     t1.execute("BEGIN")

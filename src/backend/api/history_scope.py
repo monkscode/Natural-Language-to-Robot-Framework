@@ -94,3 +94,47 @@ def history_scope(user: dict | None) -> HistoryScope:
         None if is_org_admin else user["user_id"], folder_org_id,
         caller_user_id, admin, folder_org_id, is_org_admin,
     )
+
+
+def may_move_test(scope: HistoryScope, test_org_id: str | None,
+                  test_user_id: str | None) -> bool:
+    """The three terms PUT /api/tests/assignments enforces, in one place.
+
+    The caller has a concrete org, the TEST's org equals it, and the caller
+    is an org_admin or the test's own author. Written once because three
+    surfaces now ask it -- can_move on every Tests row, the update gate on
+    POST /api/tests/{test_id}/versions, and can_move on a HISTORY row whose
+    run has a test -- and copies of an authorization rule are rules that can
+    drift.
+
+    It lives here rather than in tests_endpoints because history_endpoints
+    needs it too and tests_endpoints already imports FROM history_endpoints:
+    the obvious import is a cycle. Both modules already import this one.
+
+    On a history row it is NECESSARY BUT NOT SUFFICIENT, and that is not a
+    quirk of the flag -- it is assign_runs' shape. That method refuses the
+    whole call when a named run's test is not the caller's to file, AND its
+    parent UPDATE still matches on the RUN's own authority, so a batch whose
+    rowcount comes up short rolls back. A test's author who does not own a
+    peer's result of it is refused by the second half alone. See the can_move
+    computations in history_endpoints for the conjunction that mirrors it.
+
+    The folder_org_id term is load-bearing, not defensive. Without it a
+    caller with no org compares None to an ORG-LESS test's None and reads
+    True on a write the server refuses, which is the same "two NULLs must
+    not compare equal" trap _attach_test's authorship gate needs its own
+    `user_id is not None` for. It also excludes the token-less dev caller,
+    whose mutations are 403 by design (groups_endpoints' module docstring).
+
+    Truthiness, not `is not None`, so that "the caller has a concrete org" is
+    ONE test everywhere it is asked rather than three that merely agree
+    today: _require_org_scope refuses on `if not org_id` and history_scope
+    qualifies is_org_admin on bool(folder_org_id). No login path mints
+    org_id="" -- _token_payload reads it from `orgs[0]` or omits it entirely
+    -- so this closes a divergence in the claim above rather than a reachable
+    defect."""
+    return (
+        bool(scope.folder_org_id)
+        and test_org_id == scope.folder_org_id
+        and (scope.is_org_admin or test_user_id == scope.caller_user_id)
+    )

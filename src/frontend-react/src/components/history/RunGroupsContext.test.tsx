@@ -19,7 +19,7 @@ const { api } = await import('@/lib/api')
 const apiMock = vi.mocked(api)
 
 const group = (name: string): RunGroup => ({
-  group_id: `id-${name}`, name, created_by: 'u1', run_count: 0,
+  group_id: `id-${name}`, name, created_by: 'u1', run_count: 0, test_count: 0,
 })
 
 /** Renders the live filter and hands the test a way to set it. */
@@ -71,6 +71,20 @@ describe('RunGroupsContext', () => {
     await act(async () => { setFilter('id-Deleted') })
 
     expect(screen.getByTestId('filter').textContent).toBe('id-Deleted')
+  })
+
+  it('hands the Tests page its own Ungrouped count and its filing call', async () => {
+    // The provider re-lists useGroups' fields by hand, so a field it forgets
+    // reaches no page at all — and the pages mock this hook, so only a test
+    // of the provider itself can see that.
+    apiMock.mockResolvedValue({ groups: [], ungrouped_count: 5, ungrouped_test_count: 4 })
+    let seen: ReturnType<typeof useRunGroups> | null = null
+    function Grab() { seen = useRunGroups(); return null }
+    render(<RunGroupsProvider><Grab /></RunGroupsProvider>)
+
+    await waitFor(() => expect(seen?.loaded).toBe(true))
+    expect(seen!.ungroupedTestCount).toBe(4)
+    expect(typeof seen!.assignTests).toBe('function')
   })
 
   it('never treats "ungrouped" as dangling', async () => {

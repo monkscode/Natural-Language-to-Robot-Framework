@@ -11,6 +11,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
+from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
@@ -1029,21 +1030,80 @@ class _GenerationError(Exception):
 
 def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
                 robot_code: str | None = None, rerun_of: str | None = None,
-                error_message: str | None = None, group_id: str | None = None) -> None:
+                error_message: str | None = None, group_id: str | None = None,
+                is_platform_admin: bool = False, test_id: str | None = None,
+                test_version_id: str | None = None,
+                version_reason: str | None = None) -> None:
     """History bookkeeping (test_runs row) — must never break the run pipeline.
 
     get_run_registry() itself can raise on first use when Postgres is down, so
     the guard sits here rather than relying on the registry's internal
     swallowing alone.
+
+    is_platform_admin becomes test_runs.ran_as_platform_admin (owner
+    decision D7), write-once on the row that CREATED it. Every call site
+    in this module passes an is_validated_admin result computed once per
+    REQUEST rather than once per call — but from two different places.
+    _compute_is_platform_admin below serves the generate paths
+    (stream_generate_only, stream_generate_and_run, and
+    stream_execute_only when nobody handed one in); the two re-run routes
+    pass history_scope()'s own flag straight through from
+    api/endpoints.py and never reach _compute_is_platform_admin at all.
+
+    test_id/test_version_id/version_reason NAME the test this run belongs to,
+    instead of letting the registry derive one (P2 Task 7). Only the
+    regeneration and Tests-page-Run paths pass them; RunRegistry._attach_test's
+    first branch is the authority on what each combination does.
     """
     try:
         get_run_registry().record_start(
             run_id, user, user_query, status,
             robot_code=robot_code, rerun_of=rerun_of,
             error_message=error_message, group_id=group_id,
+            is_platform_admin=is_platform_admin, test_id=test_id,
+            test_version_id=test_version_id, version_reason=version_reason,
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
+
+
+def _read_run_version(run_id: str) -> tuple[str | None, int | None]:
+    """The test and version number a run ended up attached to.
+
+    (None, None) on an unattached run, an unknown one, or any failure — the
+    caller cannot tell those apart and does not try to: its message says the
+    version could not be CONFIRMED, never that it was not saved.
+    """
+    try:
+        return get_run_registry().get_run_version(run_id)
+    except Exception as e:
+        logging.error(f"[RUN_REGISTRY] version read-back failed for {run_id}: {e}")
+        return (None, None)
+
+
+async def _compute_is_platform_admin(user: dict | None) -> bool:
+    """The caller's platform-admin authority, computed ONCE per request.
+
+    is_validated_admin only re-reads the users table when the token's own
+    role claim is already "admin" — every other caller returns False before
+    that read runs. It still costs a DB round trip for exactly the callers
+    who could be flagged, so every entry point below calls this once and
+    threads the result to every _record_run call the request makes, rather
+    than re-deriving it per write.
+
+    Never raises: a failure here must not break the run pipeline, the same
+    rule _record_run itself lives by, so it degrades to False (non-admin)
+    exactly as an unresolved caller would — is_validated_admin already fails
+    closed internally, but the thread hop is guarded here too, the same
+    reasoning _make_start_recorder's own try/except uses around its
+    to_thread call.
+    """
+    try:
+        return await asyncio.to_thread(is_validated_admin, user)
+    except Exception as e:
+        logging.error(
+            "[RUN_REGISTRY] platform-admin check failed; treating as non-admin: %s", e)
+        return False
 
 
 _ERROR_MESSAGE_MAX_CHARS = 2000
@@ -1061,7 +1121,9 @@ def _store_failure(result_store: dict, event: dict) -> None:
         result_store["workflow_id"] = event["workflow_id"]
 
 
-def _make_start_recorder(user: dict | None, user_query: str | None):
+def _make_start_recorder(user: dict | None, user_query: str | None,
+                         is_platform_admin: bool = False,
+                         test_id: str | None = None):
     """Return an async callback that opens a test_runs row at status 'running'.
 
     Without an opening row, a run that dies before either terminal path — the
@@ -1073,6 +1135,14 @@ def _make_start_recorder(user: dict | None, user_query: str | None):
     'running' is not a new status: the execute path already writes it. The
     terminal upsert overwrites it, and record_start COALESCEs ownership and
     query, so the later write fills in anything missing here.
+
+    is_platform_admin is the caller's ONE _compute_is_platform_admin result
+    for this request — passed straight through to _record_run, not
+    recomputed.
+
+    test_id names the test a REGENERATION is regenerating, so the opening row
+    attaches to it. Deliberately without a version_reason: this write carries
+    no code, so it can only ever attach, never append (spec case 10 / D8 (b)).
     """
     async def _record(workflow_id: str) -> None:
         try:
@@ -1081,7 +1151,9 @@ def _make_start_recorder(user: dict | None, user_query: str | None):
             logging.warning("[RUN_REGISTRY] non-UUID workflow_id at start; run not opened")
             return
         try:
-            await asyncio.to_thread(_record_run, run_id, user, user_query, "running")
+            await asyncio.to_thread(_record_run, run_id, user, user_query, "running",
+                                    is_platform_admin=is_platform_admin,
+                                    test_id=test_id)
         except Exception as e:
             # _record_run swallows registry errors itself; this guards the hop
             # into the thread as well. Opening a row is bookkeeping — it must
@@ -1092,7 +1164,9 @@ def _make_start_recorder(user: dict | None, user_query: str | None):
 
 
 def _record_generation_failure(result_store: dict, user: dict | None,
-                               user_query: str | None) -> None:
+                               user_query: str | None,
+                               is_platform_admin: bool = False,
+                               test_id: str | None = None) -> None:
     """Write a test_runs row for a run that never produced code.
 
     Without this a generation failure leaves no trace anywhere: the metrics
@@ -1101,6 +1175,15 @@ def _record_generation_failure(result_store: dict, user: dict | None,
 
     Status 'error' already exists in test_runs and in the SPA's RunStatus and
     filter list, so this adds no vocabulary and needs no UI change.
+
+    is_platform_admin is the caller's ONE _compute_is_platform_admin result
+    for this request — passed straight through to _record_run, not
+    recomputed.
+
+    test_id attaches a failed REGENERATION to the test it was regenerating
+    (owner decision D8 (b), spec case 10): no version is written and
+    current_version does not move, but the failure is visible on the test
+    rather than lost. A brand-new generation that fails still names no test.
     """
     wf_id = result_store.get("workflow_id")
     if not wf_id:
@@ -1112,7 +1195,8 @@ def _record_generation_failure(result_store: dict, user: dict | None,
         logging.warning("[RUN_REGISTRY] non-UUID workflow_id on failure; run not recorded")
         return
     _record_run(run_id, user, user_query, status="error",
-                error_message=result_store.get("error_message"))
+                error_message=result_store.get("error_message"),
+                is_platform_admin=is_platform_admin, test_id=test_id)
 
 
 def _set_run_status(run_id: str, status: str) -> None:
@@ -1268,7 +1352,10 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         logging.error(f"Failed to save test code: {e}")
         _safe_evict_hint_metadata(run_id)
         await asyncio.to_thread(_set_run_status, run_id, "error")
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {redact_secrets(str(e))}'})}\n\n"
+        # run_id here for the same reason it is on the first event below:
+        # this is the only execution event that can arrive BEFORE it, so a
+        # client that never sees another one still learns which run failed.
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': f'Failed to save test code: {redact_secrets(str(e))}'})}\n\n"
         return
 
     try:
@@ -1283,7 +1370,16 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # first event ahead of image provisioning, so exec_s now covers it; on a
         # warm machine ensure_image is a local image lookup, so the difference is
         # sub-second and the bench is unaffected.
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment (on the first run this downloads the test runner image, which can take a few minutes)...'})}\n\n"
+        #
+        # run_id rides on this event because it is the FIRST one execution
+        # can yield, and /execute-test is an SSE stream with no response body
+        # for the id to come back in — so without it the SPA cannot learn
+        # which run it just started and reloads the whole list to guess
+        # (owner ruling R7-5). A key on an existing event rather than a new
+        # event: both SPA clients read fields by name off each event and
+        # ignore ones they do not know, and no test asserts an exact
+        # execution-event dict.
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'run_id': run_id, 'message': 'Preparing execution environment (on the first run this downloads the test runner image, which can take a few minutes)...'})}\n\n"
         await asyncio.to_thread(runner_exec_client.ensure_image)
 
         logging.info(f"🚀 Executing test: {test_filename}")
@@ -1356,8 +1452,51 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': detail})}\n\n"
 
 
+async def _confirm_version(
+    run_id: str | None, user: dict | None, user_query: str | None,
+    robot_code: str | None, is_platform_admin: bool,
+    test_id: str | None, version_reason: str | None,
+) -> str:
+    """The regeneration stream's terminal event, built from a READ-BACK.
+
+    Generation's own 'complete' event says the LLM produced code, which is a
+    different fact from "version n+1 exists". record_start swallows every
+    failure — a lost connection, a lock timeout, and in particular a deadlock
+    with either folder-move route, because no lock order avoids both
+    (measured) — so the only honest way to report success is to go and look.
+
+    Exactly ONE retry when nothing is found, and it is safe to repeat: the
+    registry's named-test branch never appends to a run whose row already
+    names a version, so a retry after a write that actually succeeded is a
+    no-op. It is a NEW _record_run call site, so it passes is_platform_admin
+    like the other five — the retry can be the write that CREATES the row
+    when the first was lost outright, and that column is write-once on
+    whichever write does.
+
+    When the second read-back still finds nothing, the event says the version
+    could not be CONFIRMED. This function cannot tell "it was not saved" from
+    "I could not check" — a read failure answers (None, None) exactly like a
+    missing row — and telling someone their work was lost when it may be in
+    the database is the one wrong answer available here.
+    """
+    attached = n = None
+    if run_id:
+        attached, n = await asyncio.to_thread(_read_run_version, run_id)
+        if n is None:
+            await asyncio.to_thread(
+                _record_run, run_id, user, user_query, status="generated",
+                robot_code=robot_code, is_platform_admin=is_platform_admin,
+                test_id=test_id, version_reason=version_reason)
+            attached, n = await asyncio.to_thread(_read_run_version, run_id)
+    if attached is None or n is None:
+        return f"data: {json.dumps({'stage': 'version', 'status': 'error', 'run_id': run_id, 'message': 'Generation finished, but the new version could not be confirmed. Reload the test list to see whether it is there.'})}\n\n"
+    return f"data: {json.dumps({'stage': 'version', 'status': 'complete', 'test_id': attached, 'n': n, 'run_id': run_id})}\n\n"
+
+
 async def stream_generate_only(
-    user_query: str, model_provider: str, model_name: str, user: dict | None = None
+    user_query: str, model_provider: str, model_name: str, user: dict | None = None,
+    regenerate_test_id: str | None = None, version_reason: str | None = None,
+    report_version: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Generates Robot Framework test code without executing it.
@@ -1365,6 +1504,25 @@ async def stream_generate_only(
 
     user: the authenticated requester (from require_user) — recorded on the
     test_runs history row so regular users can see their own runs.
+
+    regenerate_test_id/version_reason/report_version are POST
+    /api/tests/{test_id}/versions' three parameters, and POST /generate-test
+    passes none of them, so its behaviour is unchanged.
+
+    regenerate_test_id reaches ALL THREE writes this function makes — the
+    opening row, the failure row and the success row — because a
+    regeneration that dies must still be visible on the test it was
+    regenerating (spec case 10), and one that succeeds must append to that
+    test rather than mint a second one. version_reason rides on the SUCCESS
+    write alone; it is the label spec section 7.4 records and the route
+    computes it when the request arrives, never here.
+
+    report_version ends the stream with a `stage: "version"` event built from
+    a READ-BACK of what actually landed, because record_start swallows every
+    failure it meets — a deadlock with either folder-move route included, and
+    no lock order avoids both (measured). It is set for `mode: "new_test"`
+    too, where regenerate_test_id is None and the read-back names the test
+    that was MINTED.
     """
     if not _acquire_workflow_slot():
         yield _capacity_error_sse("generation")
@@ -1376,6 +1534,8 @@ async def stream_generate_only(
     # while the LLM thread is still running.
     releaser = _SlotReleaser()
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
         q = Queue()
         org_id = user.get("org_id") if user else None
         user_id = user.get("user_id") if user else None
@@ -1384,24 +1544,40 @@ async def stream_generate_only(
         try:
             async for sse in _drain_generation_queue(
                     workflow_thread, q, result_store,
-                    on_workflow_id=_make_start_recorder(user, user_query)):
+                    on_workflow_id=_make_start_recorder(
+                        user, user_query, is_platform_admin,
+                        test_id=regenerate_test_id)):
                 yield sse
         except _GenerationError:
-            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
+            await asyncio.to_thread(
+                _record_generation_failure, result_store, user, user_query,
+                is_platform_admin, regenerate_test_id)
+            # No version event here, deliberately: nothing was generated, so
+            # there is nothing to confirm and generation's own error event is
+            # the client's last word (spec case 10 / 37 (b)).
             return
 
         # History row: a generate-only run is terminal at 'generated' until the
         # user executes it (execute-test upserts the same id to 'running').
         wf_id = result_store.get("workflow_id")
+        run_id = None
         if wf_id:
             try:
-                await asyncio.to_thread(
-                    _record_run, str(uuid.UUID(wf_id)), user, user_query, status="generated",
-                    robot_code=result_store.get("robot_code"))
+                run_id = str(uuid.UUID(wf_id))
             except ValueError:
                 logging.warning("[RUN_REGISTRY] non-UUID workflow_id from generation; run not recorded")
+        if run_id:
+            await asyncio.to_thread(
+                _record_run, run_id, user, user_query, status="generated",
+                robot_code=result_store.get("robot_code"),
+                is_platform_admin=is_platform_admin,
+                test_id=regenerate_test_id, version_reason=version_reason)
 
         logging.info("✅ Test generation complete. Ready for user review.")
+        if report_version:
+            yield await _confirm_version(
+                run_id, user, user_query, result_store.get("robot_code"),
+                is_platform_admin, regenerate_test_id, version_reason)
     finally:
         releaser.done()  # Generator's share of the latch
 
@@ -1409,7 +1585,8 @@ async def stream_generate_only(
 async def stream_execute_only(
     robot_code: str, user_query: str = None, workflow_id: str = None, user: dict | None = None,
     history_query: str | None = None, rerun_of: str | None = None,
-    group_id: str | None = None
+    group_id: str | None = None, is_platform_admin: bool | None = None,
+    test_id: str | None = None, test_version_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Executes provided Robot Framework test code in Docker container.
@@ -1430,12 +1607,33 @@ async def stream_execute_only(
             route feedback to the run that owns the learning record.
         group_id: The folder of the run this one was cloned from — a re-run
             stays where its source was filed until the user moves it. Set only
-            by the rerun path. record_start re-checks it against the ORG of the
-            row it is about to write and drops it if the folder is not that
-            org's, so a folder a platform admin could see but the new run's
-            org could not never reaches the row. Org only — there is no owner
-            term in that check, and there should not be: D5 lets any org member
-            re-run a published test, and their re-run stays in the folder.
+            by the rerun path. record_start re-checks it against the CALLER'S
+            org — the token's, or the one _lookup_org_id derives — and drops
+            it if the folder is not that org's, so a folder a platform admin
+            could see but the caller's org could not never reaches the row.
+            That is not always the org the row ends up carrying: the check
+            runs before _attach_test, which can replace it with the TEST'S
+            org (D6). See _fileable_group_id and delete_group in
+            core/run_registry.py for the gap that leaves. Org only — there is
+            no owner term in that check, and there should not be: D5 lets any
+            org member re-run a published test, and their re-run stays in the
+            folder.
+        is_platform_admin: Pre-computed platform-admin flag. Both
+            re-run routes in api/endpoints.py — _rerun_from_history
+            (History's "Run again") and _run_current_version (the Tests
+            page's Run) — already hold this from their own
+            history_scope() call and pass it here instead of paying for
+            a second one. Only the third caller, execute_test_only's
+            paste-and-execute path, leaves it None and pays for the
+            computation below.
+        test_id/test_version_id: The test and the exact version being run,
+            set only by POST /execute-test's test_id path (the Tests page's
+            Run). The version is named rather than derived so a run that
+            starts just before a regeneration lands keeps the version it
+            actually executed (spec case 14), and the registry checks the
+            PAIR before storing it. No group_id goes with them: a NULL folder
+            column on the run can never go stale, and the run inherits its
+            test's folder by join.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
@@ -1456,6 +1654,13 @@ async def stream_execute_only(
     # (happens when workflow_id is present but fails UUID validation).
     run_id = None
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        # Both re-run routes already have it from history_scope and pass
+        # it in above; only execute_test_only's paste-and-execute path
+        # leaves this None and pays for the computation here instead.
+        if is_platform_admin is None:
+            is_platform_admin = await _compute_is_platform_admin(user)
+
         # Validate or generate the run ID.
         # workflow_id comes from an untrusted request body; if present it must be a
         # canonical UUID4 string so it is safe to use as a directory name.
@@ -1486,7 +1691,9 @@ async def stream_execute_only(
         # owner/query attribution is write-once.
         await asyncio.to_thread(
             _record_run, run_id, user, history_query or user_query, status="running",
-            robot_code=robot_code, rerun_of=rerun_of, group_id=group_id)
+            robot_code=robot_code, rerun_of=rerun_of, group_id=group_id,
+            is_platform_admin=is_platform_admin, test_id=test_id,
+            test_version_id=test_version_id)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
@@ -1518,6 +1725,8 @@ async def stream_generate_and_run(
     # (happens when UUID validation fails or generation errors before reaching execution).
     run_id = None
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
         q = Queue()
         org_id = user.get("org_id") if user else None
         user_id = user.get("user_id") if user else None
@@ -1527,10 +1736,11 @@ async def stream_generate_and_run(
         try:
             async for sse in _drain_generation_queue(
                     workflow_thread, q, result_store,
-                    on_workflow_id=_make_start_recorder(user, user_query)):
+                    on_workflow_id=_make_start_recorder(user, user_query, is_platform_admin)):
                 yield sse
         except _GenerationError:
-            await asyncio.to_thread(_record_generation_failure, result_store, user, user_query)
+            await asyncio.to_thread(
+                _record_generation_failure, result_store, user, user_query, is_platform_admin)
             return
 
         robot_code = result_store["robot_code"]
@@ -1550,7 +1760,8 @@ async def stream_generate_and_run(
 
         # History row: generation is done and Docker execution starts now.
         await asyncio.to_thread(
-            _record_run, run_id, user, user_query, status="running", robot_code=robot_code)
+            _record_run, run_id, user, user_query, status="running", robot_code=robot_code,
+            is_platform_admin=is_platform_admin)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse

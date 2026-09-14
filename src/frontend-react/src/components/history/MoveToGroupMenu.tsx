@@ -1,15 +1,16 @@
 /**
- * "Move to group…" dropdown — the single filing control used by the Test Runs
- * row actions, the detail drawer, and the bulk-select toolbar. Lists the org's
- * folders (check-marking the run's current one), offers Remove from group, and
- * can create-and-move in one gesture via the New group… item.
+ * "Move to group…" dropdown — the single filing control, used by Activity's
+ * row actions, detail drawer and bulk-select toolbar, and by the Tests page's
+ * row actions. Lists the org's folders (check-marking the current one),
+ * offers Remove from group, and can create-and-move in one gesture via the
+ * New group… item.
  *
  * Filing a run into a folder is what publishes it to the org; Remove from
  * group takes it back to its author alone. The copy says so, because the
  * consequence is invisible otherwise.
  *
- * The row and drawer instances are only rendered when can_move on the history
- * row says so, but the bulk-select toolbar instance renders for any signed-in
+ * The row and drawer instances are only rendered when the row's can_move
+ * says so, but the bulk-select toolbar instance renders for any signed-in
  * user regardless of can_move — a folder deleted out from under the selection
  * 404s there, and the page already handles that path via setMoveError.
  */
@@ -37,10 +38,14 @@ interface Props {
   onCreateGroup: (name: string) => Promise<RunGroup>
   /** The button that opens the menu (wrapped with asChild). */
   trigger: ReactNode
+  /** What is being filed, for the New-group dialog's sentence: runs on
+   *  Activity (the default), tests on the Tests page. */
+  noun?: 'runs' | 'tests'
 }
 
 export function MoveToGroupMenu({
   groups, currentGroupId, showRemove, onMove, onCreateGroup, trigger,
+  noun = 'runs',
 }: Props) {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
@@ -125,12 +130,22 @@ export function MoveToGroupMenu({
       </DropdownMenu>
 
       <Dialog open={creating} onOpenChange={o => { if (!o) { setCreating(false); setBusy(false) } }}>
-        <DialogContent className="sm:max-w-sm" onCloseAutoFocus={returnFocusToTrigger}>
+        <DialogContent
+          className="sm:max-w-sm"
+          onCloseAutoFocus={returnFocusToTrigger}
+          // The same guard, and for the same reason, as the menu above: this
+          // dialog is portalled to <body> too, but it is a SIBLING in the
+          // React tree, so a click inside it bubbles to whatever wraps this
+          // menu. Measured without it: Cancel, Create & move and the close
+          // button each reached the History row's onClick and opened that
+          // run's drawer behind the dialog the user was dismissing.
+          onClick={e => e.stopPropagation()}
+        >
           <DialogHeader>
             <DialogTitle>New group</DialogTitle>
             <DialogDescription>
-              The selected runs move into it right away, and everyone in your
-              organization can see them there.
+              The selected {noun} move into it right away, and everyone in
+              your organization can see them there.
             </DialogDescription>
           </DialogHeader>
           <form

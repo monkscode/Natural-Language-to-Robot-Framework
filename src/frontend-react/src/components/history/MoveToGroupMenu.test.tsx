@@ -2,15 +2,17 @@
  * MoveToGroupMenu — the one filing control shared by the history row, the
  * detail drawer, and the bulk-select toolbar.
  *
- * Two things are load-bearing per the component's own docstring: the
- * `onClick={e => e.stopPropagation()}` guard on DropdownMenuContent (without
- * it, clicking an item bubbles through the REACT tree — which portals do NOT
- * escape — to whatever the caller wrapped this menu in, e.g. a history row's
- * onClick, opening that row's drawer behind the menu the user was actually
- * using), and "Remove from group" being offered under EITHER currentGroupId
- * OR showRemove (the bulk-select toolbar has no single currentGroupId but
- * still needs the control, per the `showRemove` prop comment). This file
- * pins both, plus the create-and-move flow and its error path.
+ * Three things are load-bearing: the `onClick={e => e.stopPropagation()}`
+ * guard on DropdownMenuContent (without it, clicking an item bubbles through
+ * the REACT tree — which portals do NOT escape — to whatever the caller
+ * wrapped this menu in, e.g. a history row's onClick, opening that row's
+ * drawer behind the menu the user was actually using); the SAME guard on the
+ * New-group DialogContent, a sibling in that same subtree, which had none
+ * until Task 11 and so popped the row's drawer on every dismiss route; and
+ * "Remove from group" being offered under EITHER currentGroupId OR showRemove
+ * (the bulk-select toolbar has no single currentGroupId but still needs the
+ * control, per the `showRemove` prop comment). This file pins all three, plus
+ * the create-and-move flow and its error path.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -20,8 +22,8 @@ import type { RunGroup } from './useGroups'
 
 afterEach(() => vi.resetAllMocks())
 
-const CHECKOUT: RunGroup = { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 3 }
-const REGRESSION: RunGroup = { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 1 }
+const CHECKOUT: RunGroup = { group_id: 'g-1', name: 'Checkout', created_by: 'u1', run_count: 3, test_count: 1 }
+const REGRESSION: RunGroup = { group_id: 'g-2', name: 'Regression', created_by: 'u1', run_count: 1, test_count: 1 }
 
 function renderMenu(overrides: Partial<React.ComponentProps<typeof MoveToGroupMenu>> = {}) {
   const props: React.ComponentProps<typeof MoveToGroupMenu> = {
@@ -180,6 +182,49 @@ describe('MoveToGroupMenu — create-and-move', () => {
     expect(screen.getByPlaceholderText('e.g. Checkout flows')).toBeInTheDocument()
   })
 
+  // The New-group dialog is a SIBLING of the guarded DropdownMenuContent in
+  // the same React subtree, and it carried no guard of its own — so every way
+  // of dismissing it bubbled a click to whatever wraps this menu. On Activity
+  // that is the row's onClick, which opened the drawer of the run behind the
+  // dialog on Cancel, on Create & move and on the close button alike. Each
+  // route is asserted separately because they leave by three different paths:
+  // a plain handler, a form submit, and Radix's own Close.
+  describe.each([
+    ['Cancel', () => fireEvent.click(screen.getByText('Cancel'))],
+    ['Create & move', () => fireEvent.click(screen.getByText('Create & move'))],
+    ['the close button', () => fireEvent.click(screen.getByRole('button', { name: 'Close' }))],
+  ])('dismissing with %s', (_label, dismiss) => {
+    it('does not reach an ancestor click handler', async () => {
+      const ancestorClick = vi.fn()
+      const onCreateGroup = vi.fn().mockResolvedValue(
+        { group_id: 'g-3', name: 'New', created_by: 'u1', run_count: 0 },
+      )
+      render(
+        <div onClick={ancestorClick}>
+          <MoveToGroupMenu
+            groups={[CHECKOUT]}
+            currentGroupId={null}
+            onMove={vi.fn()}
+            onCreateGroup={onCreateGroup}
+            trigger={<button type="button">Open menu</button>}
+          />
+        </div>,
+      )
+      pointerDown(screen.getByText('Open menu'))
+      fireEvent.click(screen.getByText('New group…'))
+      // Named, so Create & move is actually enabled on that route — a
+      // disabled button swallows the click and would pass for free.
+      fireEvent.change(screen.getByPlaceholderText('e.g. Checkout flows'), { target: { value: 'Smoke' } })
+      ancestorClick.mockClear()
+
+      dismiss()
+
+      await waitFor(() =>
+        expect(screen.queryByPlaceholderText('e.g. Checkout flows')).not.toBeInTheDocument())
+      expect(ancestorClick).not.toHaveBeenCalled()
+    })
+  })
+
   it('closes on Cancel without creating or moving anything', () => {
     const onMove = vi.fn()
     const onCreateGroup = vi.fn()
@@ -192,5 +237,18 @@ describe('MoveToGroupMenu — create-and-move', () => {
     expect(screen.queryByPlaceholderText('e.g. Checkout flows')).not.toBeInTheDocument()
     expect(onCreateGroup).not.toHaveBeenCalled()
     expect(onMove).not.toHaveBeenCalled()
+  })
+
+  it('says runs by default, and tests when it is filing tests', () => {
+    const { unmount } = renderMenu()
+    openMenu()
+    fireEvent.click(screen.getByText('New group…'))
+    expect(screen.getByText(/The selected runs move into it right away/)).toBeInTheDocument()
+    unmount()
+
+    renderMenu({ noun: 'tests' })
+    openMenu()
+    fireEvent.click(screen.getByText('New group…'))
+    expect(screen.getByText(/The selected tests move into it right away/)).toBeInTheDocument()
   })
 })

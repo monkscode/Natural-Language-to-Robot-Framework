@@ -19,8 +19,13 @@ Environment:
 Detachment (owner requirement — bench data must never appear in History /
 metrics / pricing dashboards): after each run the runner captures evidence
 locally FIRST into bench/runs/<workflow_id>/ (metrics row, llm_traces rows,
-test_runs row, artifact dir copy), THEN deletes that run's rows from
-workflow_metrics, llm_traces and test_runs and removes the artifact run dir.
+test_runs row, tests + test_versions rows, artifact dir copy), THEN deletes
+that run's rows from workflow_metrics, llm_traces and test_runs and
+removes the artifact run dir. The run's TEST goes only if no test_runs
+row still points at it (detach_run's NOT EXISTS), and its versions go
+with it by cascade — so a bench-created test SURVIVES detachment for
+as long as a user's re-run holds it, because deleting it would cascade
+that user's run away too.
 Capture failure → nothing is deleted, a loud warning is printed. audit_log
 rows are deliberately kept (append-only audit trail). Assumes the local
 artifact store (dev stack) — S3 mode is out of scope for the bench.
@@ -295,6 +300,12 @@ def capture_evidence(conn, workflow_id: str) -> bool:
                 "SELECT * FROM llm_traces WHERE workflow_id = %s",
             "test_runs.json":
                 "SELECT * FROM test_runs WHERE run_id = %s",
+            "tests.json":
+                "SELECT t.* FROM tests t JOIN test_runs r"
+                " ON r.test_id = t.test_id WHERE r.run_id = %s",
+            "test_versions.json":
+                "SELECT v.* FROM test_versions v JOIN test_runs r"
+                " ON r.test_id = v.test_id WHERE r.run_id = %s",
         }
         for filename, sql in captures.items():
             rows = _fetch_rows(conn, sql, workflow_id)
@@ -312,12 +323,41 @@ def capture_evidence(conn, workflow_id: str) -> bool:
 
 def detach_run(conn, workflow_id: str) -> None:
     """Delete the run's rows + artifacts. audit_log rows are kept on purpose."""
+    # The run's test must be read BEFORE anything is deleted: test_runs.test_id
+    # is ON DELETE CASCADE from tests, so removing the run row first loses the
+    # only pointer to the test and would strand it on the Tests page.
+    row = conn.execute(
+        "SELECT test_id FROM test_runs WHERE run_id = %s",
+        (workflow_id,)).fetchone()
+    test_id = row["test_id"] if row else None
+
     for table, col in (("workflow_metrics", "workflow_id"),
                        ("llm_traces", "workflow_id"),
                        ("test_runs", "run_id")):
         cur = conn.execute(
             f"DELETE FROM {table} WHERE {col} = %s", (workflow_id,))
         _log(f"detached {cur.rowcount} row(s) from {table}")
+
+    if test_id is not None:
+        # Cascades to test_versions -- and, through fk_test_runs_test, to
+        # every test_runs row still pointing at this test. That FK is
+        # ON DELETE CASCADE on the REFERENCING side, so deletion ORDER
+        # protects nothing: our own run row being gone already does not stop
+        # the cascade reaching someone else's. The NOT EXISTS is what makes
+        # this safe, by refusing to delete a test another run still uses.
+        #
+        # Two runs DO share a test today wherever one is a re-run of the
+        # other: _attach_test's rerun branch looks the source up and returns
+        # its test_id. What keeps the bench clear of that is only that the
+        # bench never sets rerun_of, so no bench run is ever the sharer and
+        # this deletes exactly as before. That is a property of the bench,
+        # not of the schema, and it is NOT what makes the delete safe --
+        # the NOT EXISTS is. P2 makes sharing ordinary beyond re-runs.
+        cur = conn.execute(
+            "DELETE FROM tests t WHERE t.test_id = %s"
+            " AND NOT EXISTS (SELECT 1 FROM test_runs r"
+            "                  WHERE r.test_id = t.test_id)", (test_id,))
+        _log(f"detached {cur.rowcount} row(s) from tests")
     run_dir = STAGING_ROOT / workflow_id
     if run_dir.exists():
         try:

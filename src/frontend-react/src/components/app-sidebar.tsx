@@ -27,6 +27,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { BuildBadge } from '@/components/build-badge'
 import {
   Zap,
+  FlaskConical,
   History,
   BarChart2,
   Brain,
@@ -64,13 +65,16 @@ interface NavItem {
   /** Gates on canViewLearning instead of admin/orgAdmin — see the
    * can_view_learning comment on AuthContext.tsx's User interface. */
   viewLearning?: boolean
-  /** Renders the expandable run-group quick-access list under this item. */
-  groups?: boolean
+  /** Renders the expandable folder quick-access list under this item, each
+   *  folder counted by this field: the page's own unit — tests on Tests,
+   *  runs on Activity. */
+  groups?: 'test_count' | 'run_count'
 }
 
 export const NAV_PLATFORM: NavItem[] = [
   { title: 'Generate', url: '/generate', icon: Zap, admin: false },
-  { title: 'Test Runs', url: '/history', icon: History, admin: false, groups: true },
+  { title: 'Tests', url: '/tests', icon: FlaskConical, admin: false, groups: 'test_count' },
+  { title: 'Activity', url: '/history', icon: History, admin: false, groups: 'run_count' },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
   { title: 'Learning', url: '/learning', icon: Brain, admin: false, viewLearning: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
@@ -184,20 +188,25 @@ function NavUser() {
   )
 }
 
-/* ── Test Runs + its run-group quick access ──
+/* ── Tests or Activity + its folder quick access ──
  *
  * The row keeps its normal behaviour: the label navigates to the page. The
  * chevron beside it is a separate control that expands the user's groups, so
- * jumping straight to one group's runs takes a single click from anywhere in
- * the app.
+ * jumping straight to one group's tests or runs takes a single click from
+ * anywhere in the app.
  *
  * The list is read-only on purpose — creating, renaming and deleting groups
  * all live on the page itself. A nav sidebar answers "where do I go", and
  * mixing management controls into it would give those actions two homes.
  *
- * The active group comes from RunGroupsContext, the same value the page's chip
- * row writes, so picking a group here or there always agrees. */
-function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) {
+ * The active group comes from RunGroupsContext, the same value both pages'
+ * chip rows write, so picking a group here or there always agrees — and it is
+ * ONE filter, so a folder picked for Tests also scopes Activity. */
+function GroupsNavItem({ item, countField, pathname }: {
+  item: NavItem
+  countField: NonNullable<NavItem['groups']>
+  pathname: string
+}) {
   const navigate = useNavigate()
   const {
     groups, error: groupsError, loaded: groupsLoaded, groupFilter, setGroupFilter,
@@ -207,10 +216,13 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
   // Reveal the active group the way a file tree opens to the selected file:
   // when a group is chosen on the PAGE, the sidebar expands to show where you
   // are. Keyed on the filter alone so a background refresh of the group list
-  // never re-opens a list the user deliberately collapsed.
+  // never re-opens a list the user deliberately collapsed. Only under the
+  // page the user is ON: the filter is shared, and revealing it under both
+  // entries would stack two identical lists.
+  const onThisPage = pathname === item.url
   useEffect(() => {
-    if (groupFilter && groupFilter !== 'ungrouped') setOpen(true)
-  }, [groupFilter])
+    if (onThisPage && groupFilter && groupFilter !== 'ungrouped') setOpen(true)
+  }, [groupFilter, onThisPage])
 
   const pick = (groupId: string) => {
     setGroupFilter(groupId)
@@ -266,7 +278,7 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
             // turns this click into how the feature gets discovered — and it
             // stays a signpost, not a second place to create them.
             <li className="px-2 py-1.5 text-xs leading-snug text-sidebar-foreground/60">
-              No groups yet — create one on Test Runs.
+              No groups yet — create one on {item.title}.
             </li>
           )}
           {groups.map(g => (
@@ -284,7 +296,7 @@ function GroupsNavItem({ item, pathname }: { item: NavItem; pathname: string }) 
                   <Folder />
                   <span className="truncate">{g.name}</span>
                   <span className="ml-auto shrink-0 text-xs tabular-nums text-sidebar-foreground/60">
-                    {g.run_count}
+                    {g[countField]}
                   </span>
                 </button>
               </SidebarMenuSubButton>
@@ -317,7 +329,7 @@ function NavGroup({ label, items, flags, pathname }: {
       <SidebarMenu>
         {visible.map(item => (
           item.groups ? (
-            <GroupsNavItem key={item.title} item={item} pathname={pathname} />
+            <GroupsNavItem key={item.title} item={item} countField={item.groups} pathname={pathname} />
           ) : (
             <SidebarMenuItem key={item.title}>
               <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
@@ -347,7 +359,9 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
-              <Link to="/generate" className="flex items-center gap-3">
+              {/* Home, not a named page: the index route decides where home
+                  is, so the logo and a sign-in land in the same place. */}
+              <Link to="/" className="flex items-center gap-3">
                 <LogoMark />
                 <span className="font-bold text-base tracking-tight">Mark 1</span>
               </Link>

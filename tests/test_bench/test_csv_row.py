@@ -166,8 +166,9 @@ class TestPhaseTimingColumns:
     def test_the_step_count_survives_as_browser_use_llm_calls(self):
         """agent_steps was the ONLY isolated browser-use step count in the CSV —
         llm_calls is total_llm_calls, which conflates crewai and browser-use
-        (workflow_service.py:737). Dropping agent_steps without this would lose
-        the step distribution the 2026-07-26 baseline records."""
+        (run_agentic_workflow sums the two, in workflow_service.py). Dropping
+        agent_steps without this would lose the step distribution the
+        2026-07-26 baseline records."""
         fields = extract_metrics_fields({"browser_use_llm_calls": 3})
         assert fields["browser_use_llm_calls"] == 3
         assert "browser_use_llm_calls" in CSV_COLUMNS

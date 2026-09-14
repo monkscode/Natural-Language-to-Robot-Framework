@@ -143,6 +143,11 @@ app.include_router(history_router, prefix="/api")
 from src.backend.api.groups_endpoints import router as groups_router
 app.include_router(groups_router, prefix="/api")
 
+# Tests — the Tests page's list of versioned tests (distinct from their
+# individual runs, which /api/history keeps listing).
+from src.backend.api.tests_endpoints import router as tests_router
+app.include_router(tests_router, prefix="/api")
+
 # Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")
@@ -229,6 +234,24 @@ async def startup_event():
             logging.info("[ORG_BACKFILL] data org_id backfill already applied; skipping")
     except Exception as e:
         logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
+
+    # Build the run registry here rather than leaving it to the first request.
+    # RunRegistry.__init__ runs _SCHEMA_DDL, which carries the one-shot
+    # test-split collapse. The backfill above is the only other thing that
+    # constructs it at startup, and run_migration_once calls that only while
+    # the data_org_id_backfill marker is unset — so on any deployment that has
+    # already completed that migration, nothing built the registry at boot and
+    # the collapse fired inside whichever request first touched History, groups
+    # or a report authorization: a schema migration inside a user request, and
+    # a bare 500 for that user if it failed. Must stay AFTER the org backfill,
+    # which is ordered where it is on purpose. Best-effort, like the migration
+    # block above: a Postgres outage must not block startup, and nothing is
+    # cached on failure, so the first request simply retries construction.
+    try:
+        from src.backend.core.run_registry import get_run_registry
+        get_run_registry()
+    except Exception as e:
+        logging.warning(f"[RUN_REGISTRY] startup construction skipped: {e}")
 
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:

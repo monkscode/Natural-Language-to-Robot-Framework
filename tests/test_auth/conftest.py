@@ -151,9 +151,12 @@ def ensure_stub_learning_tables(conn) -> None:
     below. organizations now carries a BEFORE DELETE trigger
     (org_db._ORG_DELETE_GUARD_FN_DDL) that refuses the delete while learning
     rows still name the org, and its table list also includes test_runs,
-    workflow_metrics, llm_traces and run_groups — all four of which
+    tests, workflow_metrics, llm_traces and run_groups — all FIVE of which
     auth_isolated_schema creates in auth_test via the data-plane singletons.
-    So a test that seeds a RUN and then deletes its org in a `finally` block
+    `tests` joined that list on the test/result-split branch, and it is real
+    here rather than a stub (measured: 11 columns).
+    So a test that seeds a RUN OR A TEST and then deletes its org in a
+    `finally` block
     fails with a ForeignKeyViolation raised from the teardown, which replaces
     whatever the test was actually asserting. Delete the learning/run rows
     first, then the org. Two teardowns were already fixed for exactly this

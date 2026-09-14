@@ -148,19 +148,45 @@ def list_groups(user: dict | None = Depends(require_user)):
     every mutation binds. Before that, /api/groups answered with every org's
     folder names while every write answered 404 for exactly those folders.
 
-    run_count is the folder's WHOLE contents, not the caller's slice of it —
-    a folder belongs to the org, so its count does too. Scoping it per user
-    was what put a member's chip at 1 beside a folder holding 2.
+    run_count is the folder's contents, not the caller's slice of them — a
+    folder belongs to the org, so its count does too. Scoping it per user
+    was what put a member's chip at 1 beside a folder holding 2. It does
+    leave out whatever the table beneath it leaves out, such as a run nobody
+    owns, which only a platform admin's chip counts, because a chip must
+    equal its table.
+
+    Each folder also carries test_count since the 2026-09-07 split: how many
+    TESTS are filed there, beside run_count's tally of RESULTS. Purely
+    additive — run_count keeps its name and its meaning — and passed straight
+    through from the registry, whose list_groups docstring is the authority on
+    how that subquery is scoped: by the same run scope and owned-row rule as
+    run_count.
+
+    ungrouped_test_count is that same split applied to the Ungrouped chip:
+    count_ungrouped_tests, called with the identical scope args as
+    count_ungrouped below, so the two chips describe the same caller's view
+    of results and tests respectively. Purely additive — ungrouped_count
+    keeps its name and its meaning, a count of RESULTS.
     """
     scope = history_scope(user)
     reg = get_run_registry()
     groups = (
-        reg.list_groups(scope.folder_org_id, run_org_id=scope.org_id)
+        reg.list_groups(
+            scope.folder_org_id, run_org_id=scope.org_id,
+            # The same disjunction the two chips below pass, and the same one
+            # /api/history passes: a chip must count exactly what the table
+            # beneath it lists, and only a platform admin (or the token-less
+            # dev caller) may read a row nobody owns.
+            include_unowned=scope.is_admin or scope.caller_user_id is None)
         if scope.folder_org_id else []
     )
     return {
         "groups": groups,
         "ungrouped_count": reg.count_ungrouped(
+            scope.user_id, scope.org_id,
+            folder_org_id=scope.folder_org_id,
+            include_unowned=scope.is_admin or scope.caller_user_id is None),
+        "ungrouped_test_count": reg.count_ungrouped_tests(
             scope.user_id, scope.org_id,
             folder_org_id=scope.folder_org_id,
             include_unowned=scope.is_admin or scope.caller_user_id is None),

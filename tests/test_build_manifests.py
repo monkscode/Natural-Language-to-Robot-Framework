@@ -532,3 +532,143 @@ def test_the_sonar_workflow_rewrites_lcov_paths_to_repo_root():
     assert "exit 1" in runs, (
         "the lcov rewrite is not verified in CI; a partial rewrite would pass "
         "silently and produce a wrong coverage number rather than a failure")
+
+
+# ---------------------------------------------------------------------------
+# Token hygiene across EVERY workflow, not just the jobs named above.
+#
+# actions/checkout writes GITHUB_TOKEN into .git/config unless told not to, and
+# every later step in the job can read it off disk - including a pytest or npm
+# run of code the pull request authored. The frontend gate above was the first
+# job to switch it off; this holds every workflow to the same rule, so a new
+# job cannot quietly bring the token back.
+# ---------------------------------------------------------------------------
+
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+
+
+def _workflow_jobs() -> list[tuple[str, dict, str, dict]]:
+    """(file name, parsed workflow, job name, job) for every job in every workflow."""
+    import yaml
+    jobs = []
+    for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in (doc.get("jobs") or {}).items():
+            jobs.append((path.name, doc, job_name, job))
+    return jobs
+
+
+def _checkout_steps(job: dict) -> list[dict]:
+    return [s for s in job.get("steps") or []
+            if str(s.get("uses", "")).startswith("actions/checkout")]
+
+
+def test_no_workflow_checkout_persists_the_token():
+    checkouts = [(wf, job_name, step) for wf, _, job_name, job in _workflow_jobs()
+                 for step in _checkout_steps(job)]
+    # An empty list would pass the assertion below for the wrong reason.
+    assert checkouts, "found no actions/checkout step in .github/workflows - the scan is broken"
+    persisting = [f"{wf}:{job_name}" for wf, job_name, step in checkouts
+                  if (step.get("with") or {}).get("persist-credentials") is not False]
+    assert not persisting, (
+        f"these jobs check out with credential persistence on, leaving "
+        f"GITHUB_TOKEN in .git/config for every later step to read: {persisting}")
+
+
+def test_every_job_that_checks_out_code_declares_its_token_permissions():
+    """A job with no `permissions:` - at job or workflow level - gets whatever
+    the repository default is, and that is a setting outside this repo that
+    anyone with admin can widen to read-write. A job that checks out the tree
+    runs code from it, so its token scope must be stated here.
+
+    Scoped to checkout jobs on purpose: a job that checks nothing out (the
+    build summary) runs no repository code for a token to be exposed to.
+    """
+    checkout_jobs = [(wf, doc, job_name, job) for wf, doc, job_name, job in _workflow_jobs()
+                     if _checkout_steps(job)]
+    assert checkout_jobs, "found no job with an actions/checkout step - the scan is broken"
+    undeclared = [f"{wf}:{job_name}" for wf, doc, job_name, job in checkout_jobs
+                  if "permissions" not in job and "permissions" not in doc]
+    assert not undeclared, (
+        f"these jobs check out and run repository code with no permissions "
+        f"block, so their token scope is whatever the repo default is: {undeclared}")
+
+
+def test_no_job_is_granted_github_packages_access():
+    """`packages` scopes the token for GitHub Packages (ghcr.io). Every image
+    here goes to Docker Hub, authenticated with DOCKER_PASSWORD - REGISTRY has
+    been docker.io since build-images.yml was first written - so a `packages`
+    grant only widens what a job's token can do. If images ever move to
+    ghcr.io, grant it back on the jobs that push, and change this test.
+    """
+    granted = []
+    for wf, doc, job_name, job in _workflow_jobs():
+        # A job-level block replaces the workflow-level one; it does not merge.
+        perms = job["permissions"] if "permissions" in job else doc.get("permissions")
+        if perms == "write-all" or (isinstance(perms, dict) and "packages" in perms):
+            granted.append(f"{wf}:{job_name}")
+    assert not granted, (
+        f"these jobs grant the token GitHub Packages access that nothing in "
+        f"this repo publishes with: {granted}")
+
+
+# The job that is ALLOWED to write, and the only one. Keyed by
+# "<workflow file>:<job name>" so moving the grant to another job trips this
+# too, and carrying the reason here means widening it is a decision someone
+# has to write down rather than a line they can quietly change.
+_WRITE_ALLOWED = {
+    "check-browser-service-release.yml:check": {"contents", "pull-requests"},
+}
+
+
+def _write_scopes(perms) -> set:
+    """Every scope this permissions block grants at write level."""
+    if perms == "write-all":
+        # Shorthand for every scope at write; name it so the message is useful.
+        return {"write-all"}
+    if not isinstance(perms, dict):
+        return set()
+    return {k for k, v in perms.items() if v == "write"}
+
+
+def test_no_workflow_widens_its_token_beyond_read_without_saying_so():
+    """The token FLOOR, not merely the presence of a `permissions:` block.
+
+    test_every_job_that_checks_out_code_declares_its_token_permissions above
+    asserts a block EXISTS; it says nothing about what the block grants.
+    Measured: changing sonarqube.yml's `contents: read` to `contents: write`
+    left 27 tests green, and that workflow's own comment calls itself
+    "Read-only, stated here rather than inherited" -- a claim nothing held.
+
+    A write grant is not forbidden, it is ENUMERATED. The release-bump job
+    genuinely pushes a branch and opens a PR, so it is listed above with the
+    scopes it needs. Anything else that grants write fails here, and adding a
+    new one means editing the allowlist -- which is the point.
+    """
+    offenders = []
+    for wf, doc, job_name, job in _workflow_jobs():
+        # A job-level block REPLACES the workflow-level one; it does not merge.
+        perms = job["permissions"] if "permissions" in job else doc.get("permissions")
+        writes = _write_scopes(perms)
+        if not writes:
+            continue
+        allowed = _WRITE_ALLOWED.get(f"{wf}:{job_name}", set())
+        extra = writes - allowed
+        if extra:
+            offenders.append(f"{wf}:{job_name} grants {sorted(extra)}")
+    assert not offenders, (
+        "these jobs grant their GITHUB_TOKEN write access that is not on the "
+        f"allowlist in this test: {offenders}. If the grant is genuinely "
+        "needed, add it to _WRITE_ALLOWED with the reason; do not widen it "
+        "silently.")
+
+
+def test_the_allowlisted_write_job_still_exists():
+    """The known positive for the test above. An allowlist entry naming a job
+    that has been renamed or deleted stops guarding anything, and the test
+    above would go on passing -- so the entry itself has to be checked."""
+    present = {f"{wf}:{job_name}" for wf, _doc, job_name, _job in _workflow_jobs()}
+    missing = sorted(set(_WRITE_ALLOWED) - present)
+    assert not missing, (
+        f"_WRITE_ALLOWED names jobs that no longer exist: {missing}. Either "
+        "the job was renamed (update the key) or the grant is gone (drop it).")

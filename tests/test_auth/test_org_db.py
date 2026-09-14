@@ -687,10 +687,11 @@ def test_audit_log_neither_blocks_a_delete_nor_is_repointed():
 # ---------------------------------------------------------------------------
 # The guard, for every table it names -- not just the first one.
 #
-# Measured on this branch: replacing the trigger's 11-element array with just
-# 'nl_feedback_corrections' left all 274 test_auth tests green. Ten of the
-# eleven tables were undefended, and because to_regclass silently skips a name
-# it cannot resolve, a renamed or dropped table is never an error either. An
+# Measured on this branch: replacing the trigger's 12-element array with just
+# 'nl_feedback_corrections' left all 274 test_auth tests green. Eleven of
+# the twelve tables were undefended, and because to_regclass silently
+# skips a name it cannot resolve, a renamed or dropped table is never an
+# error either. An
 # org whose only remaining footprint was llm_traces + workflow_metrics would
 # have deleted cleanly, stranding every trace and metrics row for that tenant.
 #
@@ -699,12 +700,14 @@ def test_audit_log_neither_blocks_a_delete_nor_is_repointed():
 # fail when that thing shrinks. The agreement between the two is asserted
 # separately, below, so a table ADDED to the guard without a test also fails.
 #
-# It runs in its own throwaway schema with all eleven present as minimal
-# (id, org_id) stubs. Four of them exist for real in auth_test (the data-plane
-# singletons build test_runs, llm_traces, workflow_metrics and run_groups) and
+# It runs in its own throwaway schema with all twelve present as minimal
+# (id, org_id) stubs. FIVE of them exist for real in auth_test (the
+# data-plane singletons build test_runs, tests, llm_traces,
+# workflow_metrics and run_groups -- `tests` joined that list on THIS
+# branch, and it is real here, not a stub: measured, 11 columns) and
 # one -- anti_patterns -- must stay ABSENT there, because
 # test_trigger_degrades_when_a_learning_table_is_absent asserts its absence.
-# Seeding all eleven in the shared schema would break that test and leave rows
+# Seeding all twelve in the shared schema would break that test and leave rows
 # behind that other modules' teardowns then trip over (see
 # ensure_stub_learning_tables' docstring). A stand-in row proves the guard
 # exactly as well as a real one, for the same reason that helper gives.
@@ -718,6 +721,7 @@ _GUARDED_LEARNING_TABLES = (
     "learning_anchors",
     "kw_query_patterns",
     "test_runs",
+    "tests",
     "workflow_metrics",
     "llm_traces",
     "run_groups",
@@ -727,7 +731,7 @@ _GUARDED_LEARNING_TABLES = (
 
 @pytest.fixture
 def guard_schema():
-    """A throwaway schema with the real org DDL and all eleven guarded
+    """A throwaway schema with the real org DDL and all twelve guarded
     learning tables present as minimal stubs."""
     with _throwaway_auth_schema("auth_guard") as pool:
         auth_db.init_auth_db()
@@ -746,7 +750,7 @@ def guard_schema():
 @pytest.mark.parametrize("table", _GUARDED_LEARNING_TABLES)
 def test_deleting_an_org_is_refused_by_every_table_the_guard_names(
         guard_schema, table):
-    """Critical 3. One row in ANY of the eleven tables must refuse the delete,
+    """Critical 3. One row in ANY of the twelve tables must refuse the delete,
     and the error must name the table -- an operator who cannot see which
     table is holding the org cannot act on the refusal."""
     with auth_db.get_pool().connection() as conn:

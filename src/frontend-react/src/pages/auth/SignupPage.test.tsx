@@ -61,7 +61,7 @@ describe('SignupPage — the happy path', () => {
 
     await waitFor(() => {
       expect(signup).toHaveBeenCalledWith('alex@company.com', 'Password1', 'Alex Johnson')
-      expect(mockNavigate).toHaveBeenCalledWith('/generate', { replace: true })
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
     })
   })
 

@@ -8,6 +8,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Read-only, stated here rather than inherited: the job runs the whole
+# pull-request-authored suite, and the repository default is a setting outside
+# this file. Codecov and SonarQube authenticate with their own tokens.
+permissions:
+  contents: read
+
 jobs:
   sonarqube:
     name: SonarQube
@@ -32,10 +38,14 @@ jobs:
           --health-retries 10
 
     steps:
+      # No credentials in .git/config: the steps below run code this pull
+      # request authored, and none of them needs git authentication.
+      # fetch-depth sets how much history is cloned; it is not authentication.
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5

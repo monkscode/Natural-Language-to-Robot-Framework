@@ -3,10 +3,10 @@
  * through, plus isAccessLoss, which decides whether a failed request means a
  * row is gone for good.
  *
- * isAccessLoss: the Test Runs page drops a row from its loaded list on the
- * strength of this answer, so a false positive DELETES something the user
- * can still open. Every status below is one the re-run endpoint can actually
- * return.
+ * isAccessLoss: Activity and the Tests page each drop a row from their loaded
+ * list on the strength of this answer, so a false positive DELETES something
+ * the user can still open. Every status below is one the re-run endpoint can
+ * actually return.
  *
  * api(): a 401 must clear the stored token and redirect to /login BEFORE the
  * caller ever sees a rejected promise - a caller racing that redirect would

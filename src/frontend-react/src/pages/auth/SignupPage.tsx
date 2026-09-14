@@ -87,7 +87,7 @@ export default function SignupPage() {
     setLoading(true)
     try {
       await signup(email, password, `${firstName} ${lastName}`.trim())
-      navigate('/generate', { replace: true })
+      navigate('/', { replace: true })
     } catch (err) {
       setErrors({ form: err instanceof Error ? err.message : 'Sign up failed' })
       setLoading(false)

@@ -3,9 +3,18 @@ Per-run history registry — who ran what, with what outcome.
 
 One `test_runs` row per workflow/run id, written from the SSE streaming
 generators in workflow_service:
-- record_start() when a run id becomes known (generation complete or Docker
-  execution starting) — an upsert that NEVER steals ownership: the first
-  writer's user/query attribution wins, later calls only advance the status.
+- record_start() at every point a run's row must exist: generation START
+  (workflow_service._make_start_recorder opens the row at 'running' with
+  robot_code NULL — the moment the collapse's re-arm reasoning below depends
+  on), a generation failure, generation complete, and Docker execution
+  starting. An upsert that never CHANGES an owner: a run that already has
+  one keeps it, and later calls only advance the status. It does ADOPT
+  an unowned one -- `user_id = COALESCE(test_runs.user_id,
+  EXCLUDED.user_id)` fills a NULL from the next writer, which is how a
+  token-less first write ends up attributed to whoever runs it next.
+  Both Task 4.5 Criticals were that adoption being read as "never
+  changes hands"; it is deliberate, and must not be described as no
+  transfer at all.
 - set_status() when the Docker result (passed/failed) or an error is known.
 
 Read by:
@@ -15,14 +24,23 @@ Read by:
   /reports/{run_id}/ files.
 - /api/groups (api/groups_endpoints.py) — lists folders with run counts,
   creates/renames/deletes them, and files runs into them.
+- /api/tests (api/tests_endpoints.py) — lists the caller's visible TESTS
+  (list_tests), not runs; see that module's own docstring.
 
-Registry writes must never break the pipeline: every method swallows its own
-exceptions (mirrors the WorkflowMetricsCollector / learning-store discipline).
+Registry writes must never break the pipeline: record_start and set_status
+swallow their own exceptions, and so do the reads the authorization gates and
+the History table go through — get_owner, get_run_owner,
+get_run_owners_for_caller, list_runs, get_run (mirrors the
+WorkflowMetricsCollector / learning-store discipline). It is NOT every
+method: the run-groups CRUD below propagates deliberately — DuplicateGroupName
+and every 409/404 depend on the exception escaping — and the folder counts and
+list_groups beside it propagate too.
 get_owner() fails CLOSED — on any error it returns None, which the reports
 guard treats as "not yours".
 
 Referenced by: services/workflow_service.py, api/history_endpoints.py,
-api/groups_endpoints.py, auth/jwt_utils.py (lazy import).
+api/groups_endpoints.py, api/tests_endpoints.py, auth/jwt_utils.py
+(lazy import).
 Depends on: core/config.py (DATABASE_URL).
 """
 
@@ -38,6 +56,11 @@ from psycopg_pool import ConnectionPool
 from src.backend.core.config import PG_CONNECT_TIMEOUT_S, settings
 
 logger = logging.getLogger(__name__)
+
+# Above this many unmigrated runs the collapse refuses to run. The rule merges
+# rows that share a query, which is right for the 46 rows the owner produced by
+# hand and unproven for a database nobody has inspected. Abort beats merge.
+_MIGRATION_SCALE_LIMIT = 5000
 
 _SCHEMA_DDL = (
     """
@@ -72,15 +95,23 @@ _SCHEMA_DDL = (
     # here: this tuple runs on EVERY RunRegistry() construction (see
     # __init__), so one would delete every folder on each process start and
     # each test fixture, and would fail outright once the foreign key below
-    # references the table. There are exactly TWO exceptions, both below, and
-    # neither can destroy anything a user made: the pre-release per-user
-    # TABLE (0 rows, never shipped) is dropped by the guarded block below,
-    # because CREATE TABLE IF NOT EXISTS would otherwise silently keep the
-    # old column set; and the superseded visibility INDEXES are dropped by
-    # name inside the one-shot migration block, which carry no rows at all.
+    # references the table. Everything below that removes or rewrites an
+    # EXISTING run_groups object or row is one of FOUR things, each inside a
+    # one-shot block that returns early once its shape is gone, and none of
+    # which can lose a folder: the pre-release per-user TABLE (0 rows, never
+    # shipped) is dropped by the guarded block below, because CREATE TABLE IF
+    # NOT EXISTS would otherwise silently keep the old column set; the
+    # superseded visibility INDEXES are dropped by name inside the one-shot
+    # migration block and carry no rows at all; that same block then removes
+    # the `visibility` COLUMN itself; and it RENAMES the folders whose names
+    # collide once visibility is gone — the one statement here that rewrites
+    # a name a user typed, which is why it explains its tie-break at
+    # length. (Statements against OTHER tables are out of this rule's scope:
+    # the fk block below nulls dangling group_ids, and the collapse writes
+    # tests/test_versions/test_runs.)
     #
-    # ...and this is the ONE exception the comment above allows, because it
-    # cannot delete anything anyone made. A database that ran PR #94's
+    # ...and this is the first of the four the comment above allows, because
+    # it cannot delete anything anyone made. A database that ran PR #94's
     # pre-release branch still has the per-user run_groups
     # (group_id, name, user_id). CREATE TABLE IF NOT EXISTS is a no-op there,
     # so the partial indexes below fail with UndefinedColumn and
@@ -270,10 +301,15 @@ _SCHEMA_DDL = (
         -- constructing RunRegistry() against the same fresh schema can both
         -- pass it before either's ALTER commits, so the loser still reaches
         -- ADD CONSTRAINT and raises duplicate_object. The sibling CREATE
-        -- TABLE/INDEX IF NOT EXISTS statements in this tuple don't need this
-        -- — the server treats those as a no-op itself — but ADD CONSTRAINT
-        -- has no such built-in idempotence, so the race has to be caught
-        -- here by hand.
+        -- TABLE/INDEX IF NOT EXISTS statements are idempotent on a
+        -- SEQUENTIAL re-run, which is what makes this tuple safe to execute
+        -- on every construction -- but IF NOT EXISTS is not race-proof
+        -- either: measured on a fresh schema, two simultaneous constructions
+        -- failed 12 of 12 rounds on pg_class_relname_nsp_index /
+        -- pg_type_typname_nsp_index. Nothing here closes that race, and
+        -- closing it is out of scope. What is caught by hand below is only
+        -- ADD CONSTRAINT's own duplicate_object, which has no built-in
+        -- idempotence at all.
         BEGIN
           ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_group
             FOREIGN KEY (group_id) REFERENCES run_groups(group_id)
@@ -294,6 +330,298 @@ _SCHEMA_DDL = (
           END IF;
         END;
       END IF;
+    END $$;
+    """,
+    # --- tests: the durable identity behind a run (2026-09-07 split) ---
+    # org_id is NULLABLE on purpose: the bench and every AUTH_ENFORCED=false
+    # developer run is token-less and writes NULL, and record_start swallows
+    # its own exceptions, so a NOT NULL here would fail test creation SILENTLY.
+    """
+    CREATE TABLE IF NOT EXISTS tests (
+        test_id         TEXT PRIMARY KEY,
+        org_id          TEXT,
+        key_n           INTEGER NOT NULL,
+        user_id         TEXT,
+        user_email      TEXT,
+        name            TEXT,
+        user_query      TEXT,
+        group_id        TEXT REFERENCES run_groups(group_id) ON DELETE SET NULL,
+        current_version INTEGER NOT NULL DEFAULT 1,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # NULLS NOT DISTINCT (PG 15+; this database is 16.15): without it
+    # (NULL, 1) may be inserted twice and key_n stops being a key for every
+    # org-less run.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_org_key"
+    " ON tests (org_id, key_n) NULLS NOT DISTINCT",
+    "CREATE INDEX IF NOT EXISTS idx_tests_org_updated"
+    " ON tests (org_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tests_group ON tests (group_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tests_user ON tests (user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS test_versions (
+        version_id  TEXT PRIMARY KEY,
+        test_id     TEXT NOT NULL REFERENCES tests(test_id) ON DELETE CASCADE,
+        n           INTEGER NOT NULL,
+        user_query  TEXT,
+        robot_code  TEXT,
+        created_by  TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        reason      TEXT,
+        UNIQUE (test_id, n)
+    )
+    """,
+    # Who appended this version, by email. created_by beside it holds an
+    # internal user id and is admin-only, so without this a non-admin's
+    # version history cannot say who wrote a version -- which first MATTERS
+    # in P2 Task 7, the first code that lets someone other than the test's
+    # author append one. Legacy rows stay NULL and are answered from
+    # tests.user_email instead: every row written before Task 7 has
+    # created_by equal to the test's author by construction, because both
+    # earlier writers (the mint below and the migration collapse above) set
+    # it from the same value they write into tests.user_id.
+    "ALTER TABLE test_versions ADD COLUMN IF NOT EXISTS created_by_email TEXT",
+    # Results point at their test, and at the version they ran — with one
+    # known exception: EDIT-then-execute. record_start replaces robot_code
+    # newest-non-NULL-wins while _attach_test short-circuits on the run's
+    # existing test_id, so a run whose generated code was edited before
+    # execution holds the edited code against the GENERATED version's id.
+    # Minting a version on edit is P2's Update dialog, and P1 pins the current
+    # behaviour deliberately (test_run_registry_test_attach.py::
+    # test_an_edited_code_execution_does_not_mint_a_second_version).
+    # Both stay NULLABLE: test_id IS NULL is a permanently legal state for a
+    # generation that failed before any code existed (owner decision D8).
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_id TEXT",
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_version_id TEXT",
+    # Whether the caller held platform-admin authority at the moment of the
+    # write (owner decision D7). Captured here and never joined live: the role
+    # is evaluated per request, so a live join would let a demotion rewrite
+    # history and a promotion retroactively re-badge past runs.
+    # WIRED (P2): every workflow_service._record_run call site passes the
+    # caller's is_validated_admin result, computed once per request by
+    # _compute_is_platform_admin. A row written before P2 landed still reads
+    # FALSE — record_start's own write-once-by-omission rule (its docstring
+    # and its SQL below) means this only ever affects rows created from here
+    # on, never rewrites a past one.
+    "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS"
+    " ran_as_platform_admin BOOLEAN NOT NULL DEFAULT FALSE",
+    # ADD CONSTRAINT is not idempotent and this tuple runs on every
+    # construction, so both need the guard. conrelid is load-bearing for the
+    # same reason it is on fk_test_runs_group above: the suite runs on
+    # isolated schemas whose search_path ends in public, and a conname-only
+    # guard would find public's constraint and skip the ALTER, leaving every
+    # test schema without it.
+    """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'test_runs'::regclass
+                       AND contype = 'f' AND conname = 'fk_test_runs_test') THEN
+        BEGIN
+          ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_test
+            FOREIGN KEY (test_id) REFERENCES tests(test_id) ON DELETE CASCADE;
+        EXCEPTION WHEN duplicate_object THEN
+          RAISE NOTICE 'test_runs: fk_test_runs_test already existed -- lost the race to another concurrent RunRegistry() construction, nothing to do';
+        END;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'test_runs'::regclass
+                       AND contype = 'f' AND conname = 'fk_test_runs_version') THEN
+        BEGIN
+          ALTER TABLE test_runs ADD CONSTRAINT fk_test_runs_version
+            FOREIGN KEY (test_version_id) REFERENCES test_versions(version_id)
+            ON DELETE SET NULL;
+        EXCEPTION WHEN duplicate_object THEN
+          RAISE NOTICE 'test_runs: fk_test_runs_version already existed -- lost the race to another concurrent RunRegistry() construction, nothing to do';
+        END;
+      END IF;
+    END $$;
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_test_runs_test_time"
+    " ON test_runs (test_id, created_at DESC)",
+    # --- one-shot collapse of test_runs onto tests + test_versions ---
+    # Guarded on `tests` being EMPTY, which is true until the FIRST test
+    # exists — not "once in a database's life". On a fresh install it stays
+    # true across every process start until a generation SUCCEEDS, because
+    # record_start opens each run's row with robot_code NULL at generation
+    # START (workflow_service._make_start_recorder's opening write) and
+    # _SCHEMA_DDL re-runs on every RunRegistry() construction. The guard
+    # therefore RE-ARMS whenever `tests` returns to empty. NOTHING IN
+    # src/backend/ EMPTIES IT: there is no DELETE FROM tests anywhere in the
+    # application, and the P2 delete path this comment used to credit was
+    # never built. The only deleter in the repo is bench/run_bench.py's
+    # detachment, which removes its own token-less runs. The re-arm is real
+    # and worth keeping -- a fresh install, a dropped schema or a restored
+    # dump all reach it -- but no user action reaches it today.
+    # That is why both branches
+    # below also require code: a run with
+    # nothing to version must never mint a test (D8), or _attach_test's
+    # short-circuit on an existing test_id then denies the real code its
+    # version for good.
+    #
+    # It must NOT be guarded on `test_id IS NULL`: that is a permanently legal
+    # state (a generation that fails before any code exists, owner decision
+    # D8), so such a guard would re-arm and re-collapse live rows on the next
+    # RunRegistry() construction — silently performing the go-forward
+    # deduplication this design explicitly declined. That rules out an ENTRY
+    # guard on the column; the `test_id IS NULL` in the grouping query below
+    # is row SELECTION and re-arms nothing, because entry is still gated on
+    # `tests` being empty.
+    f"""
+    DO $$
+    DECLARE
+      n_unmigrated bigint;
+      g            record;
+      r            record;
+      v_test_id    text;
+      v_version_id text;
+      v_n          integer;
+      v_key        integer;
+    BEGIN
+      -- The guard below is a check-then-act, not a lock: two RunRegistry()
+      -- constructions against the same database both pass it, both walk the
+      -- same groups, and the loser's INSERT collides on idx_tests_org_key --
+      -- measured at 4 of 10 two-thread rounds. The DO block is atomic so the
+      -- DATA survives, but the losing construction raises out of __init__:
+      -- a bare 500 on whichever request got there first, or a failed boot.
+      -- Serialise them. _SCHEMA_DDL runs on an autocommit connection, so this
+      -- statement is its own transaction and the lock is held for exactly the
+      -- length of this block, then released -- the same primitive, and the
+      -- same hashtext() keying, as auth/migration_state.run_migration_once.
+      -- The loser blocks here, then re-reads a non-empty `tests` and returns.
+      PERFORM pg_advisory_xact_lock(hashtext('nlrf_test_split_collapse')::bigint);
+      IF EXISTS (SELECT 1 FROM tests) THEN RETURN; END IF;
+      IF NOT EXISTS (SELECT 1 FROM test_runs WHERE test_id IS NULL) THEN
+        RETURN;
+      END IF;
+
+      SELECT count(*) INTO n_unmigrated FROM test_runs WHERE test_id IS NULL;
+      IF n_unmigrated > {_MIGRATION_SCALE_LIMIT} THEN
+        RAISE WARNING
+          'test split: % unmigrated runs exceeds the safety limit of %; '
+          'collapse ABORTED, no rows changed. Inspect the data and run the '
+          'migration deliberately.', n_unmigrated, {_MIGRATION_SCALE_LIMIT};
+        RETURN;
+      END IF;
+
+      FOR g IN
+        SELECT org_id, user_id, user_query, NULL::text AS only_run,
+               min(created_at) AS first_at, max(created_at) AS last_at
+        FROM test_runs
+        -- `test_id IS NULL` here selects ROWS; it does not gate ENTRY (see
+        -- the comment above this block -- entry stays on `tests` being
+        -- empty). A no-op in the normal case: entry requires `tests` empty,
+        -- and fk_test_runs_test makes a non-NULL test_id impossible when no
+        -- test exists, so every row already qualifies. It earns its place
+        -- only if a construction ever reaches here with rows already
+        -- attached, where selecting them would build a group whose inner
+        -- loop then finds nothing left to attach -- minting a test with
+        -- current_version 1 and zero test_versions. Structurally impossible
+        -- instead of accidentally rare.
+        WHERE user_query IS NOT NULL AND test_id IS NULL
+        GROUP BY org_id, user_id, user_query
+        -- A group with no code anywhere in it has nothing to version, so it
+        -- must not become a test at all. count() skips NULLs, so this is the
+        -- same predicate the inner loop's `IF r.robot_code IS NULL` applies
+        -- per run, lifted to the group. A MIXED group still survives, and its
+        -- code-less runs still attach — that is D8's "attaches if one
+        -- exists". Measured on the owner's database before this line landed:
+        -- 0 groups lose their test, so 21/45/46 do not move.
+        HAVING count(robot_code) > 0
+        UNION ALL
+        -- A NULL user_query gets its OWN test per run. NOT because GROUP BY
+        -- separates NULLs -- it does not, Postgres groups them together
+        -- (SELECT q, count(*) FROM (VALUES (NULL),(NULL),('a')) v(q)
+        -- GROUP BY q returns (a,1) and (NULL,2)). They stay apart
+        -- STRUCTURALLY: branch 1 excludes them with user_query IS NOT NULL,
+        -- and this branch keys on run_id instead of the query. Acting on the
+        -- NULL = NULL reason and grouping them by query would merge every
+        -- pasted run in an org into one test.
+        SELECT org_id, user_id, user_query, run_id, created_at, created_at
+        FROM test_runs
+        WHERE user_query IS NULL AND robot_code IS NOT NULL
+          AND test_id IS NULL
+        -- Deterministic and chronological, or key_n comes out in whatever
+        -- order HashAggregate happens to produce -- and it is user-visible
+        -- (rendered TC-<key_n> in P2), so fixing it after the fact means
+        -- renumbering live keys. This ORDER BY applies to the UNION ALL as
+        -- a whole, not to either branch alone. org_id/user_id/user_query
+        -- already total-order the first branch by themselves (they are its
+        -- GROUP BY key); only_run (NULL there, the run_id in the second
+        -- branch) is what breaks a tie between two NULL-query runs that
+        -- share an org/user and a first_at.
+        ORDER BY first_at, org_id, user_id, user_query, only_run
+      LOOP
+        SELECT coalesce(max(key_n), 0) + 1 INTO v_key
+        FROM tests WHERE org_id IS NOT DISTINCT FROM g.org_id;
+
+        v_test_id := gen_random_uuid()::text;
+        INSERT INTO tests (test_id, org_id, key_n, user_id, user_email,
+                           user_query, group_id, current_version,
+                           created_at, updated_at)
+        SELECT v_test_id, g.org_id, v_key, g.user_id,
+               (SELECT t.user_email FROM test_runs t
+                 WHERE t.org_id IS NOT DISTINCT FROM g.org_id
+                   AND t.user_id IS NOT DISTINCT FROM g.user_id
+                   AND t.user_query IS NOT DISTINCT FROM g.user_query
+                   AND (g.only_run IS NULL OR t.run_id = g.only_run)
+                 ORDER BY t.created_at DESC LIMIT 1),
+               g.user_query,
+               (SELECT t.group_id FROM test_runs t
+                 WHERE t.org_id IS NOT DISTINCT FROM g.org_id
+                   AND t.user_id IS NOT DISTINCT FROM g.user_id
+                   AND t.user_query IS NOT DISTINCT FROM g.user_query
+                   AND (g.only_run IS NULL OR t.run_id = g.only_run)
+                   AND t.group_id IS NOT NULL
+                 ORDER BY t.created_at DESC LIMIT 1),
+               1, g.first_at, g.last_at;
+
+        v_n := 0;
+        FOR r IN
+          SELECT t.run_id, t.robot_code, t.user_query, t.user_id, t.created_at
+          FROM test_runs t
+          WHERE t.test_id IS NULL
+            AND t.org_id IS NOT DISTINCT FROM g.org_id
+            AND t.user_id IS NOT DISTINCT FROM g.user_id
+            AND t.user_query IS NOT DISTINCT FROM g.user_query
+            AND (g.only_run IS NULL OR t.run_id = g.only_run)
+          ORDER BY t.created_at ASC, t.run_id ASC
+        LOOP
+          IF r.robot_code IS NULL THEN
+            -- D8: no code, no version. It still attaches to the test.
+            UPDATE test_runs SET test_id = v_test_id
+             WHERE run_id = r.run_id;
+          ELSE
+            v_n := v_n + 1;
+            v_version_id := gen_random_uuid()::text;
+            INSERT INTO test_versions (version_id, test_id, n, user_query,
+                                       robot_code, created_by, created_at,
+                                       reason)
+            VALUES (v_version_id, v_test_id, v_n, r.user_query, r.robot_code,
+                    r.user_id, r.created_at, 'imported');
+            UPDATE test_runs
+               SET test_id = v_test_id, test_version_id = v_version_id
+             WHERE run_id = r.run_id;
+          END IF;
+        END LOOP;
+
+        UPDATE tests SET current_version = greatest(v_n, 1)
+         WHERE test_id = v_test_id;
+      END LOOP;
+
+      -- n_unmigrated counted every CANDIDATE. Runs whose group had no code
+      -- anywhere are deliberately left alone, so report what actually moved
+      -- rather than what was considered. Everything with a test_id now was
+      -- attached by this block: `tests` was empty on entry and
+      -- fk_test_runs_test makes a test_id without a test impossible.
+      RAISE NOTICE 'test split: collapsed % of % runs into % tests; % left '
+        'unattached (no code to version)',
+        (SELECT count(*) FROM test_runs WHERE test_id IS NOT NULL),
+        n_unmigrated,
+        (SELECT count(*) FROM tests),
+        (SELECT count(*) FROM test_runs WHERE test_id IS NULL);
     END $$;
     """,
 )
@@ -337,6 +665,69 @@ _VISIBLE_RUN_SQL = (
 # honour. Predates the org-visibility work; surfaced by it, because the table
 # now shows an author column and an unowned row renders blank and unopenable.
 _OWNED_RUN_SQL = "t.user_id IS NOT NULL"
+
+# The version a RESULT ran, for the two caller-scoped reads over
+# test_runs. test_runs.test_version_id references test_versions.version_id,
+# which is that table's PRIMARY KEY, so this matches at most one row and
+# cannot fan a run out into several. It carries NO placeholder, which is
+# what lets it be appended after _group_join without disturbing the strict
+# positional binding those params depend on.
+#
+# NULL is ordinary and permanent rather than a gap to be repaired: a
+# regeneration that fails attaches its run to the test with no version at
+# all (owner decision D8(b), spec case 10), and a run with no test has no
+# version by construction.
+_VERSION_JOIN = (
+    " LEFT JOIN test_versions tv ON tv.version_id = t.test_version_id"
+)
+
+# The same sentence as _VISIBLE_RUN_SQL — you see it if you own it, or the org
+# published it into a folder — over `tests` instead of `test_runs`.
+#
+# It cannot reuse _VISIBLE_RUN_SQL: that constant binds t.user_id, which is the
+# RESULT'S owner, and a read whose rows are TESTS has no result in scope. The
+# fail-closed `IS NOT NULL` term carries over for the same reason it exists
+# there — an unattributed row is readable only by a platform admin.
+_VISIBLE_TEST_SQL = (
+    "(te.user_id = %s"
+    " OR (g.group_id IS NOT NULL AND te.user_id IS NOT NULL))"
+)
+
+# Resolves the CURRENT version's own row once, for a read whose rows are
+# tests (alias `te`). test_versions is UNIQUE (test_id, n), so this is at
+# most one row -- no fan-out risk. Module-level rather than local to one
+# method because list_tests and get_test_detail must agree on what "the
+# current version" is; two copies of this join are two definitions that can
+# drift apart. It binds NO parameter of its own, so it never disturbs the
+# positional order of a caller's %s placeholders.
+_CURRENT_VERSION_SQL = (
+    "LEFT JOIN LATERAL ("
+    "  SELECT v.version_id, v.robot_code FROM test_versions v"
+    "  WHERE v.test_id = te.test_id AND v.n = te.current_version"
+    ") cv ON TRUE "
+)
+
+# The Passing and Failing tabs, as predicates over _caller_results_lateral's
+# health_status, and the ONLY definition of either. list_tests filters its page
+# with them and count_tests_by_health counts each tab with them, so the number
+# on a tab and the rows that tab lists are one rule rather than two that happen
+# to agree today. Both follow _health_value's mapping: 'error' is failing.
+_HEALTH_PASSING_SQL = "whole.health_status = 'passed'"
+_HEALTH_FAILING_SQL = "whole.health_status IN ('failed', 'error')"
+
+def _health_value(status: Optional[str]) -> str:
+    """The public health word for one raw status off
+    _caller_results_lateral's health_status.
+
+    'passed' -> "passing"; 'failed' and 'error' -> "failing"; None (the
+    lateral matched nothing, so the current version has no completed result
+    at all) -> "not_run". 'error' has no bucket of its own: owner ruling O2
+    removed "flaky" from this vocabulary and the field's only other values
+    are passing/failing/not_run, so among COMPLETED outcomes an error reads
+    as a failure signal rather than vanishing from the field."""
+    if status is None:
+        return "not_run"
+    return "passing" if status == "passed" else "failing"
 
 
 class RunOwnership(NamedTuple):
@@ -475,19 +866,27 @@ class RunRegistry:
         None — the same predicate assign_runs enforces (the folder is in the
         run's org), applied at the write instead of at the read.
 
-        It has to be keyed on the NEW ROW'S ORG rather than on whoever read
-        the source. A re-run inherits the folder of the run it was cloned
-        from, and the token-less dev caller reads that source row through the
-        UNFILTERED group join (see _group_join), so the id arriving here can
-        name ANY org's folder. Filing the new run there would put it in a
-        folder its own org cannot see — and, now that a folder is what
-        publishes a run, would show it to an org that never had access.
+        It has to be keyed on an ORG rather than on whoever read the source.
+        A re-run inherits the folder of the run it was cloned from, and the
+        token-less dev caller reads that source row through the UNFILTERED
+        group join (see _group_join), so the id arriving here can name ANY
+        org's folder. Filing the new run there would put it in a folder its
+        own org cannot see — and, now that a folder is what publishes a run,
+        would show it to an org that never had access.
 
-        Only record_start can make this decision, because only it knows the
-        org actually written on the new row — _lookup_org_id can supply it
-        when the token did not. An org-less row (AUTH_ENFORCED off) matches
-        no folder at all: run_groups.org_id is NOT NULL, so there is nothing
-        for it to equal.
+        The org it is keyed on is the CALLER'S PRE-D6 ORG — the token's, or
+        the one _lookup_org_id derives when the token carried none — and NOT
+        the org finally written on the row. record_start calls this before
+        its call to _attach_test, and _attach_test can hand back the
+        TEST'S org instead (D6). So a group_id validated against org A can be
+        written beside an org_id of org B, with nothing re-validating the
+        pair. delete_group's docstring describes that gap at length and is
+        the authority on it; whether this check should move after the attach
+        is a P2 decision, deliberately not made here.
+
+        record_start is its only caller. An org-less row (AUTH_ENFORCED off)
+        matches no folder at all: run_groups.org_id is NOT NULL, so there is
+        nothing for it to equal.
 
         Runs on its OWN pool connection and swallows its own errors, exactly
         like _lookup_org_id: this decides a folder tag, and nothing about a
@@ -508,6 +907,518 @@ class RunRegistry:
                 group_id, e)
             return None
 
+    def _attach_test(
+        self,
+        conn,
+        run_id: str,
+        user_id: Optional[str],
+        user_email: Optional[str],
+        user_query: Optional[str],
+        robot_code: Optional[str],
+        rerun_of: Optional[str],
+        org_id: Optional[str],
+        is_platform_admin: bool = False,
+        test_id: Optional[str] = None,
+        test_version_id: Optional[str] = None,
+        version_reason: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Resolve (test_id, test_version_id, org_id) for a run being written.
+
+        Runs on the CALLER'S connection, inside record_start's transaction, so
+        a run row and its test land together or not at all — unlike
+        _lookup_org_id and _fileable_group_id, which decide decorations and so
+        deliberately use their own.
+
+        FOUR shapes, and the FIRST is the one the caller NAMES (P2 Task 7,
+        owner ruling R7-8). The three older branches all DERIVE the test —
+        from the run's own row, from a rerun_of source, or by minting one —
+        and a regeneration cannot use any of them: its success write would
+        fall through to the mint and create a SECOND test rather than
+        appending to the one being regenerated. So `test_id` dispatches a
+        branch of its own, placed first and kept separate rather than folded
+        into the existing-row branch below, because both of Task 4.5's
+        Criticals lived in that branch and a regeneration's own opening row
+        lands there. That branch NEVER mints, never re-homes a run, and
+        never writes an org back onto the test — naming a test in a request
+        body is not a claim on it, which is exactly what the two write-back
+        gates below exist to refuse. Its own contract is documented on the
+        branch.
+
+        Three owner decisions live here:
+
+        D8 — a failed run attaches to its test if one exists and never creates
+        one. A brand-new generation that fails produced nothing useful, so
+        test_id stays NULL; that is a PERMANENTLY legal state, which is why the
+        migration may not be guarded on it.
+
+        D6 — a result takes the org of its TEST, not of the caller. Only a
+        platform admin can re-run another org's test, and BEFORE this rule that
+        wrote the admin's org onto the row, which SENT another org's learning
+        signal into the admin's store (get_run_owner().org_id is what
+        attributes it). The tense matters: measured at HEAD, an org-a admin
+        re-running an org-b test writes org-b, so that clause describes what
+        D6 REPLACED, not what the code does.
+        When the test's own org_id is NULL and the caller's is not, the
+        NULL-org fallback described below now writes the caller's org onto
+        `tests` itself — renumbering key_n into the destination bucket —
+        before returning it, on the TWO branches that write it back — the
+        existing-test branch and the rerun branch — so the repair lands on
+        the TEST and not only on the RUN: an org-less run, later reached with
+        an org resolved, no longer leaves test.org_id NULL forever. A THIRD
+        branch reads a test's org and takes the same caller-org fallback —
+        the named_test_id branch (P2 Task 7) — and deliberately never
+        writes back, as its own comment says. Both WRITING branches gate the
+        write, with the SAME three terms — the paragraphs below are the
+        authority on which caller they admit. A write-back that loses a key_n
+        race to a concurrent one is logged and left NULL rather than
+        retried — the run itself still gets the correct org, and the next
+        caller to reach this test repeats the repair. This still does not
+        make tests.org_id = test_runs.org_id an unconditional invariant: a
+        test whose runs span two DIFFERENT, CONCRETE orgs can still exist
+        and diverge from a run written afterward — delete_group's and
+        list_groups' docstrings are the authority on that separate, known
+        gap, which this method does not touch: it only ever moves a test
+        OUT of the NULL bucket, never between two non-NULL orgs.
+
+        The write-back's claim is PERMANENT and undisclosed to nobody: say
+        so plainly, and name every gate in front of it rather than implying
+        one that is not here. `caller_can_access` guards the rerun_of
+        branch, but it is evaluated on the SOURCE RUN — api/endpoints.py
+        passes it `source["user_id"]` and `source["org_id"]` — and never on
+        the test, so it constrains who REACHES that branch and says nothing
+        about the org of the test the branch then writes. Where the source
+        run's own org_id is ALSO NULL, three kinds of caller reach it: the
+        AUTH_ENFORCED=off token-less caller (`caller_can_access` rule 1,
+        `auth/ownership.py`), who has no org_id to write back with; a
+        platform admin (rule 2), who does; and the run's own original
+        owner, reclaiming it on a legacy token whose own org_id claim is
+        absent (rule 4). For THAT shape no ordinary identified caller whose
+        OWN token carries a concrete org passes — not even the run's own
+        original owner, once identified with an org: rule 5's
+        `org_id != caller_org` fires and returns False before the ownership
+        check ever runs, because `org_id` is NULL and can equal no caller's
+        org. But a test whose org_id is NULL may have runs whose org_id is
+        NOT — D6 aims at equality without making it an invariant, and the
+        O5-refused call described further below leaves exactly that state
+        behind — and for such a run three kinds of non-admin caller REACH
+        this write-back: the run's own OWNER (rule 5's last line is
+        `owner_id == caller_uid`, which is exactly what the adopter
+        becomes); an `org_admin` of the run's org (rule 5's org_admin
+        branch, which needs only `owner_id is not None`); and ANY member of
+        that org once the source run is FILED IN A FOLDER, through rule 3 —
+        the rerun endpoint enables it by passing
+        `is_grouped=source.get("group_id") is not None`. A plain peer with
+        an unfiled source run is NOT among them: rule 5 refuses them. What
+        the callers who do reach it may then do to the test is decided
+        here, not there, which is the whole reason the two gates below
+        exist. Nothing in this codebase ever
+        un-writes tests.org_id once it is non-NULL (verified: every UPDATE
+        tests statement in this file that sets it selects only rows whose
+        org_id IS NULL, and an INSERT sets it only on the row it creates).
+        Left unguarded, that
+        write would let D6 give every later result of this test the
+        writer's org, and so would get_run_owner().org_id — which is what
+        attributes LLM traces (trace_store.py) and learning records
+        (workflow_service.py) — permanently, to whichever org happened to
+        touch the test first rather than whichever org its history
+        actually came from. For a platform admin that org is arbitrary
+        relative to a test they do not otherwise belong to, so as of P2
+        (owner ruling, 2026-09-08) this method also takes
+        is_platform_admin — record_start passes its own D7 flag straight
+        through — and the existing-test branch and the rerun_of branch
+        below both skip `_write_back_org` when it is True. The RUN row
+        still takes the caller's org exactly as before (`resolved_org =
+        org_id` runs either way); only the TEST is left alone. Accepted
+        cost, stated plainly: a test reachable ONLY by a platform admin
+        now stays org-less forever — the status quo from before Task 1,
+        and no worse than it. A non-admin caller reaching the rerun_of
+        branch still repairs the test when they AUTHORED it — since fix
+        round 2 that branch carries the same three terms as the one below,
+        of which is_platform_admin is the first.
+
+        The existing-test branch has no `caller_can_access` in front of it
+        at all: POST /execute-test takes a CLIENT-supplied workflow_id and
+        runs no access predicate on it, and `stream_execute_only`'s reuse
+        check forks to a fresh run id only on an owner MISMATCH — so a
+        NULL-owner row reads as unowned and is reused, and any identified
+        caller holding such an id reaches this branch. As of 2026-09-09
+        (owner ruling O5) the gate therefore sits at the write-back itself:
+        it repairs the test only when the TEST's `user_id` equals THIS
+        caller's, and only when that user_id is not NULL — two NULLs must
+        not compare equal, or a token-less caller passes. It is an
+        ADDITIONAL gate, not a replacement: is_platform_admin must be False
+        as well, and the RUN row still takes the caller's org either way,
+        exactly as under the admin guard.
+
+        The test's AUTHOR, deliberately, and not the run's owner. Gating on
+        the run would gate on a value this very call is about to write:
+        record_start runs its UPSERT after this returns, and that UPSERT
+        does `user_id = COALESCE(test_runs.user_id, EXCLUDED.user_id)`, so
+        a refused call adopts the run and the same caller's SECOND POST of
+        the same workflow_id would find the run owned by themselves and
+        pass — a one-request delay, not a gate (measured, fix round 1,
+        2026-09-09). tests.user_id has no such transition: it is written
+        once, by the mint below or by the collapse's INSERT, and no
+        UPDATE tests statement in this file sets it. (An earlier form of
+        this sentence counted those statements. The count went stale twice
+        -- assign_tests added one and Task 7's append below added another --
+        so it is gone: the claim that carries the argument is that none of
+        them touches user_id, whatever their number.)
+
+        Accepted cost, stated plainly: a test NOBODY authored — minted by a
+        token-less run (AUTH_ENFORCED off, the bench, local dev), or
+        collapsed from runs that were themselves token-less — can no longer
+        be repaired by any caller through EITHER branch of this method, not
+        even by the person who actually made it, because a NULL author is
+        indistinguishable from a stranger's. It stays org-less here, which
+        is the state it was in before Task 1 and no worse than it. One
+        statement outside this method can still move it: backfill_org_ids
+        takes the org of the test's earliest org-carrying run and asks
+        nothing about authorship — but it is a one-shot migration, gated on
+        the data_org_id_backfill marker, not an ongoing repair path.
+
+        The rerun_of branch below carries the IDENTICAL three terms, added
+        in fix round 2 (2026-09-09) after the gate above alone was measured
+        to be a one-click detour: the refused call adopts the run, whose
+        owner and org become the caller's and which _VISIBLE_RUN_SQL then
+        shows in their History, and "Run again" reached the same
+        author-less test through a branch gated only on is_platform_admin.
+        `caller_can_access` does not prevent that — it is evaluated on the
+        SOURCE RUN, as the paragraph further up explains — so the term has
+        to be here. Keep the two branches identical: an asymmetry between
+        them is the shape this defect took both times.
+
+        The disclosed cost of that symmetry (owner ruling O7, 2026-09-09 —
+        accepted knowingly): re-running a colleague's org-less test used to
+        repair it, and now does not. Only the author can. Name the
+        populations that actually bear that, because a "peer" understates
+        it — a plain peer with an unfiled source run never reached the
+        branch at all (rule 5 refuses them). The ones who did, and who lose
+        the repair, are an `org_admin` of the run's org, and ANY member of
+        that org once the source run is filed in a folder (rule 3). The
+        source run's own OWNER reaches it too, but when they are not the
+        test's author that is the claim this whole change closes, not a
+        cost of it. That
+        removes a repair, not a view: count_ungrouped_tests and list_tests
+        both append `te.org_id = %s` for a caller who has an org, so an
+        ORG-LESS test is invisible to every org-carrying caller whatever
+        its author and whatever folder it is in — _VISIBLE_TEST_SQL is not
+        what does that here, since its second term
+        (`g.group_id IS NOT NULL AND te.user_id IS NOT NULL`) would admit
+        exactly this authored, foldered test. The author's own repair still
+        works.
+
+        Idempotent on run_id: record_start is an upsert called at generation
+        start, at generation success and again at execute, so this must return
+        the SAME test for all three or one run would spawn three tests.
+
+        Spec section 10 case 35 — the test wins, but only when it HAS an org.
+        A test whose org_id is NULL falls back to the caller's on all THREE
+        branches that read a test's org (existing, rerun, named_test_id);
+        only the first two also write that org back.
+        Two mechanisms reach that state, so
+        it is not the dead defensive branch it looks like: backfill_org_ids
+        used to carry an org onto test_runs and not onto tests, and
+        _lookup_org_id swallows its own failure, so the upsert that MINTS a
+        test can write org_id NULL onto it. Without the fallback the run
+        inherits that NULL permanently, where before the split it self-healed
+        on the next write. Returning the caller's org there does not weaken
+        D6: the test still wins whenever it has an org to win with."""
+        def _write_back_org(existing_test_id: str) -> None:
+            # The test's own org is NULL and the caller's is not: repair the
+            # TEST here, not only the run being written, so this fallback
+            # does not have to fire again the next time this test is
+            # reached. key_n is renumbered in the same statement because it
+            # is half of idx_tests_org_key (UNIQUE (org_id, key_n) NULLS NOT
+            # DISTINCT) — the simple, single-test form of the window-function
+            # shape backfill_org_ids uses to move many tests at once, reading
+            # the destination bucket's current max(key_n). updated_at is
+            # bumped too, matching backfill_org_ids' own tests UPDATE: the
+            # row's org identity just changed and idx_tests_org_updated sorts
+            # the Tests page on this column, so a repaired test should read
+            # as recently touched rather than keep the timestamp from
+            # whenever it was minted. WHERE ... AND org_id IS NULL guards
+            # against a concurrent write landing between the SELECT above and
+            # this UPDATE: if some other transaction already gave this test
+            # an org by the time this runs, zero rows match and this is a
+            # silent no-op — the caller below still gets ITS OWN org_id back
+            # for the run regardless, same as the collision path, because a
+            # run write may not depend on the test repair succeeding.
+            #
+            # SAVEPOINT, exactly like the key-collision retry below, so a
+            # failure here cannot take the run write down with it. Caught
+            # broadly and never re-raised — same reasoning backfill_org_ids
+            # uses for its own tests UPDATE: a key collision is not the only
+            # way this can fail, and these two branches used to be
+            # read-only, so the write-back hands them deadlock, lock
+            # timeout, serialization failure and dropped-connection failure
+            # modes they did not have before. Anything narrower than
+            # Exception lets those escape _attach_test into record_start's
+            # outer except, which rolls back and leaves THIS call's
+            # test_id/test_version_id at None. On the rerun_of branch that is
+            # unrecoverable: the new run_id has no test_id already stored for
+            # record_start's COALESCE to protect, so the run would be
+            # inserted permanently detached from its test — stream_execute_
+            # only calls record_start once per re-run and nothing else ever
+            # writes test_id afterward. The short-circuit branch happens to
+            # be protected by that same COALESCE once a test_id is already
+            # stored on the row, but this catch does not special-case that:
+            # one guard, broad, for both branches. Not retried either way —
+            # the run still gets org_id from the return value below; only
+            # the test-side repair is skipped, and the next caller to reach
+            # this test tries again.
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        "UPDATE tests SET org_id = %s, key_n = coalesce("
+                        "(SELECT max(key_n) FROM tests"
+                        " WHERE org_id IS NOT DISTINCT FROM %s), 0) + 1,"
+                        " updated_at = now()"
+                        " WHERE test_id = %s AND org_id IS NULL",
+                        (org_id, org_id, existing_test_id))
+            except Exception as e:
+                logger.warning(
+                    "[RUN_REGISTRY] org write-back failed for test "
+                    "%s -> org %s; leaving test org-less: %s",
+                    existing_test_id, org_id, e)
+
+        if test_id is not None:
+            # The caller NAMED the target test: a regeneration appending
+            # version n+1, or a Tests-page Run executing the current one.
+            # Nothing in this branch creates a test and nothing claims one.
+            row = conn.execute(
+                "SELECT test_id, test_version_id FROM test_runs"
+                " WHERE run_id = %s", (run_id,)).fetchone()
+            stored_test = row["test_id"] if row else None
+            stored_version = row["test_version_id"] if row else None
+            if stored_test and (stored_version or stored_test != test_id):
+                # Two refusals off one read. A run that already names a
+                # VERSION never gets a second one — record_start is an upsert
+                # called at generation start, at generation success and again
+                # at execute, and the /versions stream calls the success write
+                # a SECOND time when its read-back finds no version, so
+                # "append at most once per run" has to be a property of this
+                # branch rather than of its callers. A run that already names
+                # a DIFFERENT test is never re-homed onto this one either:
+                # that would move a result off the test whose code it ran.
+                stored_org = conn.execute(
+                    "SELECT org_id FROM tests WHERE test_id = %s",
+                    (stored_test,)).fetchone()
+                return (stored_test, stored_version,
+                        stored_org["org_id"]
+                        if stored_org and stored_org["org_id"] is not None
+                        else org_id)
+            appending = version_reason is not None and bool(robot_code)
+            # FOR NO KEY UPDATE, and taken BEFORE max(n) + 1 is read: that
+            # ordering is what makes the counter safe against a simultaneous
+            # regeneration of the same test, and UNIQUE (test_id, n) is left
+            # as the backstop rather than as the mechanism — a
+            # UniqueViolation-and-retry loop was measured to LOSE the third
+            # of three simultaneous writers, while the lock kept all three.
+            # Not FOR UPDATE: that mode also conflicts with the FOR KEY SHARE
+            # a foreign-key check takes, so it would stall every concurrent
+            # INSERT of a run referencing this test (measured: 1.01s of a 1s
+            # hold, against 0.00s for this mode), and spec case 25 says two
+            # results of one test may run at once.
+            target = conn.execute(
+                "SELECT org_id FROM tests WHERE test_id = %s"
+                + (" FOR NO KEY UPDATE" if appending else ""),
+                (test_id,)).fetchone()
+            if target is None:
+                # A named test that does not exist. NEVER mint: minting here
+                # would answer a request nobody made, and silently, since
+                # record_start swallows. The run is recorded unattached,
+                # which D8 already makes a permanently legal state.
+                return (None, None, org_id)
+            version_id = None
+            if appending:
+                n = conn.execute(
+                    "SELECT coalesce(max(n), 0) + 1 AS n FROM test_versions"
+                    " WHERE test_id = %s", (test_id,)).fetchone()["n"]
+                version_id = str(uuid.uuid4())
+                conn.execute(
+                    "INSERT INTO test_versions (version_id, test_id, n,"
+                    " user_query, robot_code, created_by, created_by_email,"
+                    " reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (version_id, test_id, n, user_query, robot_code,
+                     user_id, user_email, version_reason))
+                # The pointer and the description move WITH the version.
+                # Without current_version the new code is written and never
+                # executed — every later run resolves its code through that
+                # column — and without user_query the Tests row and the
+                # Update dialog keep prefilling the description this
+                # regeneration replaced.
+                conn.execute(
+                    "UPDATE tests SET current_version = %s, user_query = %s,"
+                    " updated_at = now() WHERE test_id = %s",
+                    (n, user_query, test_id))
+            elif test_version_id is not None:
+                # Executing a named version. The PAIR is checked rather than
+                # trusted: a result claiming a version of some other test
+                # would attribute its outcome to code it never ran, which is
+                # case 15's rule seen from the write side.
+                ok = conn.execute(
+                    "SELECT 1 FROM test_versions WHERE version_id = %s"
+                    " AND test_id = %s",
+                    (test_version_id, test_id)).fetchone()
+                version_id = test_version_id if ok else None
+            # Neither: the opening row of a regeneration, or its failure row.
+            # Both attach to the test with NO version, so "this test failed
+            # to regenerate" is visible on the test (D8 (b), case 10).
+            #
+            # The org is the TEST'S (D6), falling back to the caller's only
+            # when the test has none (case 35) — and only for the RUN. There
+            # is deliberately no _write_back_org call anywhere in this
+            # branch: reaching it takes nothing but a test_id in a request
+            # body, so a write-back here would hand the first caller to name
+            # an org-less test a permanent claim on it, which is precisely
+            # what the two gates below refuse on the older branches.
+            return (test_id, version_id,
+                    target["org_id"] if target["org_id"] is not None
+                    else org_id)
+
+        existing = conn.execute(
+            "SELECT r.test_id, r.test_version_id, t.user_id AS test_user_id,"
+            " t.org_id"
+            " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
+            " WHERE r.run_id = %s", (run_id,)).fetchone()
+        if existing and existing["test_id"]:
+            resolved_org = existing["org_id"]
+            if resolved_org is None and org_id is not None:
+                # Two guards, both about authority rather than identity (owner
+                # rulings 2026-09-08 and 2026-09-09 — see the docstring
+                # above). is_platform_admin withholds the repair from a
+                # caller whose org is arbitrary relative to the test; the
+                # authorship terms withhold it from a caller who merely
+                # SUPPLIED this run's id.
+                #
+                # The TEST's author, not the RUN's owner. Keying on the run
+                # would gate on a value THIS call is about to write: the
+                # UPSERT below runs after this and does
+                # `user_id = COALESCE(test_runs.user_id, EXCLUDED.user_id)`,
+                # so a refused call adopts the run and the caller's SECOND
+                # POST of the same client-supplied workflow_id would pass.
+                # tests.user_id has no such transition — it is written once,
+                # by the mint below or by the collapse's INSERT, and no
+                # UPDATE tests statement in this file sets it (see the
+                # docstring for why that claim is no longer stated as a
+                # count). It is also the column
+                # _VISIBLE_TEST_SQL binds, so the gate and the Tests list
+                # agree on what "yours" means for a test — though that list
+                # excludes an ORG-LESS one from an org-carrying caller by a
+                # separate `te.org_id = %s` clause, not by this column. It rides on the SELECT that already runs
+                # here — the same row, no extra round trip.
+                #
+                # `user_id is not None` is load-bearing, not decoration: a
+                # NULL author arrives as None, so without it a caller with no
+                # user_id claim would compare equal to a token-less test and
+                # pass. The RUN still takes the caller's org either way, on
+                # the last line of this block.
+                if (not is_platform_admin and user_id is not None
+                        and existing["test_user_id"] == user_id):
+                    _write_back_org(existing["test_id"])
+                resolved_org = org_id
+            return (existing["test_id"], existing["test_version_id"],
+                    resolved_org)
+
+        if rerun_of:
+            src = conn.execute(
+                "SELECT r.test_version_id, t.test_id, t.org_id,"
+                " t.user_id AS test_user_id, t.current_version"
+                " FROM test_runs r JOIN tests t ON t.test_id = r.test_id"
+                " WHERE r.run_id = %s", (rerun_of,)).fetchone()
+            if src:
+                # The version the SOURCE RUN actually used, not the test's
+                # newest. A re-run re-executes that run's stored code verbatim
+                # (the rerun endpoint hands stream_execute_only
+                # resolve_robot_code(source)), so current_version labels the
+                # new run with code it never ran whenever the source is not
+                # the newest — measured live: a re-run of a version-1 run
+                # pointed at version 2. Reading the source's own column is
+                # right for a CHAIN too, because rerun_of is root-flattened by
+                # the caller and every link re-executes the original's code.
+                version_id = src["test_version_id"]
+                if version_id is None:
+                    # A code-less run the collapse attached (D8) has no
+                    # version. Re-running one is legal — resolve_robot_code
+                    # recovers the code from the artifact store — so fall back
+                    # to the test's current version rather than propagating
+                    # the NULL onto a run that did execute something.
+                    ver = conn.execute(
+                        "SELECT version_id FROM test_versions"
+                        " WHERE test_id = %s AND n = %s",
+                        (src["test_id"], src["current_version"])).fetchone()
+                    version_id = ver["version_id"] if ver else None
+                resolved_org = src["org_id"]
+                if resolved_org is None and org_id is not None:
+                    # The SAME three terms as the branch above, deliberately
+                    # identical (fix round 2, 2026-09-09). `caller_can_access`
+                    # guards this branch, but api/endpoints.py hands it the
+                    # SOURCE RUN's user_id and org_id and never the test's
+                    # author — so it says nothing about the test this writes,
+                    # and a run whose org is concrete while its test's is NULL
+                    # (the D6 divergence, and precisely what the branch above
+                    # leaves behind when it refuses) admits that run's own
+                    # owner — what the adopter becomes — plus the org's
+                    # org_admin (rule 5) and, once the run is filed in a
+                    # folder, any member of the org (rule 3). Without this
+                    # term the gate above was
+                    # a one-click detour: adopt the run with one POST, then
+                    # "Run again". `user_id is not None` is needed here for
+                    # the identical reason, and an asymmetry between the two
+                    # branches would itself be the defect.
+                    if (not is_platform_admin and user_id is not None
+                            and src["test_user_id"] == user_id):
+                        _write_back_org(src["test_id"])
+                    resolved_org = org_id
+                return (src["test_id"], version_id, resolved_org)
+
+        if not robot_code:
+            # D8 scenario (a): no code, no test.
+            return (None, None, org_id)
+
+        test_id = str(uuid.uuid4())
+        version_id = str(uuid.uuid4())
+        # IS NOT DISTINCT FROM, not '=': the org-less bucket (bench and
+        # AUTH_ENFORCED=false) must get sequential keys too, and '=' is
+        # unknown for NULL so every such test would try key_n = 1.
+        insert_test = (
+            "INSERT INTO tests (test_id, org_id, key_n, user_id, user_email,"
+            " user_query, current_version) SELECT %s, %s,"
+            " coalesce(max(key_n), 0) + 1, %s, %s, %s, 1 FROM tests"
+            " WHERE org_id IS NOT DISTINCT FROM %s")
+        params = (test_id, org_id, user_id, user_email, user_query, org_id)
+        # max(key_n) is read and max+1 written in ONE statement, which still
+        # does not make the allocation atomic ACROSS transactions: two
+        # record_start calls in the same org compute the same key and the
+        # loser hits idx_tests_org_key. One bounded retry recomputes it. A
+        # SAVEPOINT (conn.transaction()) rather than conn.rollback(), because
+        # this runs inside the caller's transaction and a rollback would
+        # discard whatever else it holds. Two collisions in a row and we give
+        # up: the outer swallow leaves the run unattached, which D8 already
+        # makes a legal state, and spinning here would block the pipeline.
+        for attempt in (1, 2):
+            try:
+                with conn.transaction():
+                    conn.execute(insert_test, params)
+                break
+            except psycopg.errors.UniqueViolation:
+                if attempt == 2:
+                    raise
+                logger.warning(
+                    "[RUN_REGISTRY] test key collision for run %s in org %s; "
+                    "recomputing", run_id, org_id)
+        # created_by_email is the same value written into tests.user_email
+        # just above: on a minted test the version's author and the test's
+        # author are one person, and writing it here rather than reading it
+        # back through a join keeps the name that was true at write time.
+        conn.execute(
+            "INSERT INTO test_versions (version_id, test_id, n, user_query,"
+            " robot_code, created_by, created_by_email)"
+            " VALUES (%s, %s, 1, %s, %s, %s, %s)",
+            (version_id, test_id, user_query, robot_code, user_id, user_email))
+        return (test_id, version_id, org_id)
+
     def record_start(
         self,
         run_id: str,
@@ -518,6 +1429,10 @@ class RunRegistry:
         rerun_of: Optional[str] = None,
         error_message: Optional[str] = None,
         group_id: Optional[str] = None,
+        is_platform_admin: bool = False,
+        test_id: Optional[str] = None,
+        test_version_id: Optional[str] = None,
+        version_reason: Optional[str] = None,
     ) -> None:
         """Upsert a run row. Ownership/query/lineage are write-once (COALESCE
         keeps the first non-NULL value); status and updated_at always advance.
@@ -539,8 +1454,32 @@ class RunRegistry:
         group_id files the new run into a folder. Only the History "Run
         again" path sets it, inheriting the folder of the run it cloned; it
         is write-once like ownership, so a later record_start cannot drag a
-        run the user moved mid-flight back to the source folder."""
+        run the user moved mid-flight back to the source folder.
+
+        The test_id/test_version_id WRITTEN on the row come from
+        _attach_test, which runs on THIS connection before the INSERT because
+        it can revise org_id (D6: a result takes the org of its test).
+        is_platform_admin records whether the caller held platform-admin
+        authority at the moment of the write (D7) and is write-once by
+        omission from the ON CONFLICT body.
+
+        The three parameters of the same names are the caller NAMING a target
+        rather than letting _attach_test derive one (P2 Task 7), and only the
+        /versions and Tests-page-Run paths pass them. test_id selects the
+        test; version_reason alongside robot_code appends version n+1 to it
+        and is the label spec section 7.4 records ('regenerated' when the
+        description came back unchanged, 'edited' when it did not);
+        test_version_id says which existing version a run is executing.
+        _attach_test's first branch is the authority on what each combination
+        does — in particular that a named test is never created and never
+        claimed here."""
         try:
+            # The caller's NAMED target, kept under its own names: the two
+            # locals below are rebound from _attach_test's return (and reset
+            # to None when it fails), so reading the parameters back on the
+            # folder retry would pass whatever the first attach resolved
+            # instead of what the caller asked for.
+            named_test_id, named_version_id = test_id, test_version_id
             user_id = (user or {}).get("user_id")
             org_id = (user or {}).get("org_id")
             if org_id is None and user_id:
@@ -549,8 +1488,10 @@ class RunRegistry:
                 group_id = self._fileable_group_id(group_id, org_id)
             sql = """
                 INSERT INTO test_runs
-                    (run_id, user_id, user_email, user_query, robot_code, rerun_of, status, org_id, error_message, group_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (run_id, user_id, user_email, user_query, robot_code,
+                     rerun_of, status, org_id, error_message, group_id,
+                     test_id, test_version_id, ran_as_platform_admin)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (run_id) DO UPDATE SET
                     status     = EXCLUDED.status,
                     updated_at = now(),
@@ -558,27 +1499,60 @@ class RunRegistry:
                     user_email = COALESCE(test_runs.user_email, EXCLUDED.user_email),
                     user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
                     robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
+                    -- write-once, like ownership: _attach_test is idempotent
+                    -- and returns the row's existing test, so this only ever
+                    -- fills a NULL left by a failed or code-less first write.
+                    test_id         = COALESCE(test_runs.test_id, EXCLUDED.test_id),
+                    test_version_id = COALESCE(test_runs.test_version_id,
+                                               EXCLUDED.test_version_id),
                     rerun_of   = COALESCE(test_runs.rerun_of, EXCLUDED.rerun_of),
                     org_id     = COALESCE(test_runs.org_id, EXCLUDED.org_id),
                     error_message = COALESCE(EXCLUDED.error_message, test_runs.error_message),
                     group_id   = COALESCE(test_runs.group_id, EXCLUDED.group_id)
+                    -- ran_as_platform_admin is absent on purpose: write-once
+                    -- by omission, so the value kept is the one from the write
+                    -- that CREATED the row, which is the honest reading of
+                    -- "who started this run" (D7).
                 """
 
-            def _params(gid: Optional[str]) -> tuple:
-                return (
-                    run_id,
-                    user_id,
-                    (user or {}).get("email"),
-                    user_query,
-                    robot_code,
-                    rerun_of,
-                    status,
-                    org_id,
-                    error_message,
-                    gid,
-                )
-
             with self._pool.connection() as conn:
+                test_id = test_version_id = None
+                try:
+                    test_id, test_version_id, org_id = self._attach_test(
+                        conn, run_id, user_id, (user or {}).get("email"),
+                        user_query, robot_code, rerun_of, org_id,
+                        is_platform_admin, named_test_id, named_version_id,
+                        version_reason)
+                except Exception as e:
+                    # Bookkeeping must never cost the history row. Roll the
+                    # aborted sub-work back or the pool's COMMIT on exit takes
+                    # the INSERT down with it (same reason the folder retry
+                    # below rolls back).
+                    conn.rollback()
+                    logger.error(
+                        "[RUN_REGISTRY] test attach failed for %s: %s", run_id, e)
+
+                # Defined HERE, after the attach, so the closure reads the
+                # org_id the TEST decided (D6) rather than the caller's, and
+                # so the folder retry below picks up whatever the re-attach
+                # reassigns. Closing over a stale org_id is the failure mode.
+                def _params(gid: Optional[str]) -> tuple:
+                    return (
+                        run_id,
+                        user_id,
+                        (user or {}).get("email"),
+                        user_query,
+                        robot_code,
+                        rerun_of,
+                        status,
+                        org_id,
+                        error_message,
+                        gid,
+                        test_id,
+                        test_version_id,
+                        is_platform_admin,
+                    )
+
                 try:
                     conn.execute(sql, _params(group_id))
                 except psycopg.errors.ForeignKeyViolation:
@@ -595,6 +1569,25 @@ class RunRegistry:
                     logger.warning(
                         "[RUN_REGISTRY] folder %s vanished mid-write; "
                         "recording run %s ungrouped", group_id, run_id)
+                    # That rollback also discarded the tests/test_versions
+                    # rows _attach_test just INSERTED. Replaying the old
+                    # test_id would point the retry at a row that no longer
+                    # exists, violate fk_test_runs_test, and be swallowed by
+                    # the outer except — losing the history row this retry
+                    # exists to save. So attach again and rebind the three
+                    # names _params reads at call time.
+                    try:
+                        test_id, test_version_id, org_id = self._attach_test(
+                            conn, run_id, user_id, (user or {}).get("email"),
+                            user_query, robot_code, rerun_of, org_id,
+                            is_platform_admin, named_test_id,
+                            named_version_id, version_reason)
+                    except Exception as e:
+                        conn.rollback()
+                        test_id = test_version_id = None
+                        logger.error(
+                            "[RUN_REGISTRY] test re-attach failed for %s: %s",
+                            run_id, e)
                     conn.execute(sql, _params(None))
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] record_start failed for {run_id}: {e}")
@@ -642,6 +1635,7 @@ class RunRegistry:
         self,
         folder_org_id: Optional[str],
         run_org_id: Optional[str] = None,
+        include_unowned: bool = True,
     ) -> List[Dict[str, Any]]:
         """The org's folders, name-sorted, each with its run count.
 
@@ -660,6 +1654,16 @@ class RunRegistry:
         it to the caller was what made a member's chip read 1 beside a folder
         holding 2 — the same defect as their table listing one run out of two.
 
+        include_unowned is the ONE caller-shaped term that remains, and it is
+        not a narrowing by user: it is "may this caller read a row nobody
+        owns", the same disjunction list_runs and list_tests apply. Without it
+        both counts reached rows no readable table shows — measured, for a
+        member, a peer and an org_admin alike: a token-less "Run again" left
+        run_count at 2 above a table of 1, and an author-less test left
+        test_count at 1 above a Tests table of 0. Spec section 14 D4 requires
+        each chip to EQUAL the table beneath it, so the fix is the table's own
+        predicate rather than two bolted-on terms.
+
         The run scope goes in the JOIN condition, not the WHERE clause: in
         the WHERE it would turn the LEFT JOIN into an inner one and drop
         every folder that holds no runs.
@@ -668,7 +1672,66 @@ class RunRegistry:
         fails closed. groups_endpoints already refuses to call with it, but a
         guard at one call site and a fail-closed default are not the same
         protection: without this, that pair emitted no WHERE at all and
-        listed every org's folders."""
+        listed every org's folders.
+
+        test_count arrived with the 2026-09-07 split and is additive —
+        run_count keeps its name AND its meaning, a count of RESULTS.
+        test_count's subquery IS scoped by run_org_id now, and the note
+        that once stood here — that adding an org scope would zero the
+        count for the
+        token-less dev caller — is answered by the guard rather than by
+        leaving the term out: that caller's run_org_id is None, which emits
+        no term at all, exactly as it does for the run count beside it.
+
+        What the paragraph below argues is still worth keeping, because it is
+        why the org term was thought unnecessary rather than merely omitted —
+        and one of its two premises has since been strengthened: assign_runs
+        now binds te.org_id directly (the D1 fix), so it no longer reaches a
+        test merely THROUGH a run's org.
+
+        What keeps that safe is assign_runs and assign_tests, the only two
+        places this column mutates to a CONCRETE folder outside the one-time
+        migration bootstrap (which sets it once, at INSERT, from the newest
+        filed run among the runs it merges into that test — see assign_runs' own
+        docstring for why that makes migrated data reachable here; its
+        grouping key is (org_id, user_id, user_query), so it is single-org
+        by construction and contributes no counterexample to this
+        invariant). tests.group_id also mutates on its own ON DELETE SET
+        NULL when the folder goes (delete_group's own docstring documents
+        it), and that direction
+        contributes no counterexample either — it only ever clears the
+        column, so it can add no test to any folder's count: _visible_group
+        makes the folder the caller's org's, and `r.org_id = %s` in the same
+        statement makes the run's org the caller's too, so a test reached
+        through that run carries the folder's org. assign_tests is stricter
+        again and adds no counterexample of its own: it binds `te.org_id`
+        against the caller's org directly, so the test it files is already
+        in the folder's org rather than merely reached through a run that
+        is. (NOT _fileable_group_id,
+        which reads as if it governed this and does not: its one call site
+        is record_start, and it gates a new RUN's own group_id, never
+        tests.group_id.) The folder join then enforces the same thing at
+        every read.
+
+        The exception that used to be real: a test whose runs span two orgs —
+        a known, ledgered gap — could be filed through its org-a run into an
+        org-a folder while tests.org_id said org-b, and this subquery then
+        counted a test no org-scoped read can reach. TWO changes close it
+        independently now: assign_runs refuses unless te.org_id is the
+        caller's own, and the te2.org_id term above narrows the count itself.
+        The cross-org TEST gap it rides on is untouched and still ledgered.
+
+        This run_count join is one of the FOUR places a RUN's folder is
+        expressed in SQL, and the second that cannot call _group_join: that
+        join binds a CALLER's org and this one binds run_org_id in the JOIN,
+        so it hand-writes the same COALESCE. get_run_owner is the third, and
+        _group_join_for_test_results — added by c20c176, which is why the
+        older counts here said three — is the fourth.
+        Change what "published" means in any of them and change all four — a
+        chip resolving a folder differently from the table it labels is the
+        whole defect this count exists to make visible. The test_count
+        subquery above is NOT one of the four: its rows are tests, so it reads
+        tests.group_id with no COALESCE, exactly like _group_join_for_tests."""
         if run_org_id is None:
             run_org_id = folder_org_id
         elif folder_org_id is None:
@@ -677,6 +1740,27 @@ class RunRegistry:
         if run_org_id is not None:
             join = " AND t.org_id = %s"
             join_params = [run_org_id]
+        # The fail-closed half of both table predicates. Inside a FOLDER,
+        # _VISIBLE_RUN_SQL's own published term (g.group_id IS NOT NULL) is
+        # true by construction, so that constant collapses to exactly this
+        # for every identified caller — and _OWNED_RUN_SQL, which an
+        # org_admin gets, IS this. So one term serves both caller shapes, and
+        # include_unowned is the same disjunction list_runs applies: only a
+        # platform admin or the token-less dev caller may READ a row nobody
+        # owns, so only they may have it counted.
+        owned_run, owned_test = "", ""
+        if not include_unowned:
+            owned_run = " AND t.user_id IS NOT NULL"
+            owned_test = " AND te2.user_id IS NOT NULL"
+        # test_count had NO org term at all, which is what let it count an
+        # author-less test whose org the Tests table narrows away. run_org_id
+        # is the caller's row scope for BOTH counts — it is scope.org_id at
+        # the one call site, the same value list_tests binds to te.org_id —
+        # and its name predates the tests count rather than narrowing it.
+        test_org, test_org_params = "", []
+        if run_org_id is not None:
+            test_org = " AND te2.org_id = %s"
+            test_org_params = [run_org_id]
         where, where_params = "", []
         if folder_org_id is not None:
             where = "WHERE g.org_id = %s "
@@ -685,12 +1769,25 @@ class RunRegistry:
             rows = conn.execute(
                 "SELECT g.group_id, g.name, g.created_by, "
                 "       g.created_at, g.updated_at, "
-                "       COUNT(t.run_id) AS run_count "
+                "       COUNT(t.run_id) AS run_count, "
+                # Scalar subquery, NOT a second LEFT JOIN off run_groups: two
+                # one-to-many joins multiply, and a folder of 3 tests and 30
+                # results would report 90 for BOTH counts.
+                "       (SELECT count(*) FROM tests te2 "
+                "          WHERE te2.group_id = g.group_id"
+                f"{test_org}{owned_test}) AS test_count "
                 "FROM run_groups g "
-                f"LEFT JOIN test_runs t ON t.group_id = g.group_id{join} "
+                "LEFT JOIN (test_runs t "
+                "           LEFT JOIN tests te ON te.test_id = t.test_id) "
+                f"       ON COALESCE(te.group_id, t.group_id) = g.group_id"
+                f"{join}{owned_run} "
                 f"{where}"
                 "GROUP BY g.group_id ORDER BY lower(g.name)",
-                join_params + where_params,
+                # SELECT-list params FIRST: the test_count subquery sits
+                # earlier in the SQL text than the JOIN's, and psycopg binds
+                # %s strictly by position. Getting this order wrong filters
+                # on the wrong values without raising.
+                test_org_params + join_params + where_params,
             ).fetchall()
         out = []
         for r in rows:
@@ -811,7 +1908,10 @@ class RunRegistry:
         except psycopg.errors.UniqueViolation:
             raise DuplicateGroupName(self._colliding_group_name(org_id, name))
         row = dict(row)
+        # Both counts list_groups carries, so the one RunGroup shape the SPA
+        # reads holds for a folder it has just made. A new folder holds none.
         row["run_count"] = 0
+        row["test_count"] = 0
         row["created_at"] = row["created_at"].isoformat()
         row["updated_at"] = row["updated_at"].isoformat()
         return row
@@ -894,14 +1994,110 @@ class RunRegistry:
         audit_run_ids, if given, is appended with the run ids the
         membership SELECT below sees, read BEFORE the DELETE:
         fk_test_runs_group's ON DELETE SET NULL erases each member's
-        group_id as part of that same statement. That SELECT is a
-        snapshot under READ COMMITTED, not a lock: a run assigned to this
-        folder concurrently — after the snapshot but before the DELETE
-        proceeds — is ungrouped by that same DELETE without ever
-        appearing in this list (assign_runs' own ForeignKeyViolation
-        handling is the other side of the same race). The list is
+        group_id as part of that same statement, and tests.group_id's own
+        ON DELETE SET NULL erases the test's.
+
+        That SELECT reads membership through the TEST as well as off the
+        run's own column, since 2026-09-07. A run whose own group_id is
+        NULL is still a member when its TEST is filed here — filing one
+        result of a test leaves its siblings in exactly that shape, and so
+        does the migration — and such a run IS returned to Ungrouped by
+        this DELETE, so an audit blind to it understates the blast radius
+        of a destructive org-admin action.
+
+        It is a UNION of the two columns rather than the reads' COALESCE,
+        and that direction is still deliberate: it over-reports in the
+        same ONE shape as before — a run whose own group_id is this
+        folder while its test is filed elsewhere, which DISPLAYS in the
+        test's folder and so only has a dead column cleared here.
+
+        The org term — `(org_id = %s OR org_id IS NULL)` — is ANDed
+        across the WHOLE predicate, not scoped onto the test branch
+        alone: both `group_id = %s` and `test_id IN (...)` sit inside
+        it. Scoping only the test branch would leave the direct-column
+        arm open to the identical leak, and that arm is reachable:
+        record_start's rerun path can write a row whose own group_id
+        names THIS folder while its org_id names a different org —
+        `_fileable_group_id` validates an inherited group_id against the
+        caller's PRE-D6 org, called from record_start before its call to
+        `_attach_test`; `_attach_test`'s D6 paragraph (rerun_of branch)
+        then reassigns the row's FINAL org_id to the shared test's own
+        org, and record_start's own INSERT/UPSERT writes the
+        pre-D6-checked group_id beside the post-D6 org_id with nothing
+        re-validating the pair.
+
+        Unscoped altogether, the test branch let a run in a genuinely
+        FOREIGN org ride into the audit through a test it merely
+        shares with a run the caller legitimately filed — a test's
+        runs can span two orgs (a documented, ordinary-flow-reachable
+        gap: see _attach_test's NULL-org fallback paragraph). That gap
+        is not new here:
+        list_groups' own docstring names this same shape for its
+        test_count subquery and declines to fix it there ("Fixing it
+        belongs with that gap, not here"). list_groups resolves it
+        the OTHER way, though — its subquery counts that test into
+        the folder's number with no org guard at all, which is safe
+        there because a COUNT names no one. An audit of a destructive
+        action is not that: its only job is to NAME the run_ids about
+        to be affected, durably, and naming another org's run_id in
+        THIS org's audit record is the cross-tenant disclosure the
+        org boundary exists to prevent everywhere else in this file.
+        So here the choice runs opposite to list_groups': hide the
+        foreign row rather than leak it, and accept under-reporting
+        as its cost — a foreign-org run whose own group_id pointed at
+        this folder still has that column cleared by ON DELETE SET
+        NULL, silently, and is never named in this audit.
+
+        That is also a correction: it is NOT true that no read path
+        ever displays a run in this shape, which this docstring used
+        to claim. get_run_owner anchors `g.org_id = t.org_id`
+        regardless of caller, so it never resolves the foreign folder
+        for that run, and list_runs excludes it via `t.org_id = %s`
+        for every caller whose row filter binds a concrete org. But a
+        validated PLATFORM ADMIN calls list_runs with `user_id=None,
+        org_id=None, folder_org_id=<their own org>`
+        (the admin branch of history_scope(), deliberately, so their History
+        spans every org while their folders stay their own) — org_id
+        is exactly the row filter that excludes the foreign run for
+        everyone else, and it is the one argument that caller does
+        not bind. Under that call the foreign run's folder resolves,
+        through its shared test, to the admin's own folder, and
+        nothing in the WHERE clause excludes the row:
+        `GET /api/history?group=<this folder>` genuinely lists it as
+        a member. The org scope on this audit does not rest on
+        "nothing shows it" — it rests on the naming argument above,
+        which holds regardless of who else can see the row.
+
+        A run with org_id IS NULL stays admitted, by choice: it can
+        never be filed directly — assign_runs and record_start's
+        group_id path both require a concrete org match — but it can
+        share a test with one that is, and the token-less dev
+        caller's join binds no g.org_id term at all, so such a run
+        genuinely displays in this folder for that caller. A bare
+        `org_id = %s`, or `IS NOT DISTINCT FROM %s`, would exclude it
+        silently, under-reporting a blast radius that is real for
+        that caller shape — and, unlike the foreign-org case above,
+        excluding it crosses no OTHER tenant's boundary, since
+        org-less names no tenant at all. Never under-reporting is the
+        rule everywhere except that one case — a run belonging to a
+        different, identifiable org — where naming it would leak a
+        foreign tenant's run_id and hiding wins instead.
+
+        That SELECT is itself a snapshot under READ COMMITTED, not a lock:
+        a run assigned to this folder concurrently — after the snapshot
+        but before the DELETE proceeds — is ungrouped by that same DELETE
+        without ever appearing in this list (assign_runs' own
+        ForeignKeyViolation handling is the other side of the same race),
+        and so is a run whose TEST is filed here concurrently. The list is
         therefore what this transaction's snapshot could see, not a
         guarantee of the folder's full membership at delete time.
+
+        The lock-order SELECT that now runs ahead of it narrows that by
+        exactly one shape and no more: a test being moved OUT of this
+        folder is waited for, so the audit sees it settled either way. A
+        test being moved INTO the folder is not in it when that statement
+        runs, so it is not locked and the race above is unchanged for it.
+        The lock is there for the deadlock, not for the audit.
         Appended only once the DELETE actually removes a row, so it stays
         empty on every False return, the same guarantee rename_group's
         audit_old_name makes."""
@@ -910,11 +2106,41 @@ class RunRegistry:
         with self._pool.connection() as conn:
             if self._visible_group(conn, org_id, group_id) is None:
                 return False
+            # TESTS FIRST, before the DELETE takes anything. The DELETE is a
+            # single statement whose two cascades are foreign-key ACTIONS, so
+            # which table it locks first is decided by trigger-name order and
+            # by no line of code at all — measured on a fresh database it
+            # reached the result row before the test row, which deadlocked
+            # with assign_tests (tests, then that test's results). An
+            # explicit leading lock is the only way to make the order
+            # deterministic here, and it must stay even if a database is ever
+            # observed cascading the other way: an UPGRADED database may order
+            # its triggers differently from the fresh one this was measured on.
+            # Same mode and same ordering as assign_runs' lock, for the same
+            # reasons.
+            #
+            # A run filed here whose TEST is filed elsewhere is reached only by
+            # the run-side cascade and takes no lock in this statement. It
+            # cannot deadlock through that: the writer holding such a run is
+            # moving a test this folder does not contain, so it never waits on
+            # anything this transaction holds.
+            #
+            # Cost on that same 500k-run schema: 1.37 ms for a folder
+            # holding 500 tests, 0.64 ms for an empty one.
+            conn.execute(
+                "SELECT test_id FROM tests WHERE group_id = %s"
+                " ORDER BY test_id FOR NO KEY UPDATE",
+                (group_id,),
+            )
             run_ids = None
             if audit_run_ids is not None:
                 rows = conn.execute(
-                    "SELECT run_id FROM test_runs WHERE group_id = %s",
-                    (group_id,),
+                    "SELECT run_id FROM test_runs"
+                    " WHERE (org_id = %s OR org_id IS NULL)"
+                    "   AND (group_id = %s"
+                    "        OR test_id IN (SELECT test_id FROM tests"
+                    "                       WHERE group_id = %s))",
+                    (org_id, group_id, group_id),
                 ).fetchall()
                 run_ids = [r["run_id"] for r in rows]
             cur = conn.execute(
@@ -981,6 +2207,997 @@ class RunRegistry:
             ).fetchone()
         return row["n"]
 
+    @staticmethod
+    def _group_join_for_tests(
+        org_id: Optional[str], *, identified: bool = False
+    ) -> Tuple[str, list]:
+        """_group_join's three forms, anchored on `te` for reads whose rows are
+        tests. No COALESCE here: there is no result in scope to fall back to,
+        because these rows ARE the tests. Kept separate rather than
+        parameterised on the alias: the two have different WHERE vocabularies,
+        and one function answering both would need a branch at every use."""
+        if org_id is None:
+            if identified:
+                return "LEFT JOIN run_groups g ON FALSE", []
+            return "LEFT JOIN run_groups g ON g.group_id = te.group_id", []
+        return (
+            "LEFT JOIN run_groups g ON g.group_id = te.group_id"
+            " AND g.org_id = %s",
+            [org_id],
+        )
+
+    @staticmethod
+    def _visible_run_clauses(
+        user_id: Optional[str],
+        org_id: Optional[str],
+        include_unowned: bool,
+    ) -> Tuple[list, list]:
+        """list_runs' run-visibility stack as (clauses, params), over alias
+        `t` -- _VISIBLE_RUN_SQL / _OWNED_RUN_SQL and the row's org term, in
+        that order.
+
+        One definition, because three reads now ask the same question about
+        the same rows: the test drawer's results page and its count
+        (get_test_detail), and the per-row aggregate the Tests page shows
+        (_caller_results_lateral). A second copy written by hand is a second
+        answer, and the one place these must never disagree is exactly here
+        -- a row that advertises a result the drawer will not list is the
+        defect this stack exists to prevent.
+
+        The caller supplies its own subject term (`t.test_id = %s` for the
+        drawer, `t.test_id = te.test_id` for the lateral) and puts it FIRST,
+        so its parameter binds ahead of these -- psycopg binds %s strictly by
+        position."""
+        clauses: list = []
+        params: list = []
+        if user_id is not None:
+            clauses.append(_VISIBLE_RUN_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append(_OWNED_RUN_SQL)
+        if org_id is not None:
+            clauses.append("t.org_id = %s")
+            params.append(org_id)
+        return clauses, params
+
+    @staticmethod
+    def _group_join_for_test_results(
+        org_id: Optional[str], *, identified: bool = False
+    ) -> Tuple[str, list]:
+        """_group_join's three forms WITHOUT its `tests` hop, for a lateral
+        that already has the test in scope as the outer `te`.
+
+        Not a shortcut. Reusing _group_join inside such a lateral would be a
+        SILENT wrong answer: its hop is
+        `LEFT JOIN tests te ON te.test_id = t.test_id`, and inside a
+        correlated subquery that alias shadows the outer one -- so the
+        lateral's own `t.test_id = te.test_id` correlation would compare a
+        row to itself, match every result of every test, and still return a
+        number that looks entirely plausible.
+
+        The folder expression is _group_join's own,
+        COALESCE(te.group_id, t.group_id), read off the OUTER te -- the same
+        row the hop would have found, because every result the lateral scans
+        is a result of that test. The COALESCE stays for the reason
+        _group_join gives: a test may be unfiled while one of its results
+        carries a folder of its own, which the migration and delete_group's
+        docstring both name.
+
+        The alias stays `g` so _VISIBLE_RUN_SQL can be used character for
+        character. Inside the lateral it therefore means the RESULT'S folder
+        and shadows the outer `g`, which means the TEST'S; nothing inside the
+        lateral reads the outer one, and if anything ever needs to, it must
+        be renamed rather than assumed."""
+        folder = "COALESCE(te.group_id, t.group_id)"
+        if org_id is None:
+            if identified:
+                return "LEFT JOIN run_groups g ON FALSE", []
+            return f"LEFT JOIN run_groups g ON g.group_id = {folder}", []
+        return (
+            f"LEFT JOIN run_groups g ON g.group_id = {folder}"
+            " AND g.org_id = %s",
+            [org_id],
+        )
+
+    def _caller_results_lateral(
+        self,
+        user_id: Optional[str],
+        org_id: Optional[str],
+        folder_org_id: Optional[str],
+        include_unowned: bool,
+    ) -> Tuple[str, list]:
+        """ONE lateral over the outer test's results THIS CALLER MAY OPEN,
+        carrying every run-derived number a Tests row shows. Aliased `whole`.
+
+        Why narrowed at all: the row's numbers and the drawer's list are two
+        descriptions of one set, and un-narrowed the row described a bigger
+        one. A member's UNPUBLISHED test re-run by their org_admin gave the
+        member result_count=2, last_status='failed', a last_run_id the server
+        answers 404 for, and a failing health dot -- beside a drawer listing
+        the single result they own. Reachable in ordinary signed-in use, not
+        only by the token-less dev caller.
+
+        "Whole-test" keeps its meaning on the axis it was about: every
+        VERSION's results, not just the current one (ruling R2). The axis
+        that narrows is the CALLER one, which was never what R2 widened.
+
+        Both scopes come off ONE scan, which is what makes this cheaper than
+        the three joins it replaces rather than merely more correct:
+
+        - result_count, pass_count and last_* aggregate every row the scan
+          returns -- ARRAY_AGG(... ORDER BY created_at DESC)[1] picks the
+          newest row's column without a second pass;
+        - health_status, running and spark add a FILTER on cv.version_id, so
+          the current-version scope (ruling R1) is a filtered aggregate over
+          the same rows instead of two more laterals. cv must therefore
+          appear BEFORE this in the FROM clause, or its version_id is not
+          in scope to filter on.
+
+        health_status is the newest COMPLETED result of the current version.
+        'running' and 'generated' are excluded from it deliberately: case 18
+        says a stuck in-flight result must never read a passing test as
+        failing, and a version that exists but has completed nothing reads
+        "not run" (case 11). `running` is a bool_or over the
+        whole current version rather than a property of the newest row, which
+        is case 25: two results of one test may be in flight at once. It is
+        COALESCEd because bool_or over no rows is NULL, and the field's
+        contract is a boolean.
+
+        spark_statuses is EVERY completed result of the current version,
+        oldest first; the caller keeps the last ten. Aggregating them all
+        and trimming in Python is not a regression on the bounded inner
+        LIMIT 10 it replaced: at FIVE times the results per test this
+        shape pulls further ahead, not closer (list_tests' own numbers,
+        9.1x at 50 results against 2.3x at 10), because the bound cost a
+        whole extra scan and sort of the same rows to apply.
+
+        Binds the folder join's parameter first, then the visibility
+        clauses'. Every one of them sits inside the FROM clause of the
+        statement that embeds this, so they bind AFTER that statement's own
+        join params and BEFORE its WHERE params -- list_tests and
+        get_test_detail both order their params that way and say so."""
+        join, params = self._group_join_for_test_results(
+            folder_org_id or org_id, identified=user_id is not None)
+        extra, extra_params = self._visible_run_clauses(
+            user_id, org_id, include_unowned)
+        clauses = ["t.test_id = te.test_id"] + extra
+        newest = "ORDER BY t.created_at DESC, t.run_id DESC"
+        # The current version's completed results, as one FILTER reused by
+        # health and spark alike so the two can never disagree about which
+        # rows count.
+        current = ("FILTER (WHERE t.test_version_id = cv.version_id"
+                   " AND t.status IN ('passed', 'failed', 'error'))")
+        return (
+            "LEFT JOIN LATERAL ("
+            " SELECT COUNT(*) AS result_count,"
+            " COUNT(*) FILTER (WHERE t.status = 'passed') AS pass_count,"
+            f" (ARRAY_AGG(t.run_id {newest}))[1] AS last_run_id,"
+            f" (ARRAY_AGG(t.status {newest}))[1] AS last_status,"
+            f" (ARRAY_AGG(t.created_at {newest}))[1] AS last_run_at,"
+            f" (ARRAY_AGG(t.status {newest}) {current})[1] AS health_status,"
+            " COALESCE(bool_or(t.test_version_id = cv.version_id"
+            " AND t.status = 'running'), FALSE) AS running,"
+            " ARRAY_AGG(t.status ORDER BY t.created_at ASC, t.run_id ASC)"
+            f" {current} AS spark_statuses"
+            f" FROM test_runs t {join}"
+            f" WHERE {' AND '.join(clauses)}"
+            ") whole ON TRUE ",
+            params + extra_params,
+        )
+
+    def count_ungrouped_tests(
+        self,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> int:
+        """The Ungrouped chip's count for the TESTS page (P2 reads it).
+
+        The same sentence as count_ungrouped, over `tests`: it uses
+        _VISIBLE_TEST_SQL because these rows are tests, and binds te.user_id
+        rather than t.user_id for the same reason. Written in P1 with no reader
+        at all; P2 gave it one — groups_endpoints returns it as
+        ungrouped_test_count and useGroups.ts reads it onto the Ungrouped
+        chip — so it DOES move a number on a current screen, which is
+        what this docstring's own first line already says."""
+        join, params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses = ["g.group_id IS NULL"]
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params = params + [user_id]
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params = params + [org_id]
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM tests te {join} "
+                f"WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+        return row["n"]
+
+    def list_tests(
+        self,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        q: Optional[str] = None,
+        group: Optional[str] = None,
+        health: Optional[str] = None,
+        sort: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """The Tests page's row list + total (P2 reads it; nothing else does
+        yet). Same caller-scoping shape as list_runs, over `tests` instead of
+        `test_runs`: _group_join_for_tests and _VISIBLE_TEST_SQL, not
+        _group_join/_VISIBLE_RUN_SQL, because these rows are tests (section
+        5a). user_id/org_id/folder_org_id/include_unowned mean exactly what
+        they mean in list_runs and count_ungrouped_tests.
+
+        q matches ONLY tests.user_query (spec section 10 case 26 -- Activity
+        keeps matching a result's own copy; this is not list_runs' three-field
+        OR over query/email/run id). group is a run_groups id or the literal
+        "ungrouped", exactly as list_runs reads it. health is "passing",
+        "failing", or anything else (None/"all"/omitted) for no filter --
+        the caller validates the public all|passing|failing vocabulary before
+        this is reached, the same trust boundary list_runs has with `status`.
+
+        sort is accepted but not yet read: the endpoint layer now validates
+        it down to a single Literal value ("last_run", spec case 27's only
+        defined order), but this method does not branch on it -- the order
+        below is unconditional regardless of what's passed. It is threaded
+        through the signature now so a later task can widen the endpoint's
+        Literal and give this method real values to switch on without
+        another signature change.
+
+        THREE scopes live in one row, and getting any two of them crossed is
+        the defect this split exists to remove:
+
+        - every run-derived value is scoped to the results THIS CALLER MAY
+          OPEN -- list_runs' own predicate stack, applied once in
+          _caller_results_lateral. It is not a filter layered on top of the
+          numbers; it is the set the numbers are computed over, which is why
+          the row and the drawer can no longer describe different sets. See
+          that method for the shape this fixes and what it costs.
+        - version_count, result_count, pass_count, last_status, last_run_at,
+          last_run_id are WHOLE-TEST -- every version, every result of this
+          test_id the caller may open. "This has run 312 times" is a fact
+          about the test (section 6.1), and last_* is deliberately the
+          newest row of ANY version (ruling R2): a re-run of an OLDER
+          version fired after a newer one exists is still the test's most
+          recent activity, even while health (below) reports the newer
+          version's own last outcome. version_count is the exception that
+          proves the rule -- it counts test_versions, which are the TEST'S
+          and belong to no caller, so the narrowing does not touch it. Nor
+          does it touch can_run, which reads the version's own code.
+        - health, running and spark are scoped to the CURRENT version alone
+          (ruling R1 / section 6.1): resolved through test_versions.n =
+          tests.current_version, never through current_version's ordinal
+          position in a whole-test list of results. A test broken through
+          nine earlier versions and fixed at the tenth reads "passing", not
+          a mostly-red history -- the drawer's own per-version timeline
+          (not built here) is where that history stays reachable.
+
+        health is the STATUS of the current version's last COMPLETED result
+        -- 'passed' -> "passing", 'failed' or 'error' -> "failing" -- and
+        "not_run" when the current version has no completed result at all
+        (no rows, or every row is still 'running'/'generated'). 'generated'
+        (code exists, never executed) is deliberately NOT a completed result
+        for this purpose: it produces the same "not_run" outcome spec case 11
+        names for a version with literally zero results (case 11's own
+        scenario is POST /api/tests/{id}/versions, which Task 7 has since
+        BUILT -- and whose append writes a test_runs row of its own at status
+        'generated', so that route now reaches "not_run" through THIS clause
+        rather than through zero results). 'running' is
+        excluded per case 18 so a stuck in-flight result can never read a
+        passing test as failing; case 25 (two results running at once) is
+        why `running` is a bool_or over the whole current version rather
+        than a property of whichever row happens to be newest.
+
+        spark is the current version's last 10 completed results, oldest
+        first, mapped to the literal strings "pass"/"fail". 'error' folds
+        into "fail" here and in health alike: the response has no third
+        bucket for either field (owner ruling O2 is explicit that spark gets
+        no "flaky" value, and health's own vocabulary is only passing /
+        failing / not_run), and 'error' is not 'passed' -- so among
+        completed outcomes it reads as a failure signal rather than
+        silently vanishing from both fields.
+
+        can_run is False when the current version's OWN robot_code is falsy
+        (NULL or empty) -- the same falsy check the "predates code
+        persistence" 409 uses, not resolve_robot_code's artifact-store
+        fallback, because that fallback is a RUN concept and this is asking
+        about a VERSION that may never have been executed at all.
+
+        TWO THINGS THE NARROWING MOVED that a reader will otherwise take for
+        a bug:
+
+        - the page's ORDER is per-viewer. ORDER BY reads the narrowed
+          last_run_at, so two people can see the same tests in a different
+          order, and a test whose only results are invisible to this caller
+          sorts to the bottom on NULLS LAST instead of by a date they cannot
+          see. Ordering a page by rows it does not show is the alternative,
+          and it is worse.
+        - the health tab TOTALS are per-viewer, exactly as History's counts
+          already are, because the filter reads the same narrowed health.
+          The COUNT applies the identical predicate to the identical
+          lateral, so the tab's number and its page can never disagree.
+
+        Performance: one query for the rows and one for the total; no
+        per-test lookups from Python. Every run-derived value comes off ONE
+        lateral keyed on test_id, which idx_test_runs_test_time serves
+        directly; the version-scoped three are filtered aggregates over that
+        same scan rather than joins of their own.
+
+        Measured end to end through this method -- the pre-change registry
+        loaded out of git as a second module and pointed at the SAME
+        throwaway schema, median of 7 after two warm-ups, whole request
+        including the COUNT:
+
+            3,000 tests x 10 results   All 104.7 ms -> 46.2 ms  (2.3x)
+                                   Failing 110.0 ms -> 82.5 ms  (1.3x)
+            1,000 tests x 50 results   All 480.6 ms -> 52.7 ms  (9.1x)
+                                   Failing 494.8 ms -> 90.8 ms  (5.5x)
+
+        Faster on both tabs at both shapes while answering a stricter
+        question, and it pulls further ahead as results per test grow --
+        which is the direction real data moves. The three joins it replaced
+        each re-scanned the same rows, and the deepest of them re-sorted
+        every result of the test to take an inner LIMIT 10.
+
+        The All tab's saving is structural rather than incidental: with no
+        health filter nothing references the lateral's output and the
+        planner elides it outright. Verified with EXPLAIN ANALYZE on the
+        COUNT statement this method actually builds -- the All plan does not
+        scan test_runs at all, while the Failing plan does. That is why the
+        SQL text stays identical on every tab instead of being assembled
+        differently per caller: the conditional is the planner's to make,
+        and making it here would put a second shape of this query into
+        circulation for nothing.
+
+        Whether a dedicated (test_id, test_version_id, created_at) index
+        would help is a measurement this method still does not make (spec
+        section 6.1 leaves it unmeasured); nothing here adds one on a guess,
+        and the FILTER form no longer keys on test_version_id at all.
+
+        Do not fan out: every join below is provably at-most-one-row per
+        test, each for a different reason -- cv is a UNIQUE (test_id, n)
+        lookup; `whole` is an aggregate with no GROUP BY, which always
+        collapses to one row; version_count is a scalar subquery. Two
+        independent one-to-many joins off `tests` -- the trap list_groups'
+        own docstring names for run_count/test_count -- would multiply
+        version_count and result_count together; collapsing every
+        run-derived value into ONE lateral removes that risk rather than
+        managing it, which is the second reason this shape is preferable to
+        the three joins it replaced.
+
+        Swallows storage errors and returns ([], 0), matching list_runs:
+        this is a page read, not a mutation, and must never break like one."""
+        join, join_params, clauses, params = self._tests_filter(
+            user_id, org_id, q, group, folder_org_id, include_unowned)
+        if health == "passing":
+            clauses.append(_HEALTH_PASSING_SQL)
+        elif health == "failing":
+            clauses.append(_HEALTH_FAILING_SQL)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        # Every run-derived number on a row comes from ONE lateral over the
+        # results this caller may open -- see _caller_results_lateral for
+        # what that fixes and why both scopes fit in one scan.
+        lateral, lateral_params = self._caller_results_lateral(
+            user_id, org_id, folder_org_id, include_unowned)
+        # THREE groups of parameters, in the order their placeholders appear
+        # in the SQL text, because psycopg binds %s strictly by position
+        # (_group_join's docstring states the general rule): the folder join
+        # on `tests`, then the lateral's own folder join and visibility
+        # clauses, then the WHERE. _CURRENT_VERSION_SQL sits between the
+        # first two and binds nothing of its own.
+        params = join_params + lateral_params + params
+
+        # cv resolves the current version's row once and the lateral reads
+        # cv.version_id off it, so cv must stay AHEAD of the lateral in the
+        # FROM clause. cv lives at module level because get_test_detail has
+        # to resolve the same version the same way.
+        # The lateral is used by BOTH statements below: the total COUNT needs
+        # it when health is filtered, and the row SELECT needs every column
+        # it returns. With no health filter nothing references its output
+        # and the planner elides it outright -- verified with EXPLAIN
+        # ANALYZE on this very statement: the All-tab plan does not scan
+        # test_runs at all. That is why the SQL text stays identical on
+        # every tab rather than being assembled per caller.
+        try:
+            with self._pool.connection() as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}{lateral}{where}",
+                    params,
+                ).fetchone()["n"]
+                rows = conn.execute(
+                    "SELECT te.test_id, te.name, te.user_query, te.user_id, "
+                    "       te.user_email, te.org_id, "
+                    # D7 on the Tests surface. Activity withholds a platform
+                    # admin's address; without this the SAME address was one
+                    # click away, on the same person's test, for the same act
+                    # -- reachable with no cross-org action at all, because a
+                    # plain Generate by a platform admin sets the run flag.
+                    # DERIVED, not stored: a run already carries the authority
+                    # it was made with, so a new mint or append inherits this
+                    # rule for free, where a stored column has to be remembered
+                    # at every write site and a forgotten one fails OPEN.
+                    # Matched on the AUTHOR'S OWN runs, so a platform admin
+                    # merely re-running a colleague's test never hides the
+                    # colleague. Anchored on test_id, which
+                    # idx_test_runs_test_time leads on.
+                    "       EXISTS (SELECT 1 FROM test_runs ra "
+                    "          WHERE ra.test_id = te.test_id "
+                    "            AND ra.user_id = te.user_id "
+                    "            AND ra.ran_as_platform_admin) "
+                    "          AS author_is_platform_admin, "
+                    "       g.group_id, g.name AS group_name, "
+                    "       te.current_version, "
+                    "       (SELECT COUNT(*) FROM test_versions v2 "
+                    "          WHERE v2.test_id = te.test_id) AS version_count, "
+                    "       whole.result_count, whole.pass_count, "
+                    "       whole.last_status, whole.last_run_at, "
+                    "       whole.last_run_id, whole.health_status, "
+                    "       whole.running, whole.spark_statuses, "
+                    "       cv.robot_code AS current_robot_code "
+                    f"FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}"
+                    f"{lateral}"
+                    f"{where} "
+                    # Case 27: last result time descending, test_id as
+                    # tiebreaker. NULLS LAST stopped being decoration when
+                    # the lateral narrowed: a test whose only results belong
+                    # to someone else now genuinely has no last_run_at for
+                    # this caller, and belongs at the bottom rather than
+                    # sorted by a date they cannot see. The order is
+                    # therefore per-viewer, which is a visible change and a
+                    # deliberate one -- the alternative is ordering a page by
+                    # rows it does not show.
+                    "ORDER BY whole.last_run_at DESC NULLS LAST, te.test_id "
+                    "LIMIT %s OFFSET %s",
+                    params + [limit, offset],
+                ).fetchall()
+            out = []
+            for r in rows:
+                r = dict(r)
+                # The last TEN completed results of the current
+                # version, oldest first. The lateral aggregates every
+                # one of them off the same scan it already makes, so
+                # the bound is applied here rather than by a second,
+                # inner LIMIT-ed query -- which is measurably the
+                # cheaper of the two, not merely the tidier: see the
+                # spark note in _caller_results_lateral.
+                spark_statuses = (r["spark_statuses"] or [])[-10:]
+                out.append({
+                    "test_id": r["test_id"],
+                    "name": r["name"],
+                    "user_query": r["user_query"],
+                    "user_id": r["user_id"],
+                    "org_id": r["org_id"],
+                    "user_email": r["user_email"],
+                    # Read by the API's D7 rule, which keeps it on the row
+                    # whether or not it blanks user_email, so it does reach
+                    # the client -- as ran_as_platform_admin does on a run.
+                    "author_is_platform_admin":
+                        r["author_is_platform_admin"],
+                    "group_id": r["group_id"],
+                    "group_name": r["group_name"],
+                    "current_version": r["current_version"],
+                    "version_count": r["version_count"],
+                    "result_count": r["result_count"],
+                    "pass_count": r["pass_count"],
+                    "last_status": r["last_status"],
+                    "last_run_at": (r["last_run_at"].isoformat()
+                                    if r["last_run_at"] else None),
+                    "last_run_id": r["last_run_id"],
+                    "health": _health_value(r["health_status"]),
+                    "running": r["running"],
+                    "spark": ["pass" if s == "passed" else "fail"
+                             for s in spark_statuses],
+                    "can_run": bool(r["current_robot_code"]),
+                })
+            return out, total
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] list_tests failed: {e}")
+            return [], 0
+
+    def _tests_filter(
+        self,
+        user_id: Optional[str],
+        org_id: Optional[str],
+        q: Optional[str],
+        group: Optional[str],
+        folder_org_id: Optional[str],
+        include_unowned: bool,
+    ) -> Tuple[str, list, list, list]:
+        """The Tests page's folder join and every WHERE term it applies
+        EXCEPT health, as (join, join_params, clauses, params).
+
+        One builder for the two reads that must describe the same set:
+        list_tests, which adds the active tab's health term on top, and
+        count_tests_by_health, which counts every tab over exactly the set
+        this describes. Written out twice, it would be two answers to
+        "which tests is this caller looking at" -- and a tab whose count used
+        the other answer would advertise rows its page never shows.
+
+        Returns fresh lists on every call, so a caller may append to
+        `clauses`/`params` without reaching the other reader's."""
+        join, join_params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses: list = []
+        params: list = []
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params.append(org_id)
+        if group == "ungrouped":
+            clauses.append("g.group_id IS NULL")
+        elif group is not None:
+            clauses.append("g.group_id = %s")
+            params.append(group)
+        if q:
+            # Same escaping list_runs uses: a literal % or _ in the search
+            # box must match itself, not act as a LIKE wildcard.
+            like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            clauses.append("te.user_query ILIKE %s")
+            params.append(like)
+        return join, join_params, clauses, params
+
+    def count_tests_by_health(
+        self,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        q: Optional[str] = None,
+        group: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Dict[str, int]:
+        """The number on each Tests-page tab: {"all", "passing", "failing"}.
+
+        list_tests returns the total for the ACTIVE tab only, and every tab
+        carries a count (spec section 7.2). Arguments mean exactly what they
+        mean in list_tests, minus the paging and the tab itself: a search or
+        a folder narrows every tab's number, never only the active one's.
+
+        Each count is list_tests' own total for that tab by construction --
+        the same _tests_filter, the same _caller_results_lateral and the same
+        _HEALTH_PASSING_SQL / _HEALTH_FAILING_SQL -- so the counts are
+        per-viewer exactly as the rows are. A test whose current version has
+        no completed result this caller may open -- none completed yet, or
+        none that is theirs to open -- counts in "all" and in neither other
+        bucket, which is where the tabs list it.
+
+        ONE statement, so the three numbers are a single snapshot and always
+        satisfy passing + failing <= all. It is NOT the same statement as
+        list_tests' own total: under a concurrent write the active tab's
+        count here and that total can differ until the next read.
+
+        Cost, measured on this method (throwaway schema, member caller,
+        median of 7 after two warm-ups): 33.2 ms at 3,000 tests x 10
+        results and 37.3 ms at 1,000 x 50, against 211.0 / 232.3 ms for
+        asking list_tests once per tab. It cannot share the All tab's
+        shortcut -- with no health filter the planner elides the lateral from
+        list_tests' COUNT, but two of the three buckets here read
+        health_status, so this statement scans it.
+
+        Swallows storage errors and answers zeros, as list_tests answers
+        ([], 0): a page read must never break like a mutation."""
+        join, join_params, clauses, params = self._tests_filter(
+            user_id, org_id, q, group, folder_org_id, include_unowned)
+        lateral, lateral_params = self._caller_results_lateral(
+            user_id, org_id, folder_org_id, include_unowned)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS all_n, "
+                    f"COUNT(*) FILTER (WHERE {_HEALTH_PASSING_SQL}) AS passing, "
+                    f"COUNT(*) FILTER (WHERE {_HEALTH_FAILING_SQL}) AS failing "
+                    f"FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}{lateral}{where}",
+                    # Positional, in text order -- the same three groups
+                    # list_tests binds, for the same reason.
+                    join_params + lateral_params + params,
+                ).fetchone()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] count_tests_by_health failed: {e}")
+            return {"all": 0, "passing": 0, "failing": 0}
+        return {"all": row["all_n"], "passing": row["passing"],
+                "failing": row["failing"]}
+
+    def get_test_head(
+        self,
+        test_id: str,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """One test's head plus its CURRENT version's id and code (P2 Task 7).
+
+        The pre-flight read behind POST /api/tests/{test_id}/versions and
+        behind POST /execute-test's test_id path. Both need the same five
+        facts before they start anything expensive: does this caller see the
+        test (404 otherwise), is it theirs to update (org_id and user_id feed
+        the Move terms the route re-uses from the Tests list), what
+        description are we comparing the submitted one against (user_query,
+        for spec section 7.4's 'regenerated' vs 'edited' label), and is there
+        a current version with code to run (409 otherwise -- case 31).
+
+        The TEST predicate stack is get_test_detail's, term for term and in
+        the same order -- _group_join_for_tests, _VISIBLE_TEST_SQL, the
+        te.org_id term, the include_unowned fallback, join params first. It
+        is the same question, so it must not be a second answer to it: a test
+        the drawer will not show must not be regenerable one POST deeper.
+        No RESULT predicate is built, because no row this returns is a
+        result.
+
+        The current version is resolved through _CURRENT_VERSION_SQL rather
+        than by a second SELECT keyed on current_version, so "the current
+        version" means here exactly what it means in list_tests and in the
+        drawer. It is a LEFT join: a test whose current_version names no row
+        comes back with version_id and robot_code None rather than not at
+        all, which is what lets the route answer 409 with the reason instead
+        of a bare 404 (case 31).
+
+        Returns None when the test does not exist, when this caller may not
+        see it, or when the read fails -- the same three-way collapse
+        get_test_detail documents, for the same reason."""
+        join, join_params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses = ["te.test_id = %s"]
+        params: list = [test_id]
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            params.append(user_id)
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            params.append(org_id)
+        # Join params FIRST -- _group_join_for_tests' placeholder sits
+        # earlier in the SQL text than any WHERE clause's, and psycopg binds
+        # %s strictly by position. _CURRENT_VERSION_SQL binds none of its own.
+        params = join_params + params
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT te.test_id, te.user_id, te.org_id, "
+                    "       te.user_query, te.current_version, "
+                    "       cv.version_id, cv.robot_code "
+                    f"FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}"
+                    f"WHERE {' AND '.join(clauses)}",
+                    params,
+                ).fetchone()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] get_test_head failed: {e}")
+            return None
+        return dict(row) if row else None
+
+    def get_run_version(
+        self, run_id: str
+    ) -> Tuple[Optional[str], Optional[int]]:
+        """(test_id, version n) for one run -- the /versions stream's
+        read-back (P2 Task 7).
+
+        record_start swallows every failure it meets, deadlocks included, so
+        the only honest way for the stream to tell the client a version
+        landed is to go and look. n is None when the run names no version
+        (the opening row of a regeneration, or a failed one), and both are
+        None for a run this registry has never heard of.
+
+        A storage error also answers (None, None): the caller's response to
+        "not confirmed" and to "could not check" is the same event, and it
+        says the version could not be CONFIRMED rather than that it was not
+        saved, precisely because this read cannot tell those apart."""
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT r.test_id, v.n FROM test_runs r"
+                    " LEFT JOIN test_versions v"
+                    "   ON v.version_id = r.test_version_id"
+                    " WHERE r.run_id = %s", (run_id,)).fetchone()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] get_run_version failed: {e}")
+            return (None, None)
+        if row is None:
+            return (None, None)
+        return (row["test_id"], row["n"])
+
+    def get_test_detail(
+        self,
+        test_id: str,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        folder_org_id: Optional[str] = None,
+        include_unowned: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """One test, all of its versions, and ONE PAGE of its results (P2's
+        test drawer reads it; nothing else does yet -- spec section 6.2).
+
+        user_id/org_id/folder_org_id/include_unowned mean exactly what they
+        mean in list_tests and list_runs, and this method binds BOTH of those
+        predicate stacks -- one for the test, one for its results -- because
+        it returns both kinds of row and they are not the same question.
+
+        The TEST stack is list_tests' own with the q/group/health filters
+        dropped and a `te.test_id = %s` term added: the same
+        _group_join_for_tests, the same _VISIBLE_TEST_SQL, the same
+        te.org_id term, the same include_unowned fallback, in the same
+        order. A test the Tests page will not list must not become readable
+        one URL deeper.
+
+        The RESULT stack is list_runs' own, unchanged: the same _group_join,
+        the same _VISIBLE_RUN_SQL / _OWNED_RUN_SQL pair, the same t.org_id
+        term. Passing the test gate is not authority over every result
+        underneath it -- see the comment on the clause build below for the
+        two shapes that fail this while the test itself passes, and for why
+        offering them broke the contract auth/ownership.py states.
+
+        Neither stack is written out by hand here: a second predicate would
+        be a second answer to the same question.
+
+        Returns None when the test does not exist, when this caller may not
+        see it, OR when the read fails. The caller cannot tell those three
+        apart, and that is deliberate on the first two (an existence-leaking
+        403 is what the 404 convention exists to avoid) and inherited on the
+        third: every single-row read in this module collapses a storage
+        error into None so that a swallowed failure can never be mistaken
+        for an authorization answer -- see get_run, get_owner and
+        get_run_owner, whose docstrings say the same. A page read must not
+        break like a mutation.
+
+        Three separate statements, not one join, because `versions` and
+        `results` are independent one-to-many children of `tests`: read
+        through a single join they multiply, and a test with 3 versions and
+        7 results would report 21 of each. The same trap list_groups'
+        docstring names for run_count/test_count.
+
+        WHOLE-TEST vs VERSION-SCOPED, the distinction the whole split exists
+        to keep straight (rulings R1/R2):
+
+        - `versions` and `results` are WHOLE-TEST. Every version ever
+          written, and every result recorded against this test_id whatever
+          version it names -- the axis being widened here is the VERSION
+          one, not the caller one: results stay narrowed by the run
+          predicate above, so "whole-test" never means "rows this caller
+          may not see". `results_total` counts the whole test rather than
+          the page, within that same predicate.
+        - `health` is scoped to the CURRENT version alone, off the same
+          _CURRENT_VERSION_SQL and the same _caller_results_lateral the
+          Tests row uses, mapped by the same _health_value -- so the
+          drawer's header and the row it was opened from cannot disagree,
+          about the version OR about which results count.
+
+        `versions` are newest first (n DESC) and are NOT paged -- spec case
+        28 pages the drawer over RESULTS only. `results` are newest first
+        (created_at DESC, run_id as tiebreaker, the same order list_tests'
+        whole-test aggregate uses to pick last_*), limited and offset by the
+        caller, with `results_total` the unpaged count.
+
+        Every result names its OWN version's `n` (case 15), including a
+        result of a SUPERSEDED version. `n` is None where the result points
+        at no version: the code-less row the collapse attached (owner
+        decision D8 writes test_id and leaves test_version_id NULL) and,
+        were a version ever deleted, any row fk_test_runs_version's
+        ON DELETE SET NULL had nulled -- nothing deletes versions today.
+        Rendering such a row as the CURRENT version would attribute code it
+        never ran, which is exactly what case 15 forbids.
+
+        `failure_class` and `failure_locator` are on every result and are
+        ALWAYS None. They are P3 columns (section 8): `test_runs` has no
+        such columns yet and no analyzer writes them. The keys exist so the
+        drawer can build its seam against a stable shape; the values are
+        placeholders, and no caller should read anything into a null one.
+
+        `has_report` is NOT set here. The API layer derives it from `status`
+        with history_endpoints' own _REPORT_STATUSES, so the two detail
+        routes cannot answer it differently."""
+        join, join_params = self._group_join_for_tests(
+            folder_org_id or org_id, identified=user_id is not None)
+        clauses = ["te.test_id = %s"]
+        clause_params: list = [test_id]
+        if user_id is not None:
+            clauses.append(_VISIBLE_TEST_SQL)
+            clause_params.append(user_id)
+        elif not include_unowned:
+            clauses.append("te.user_id IS NOT NULL")
+        if org_id is not None:
+            clauses.append("te.org_id = %s")
+            clause_params.append(org_id)
+        # Three groups, ordered the way list_tests orders its own and
+        # for the same reason: _group_join_for_tests' placeholder sits
+        # earliest in the SQL text, then the health lateral's, then the
+        # WHERE clause's, and psycopg binds %s strictly by position.
+        # They are kept apart rather than folded into one list because
+        # the lateral built below has to bind BETWEEN them.
+        # The RESULTS carry their own predicate, and it is the RUN one --
+        # _group_join plus _VISIBLE_RUN_SQL/_OWNED_RUN_SQL, bound exactly as
+        # list_runs binds them for the same caller. Passing the test gate
+        # above says this caller may see the TEST; it says nothing about each
+        # result underneath it, and auth/ownership.py's stated contract is
+        # that no list may offer a row caller_can_access then refuses. Two
+        # shapes it refuses can sit under a perfectly visible test: a result
+        # nobody owns (rule 3 requires owner_id non-NULL, and rule 5's
+        # ownership test cannot match None either, so it is platform-admin
+        # only) and one whose org is not the caller's (rules 3 and 5 both
+        # require the orgs to match). Without this the drawer listed both,
+        # counted them in results_total, and the API layer then set
+        # has_report on them off `status` alone -- a report link that 404s.
+        # Reachable go-forward rather than legacy-only: _attach_test's
+        # rerun_of branch returns the SOURCE's test_id whoever the caller is,
+        # and rule 1 admits the token-less AUTH_ENFORCED=off caller, so one
+        # "Run again" lands an unattributed result under an authored test.
+        #
+        # The join is unconditional even for the two callers whose clause
+        # list never mentions `g`, so the SQL text and the positional binding
+        # are identical on every branch rather than varying with the caller.
+        run_join, run_join_params = self._group_join(
+            folder_org_id or org_id, identified=user_id is not None)
+        rextra, rextra_params = self._visible_run_clauses(
+            user_id, org_id, include_unowned)
+        rclauses = ["t.test_id = %s"] + rextra
+        rparams = run_join_params + [test_id] + rextra_params
+        rwhere = " AND ".join(rclauses)
+        # The SAME stack again, inside a lateral, so the drawer's
+        # health dot is computed over the results it actually lists.
+        # It was read off a lateral with no caller predicate at all -- so a
+        # drawer could show one passing result under a failing dot,
+        # and the Tests row beside it could disagree with both. The
+        # lateral cannot reuse run_join: see
+        # _group_join_for_test_results for the alias that silently
+        # breaks if it does.
+        lateral, lateral_params = self._caller_results_lateral(
+            user_id, org_id, folder_org_id, include_unowned)
+        try:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT te.test_id, te.name, te.user_query, te.user_id, "
+                    "       te.user_email, te.org_id, "
+                    # D7, exactly as list_tests above states it.
+                    "       EXISTS (SELECT 1 FROM test_runs ra "
+                    "          WHERE ra.test_id = te.test_id "
+                    "            AND ra.user_id = te.user_id "
+                    "            AND ra.ran_as_platform_admin) "
+                    "          AS author_is_platform_admin, "
+                    "       g.group_id, g.name AS group_name, "
+                    "       te.current_version, te.created_at, "
+                    "       te.updated_at, "
+                    "       whole.health_status "
+                    f"FROM tests te {join} "
+                    f"{_CURRENT_VERSION_SQL}"
+                    f"{lateral}"
+                    f"WHERE {' AND '.join(clauses)}",
+                    join_params + lateral_params + clause_params,
+                ).fetchone()
+                if row is None:
+                    return None
+                versions = conn.execute(
+                    "SELECT v.n, v.user_query, v.robot_code, v.created_by,"
+                    " v.created_by_email, v.reason, v.created_at,"
+                    # D7 per VERSION: has this row's OWN creator EVER run
+                    # this version with platform-admin authority? Any run of
+                    # theirs attributed to this version counts: the mint or
+                    # append that made it and every later run labelled with
+                    # it -- including a re-run of a code-less run the
+                    # collapse attached, which _attach_test's rerun_of branch
+                    # labels with the test's CURRENT version. So a version a
+                    # member made flips once they run it again as a platform
+                    # admin. "Ever" can only withhold more than "when it was
+                    # made", never less. Task 7 lets someone other than the
+                    # author append, so the test-level answer above cannot
+                    # stand in for this one.
+                    #
+                    # ra.test_id is redundant for correctness and load-bearing
+                    # for cost: nothing indexes test_version_id, so without it
+                    # this is a scan of test_runs per version rather than an
+                    # index probe under idx_test_runs_test_time.
+                    " EXISTS (SELECT 1 FROM test_runs ra"
+                    "          WHERE ra.test_id = v.test_id"
+                    "            AND ra.test_version_id = v.version_id"
+                    "            AND ra.user_id = v.created_by"
+                    "            AND ra.ran_as_platform_admin)"
+                    "        AS creator_is_platform_admin"
+                    " FROM test_versions v"
+                    " WHERE v.test_id = %s ORDER BY v.n DESC",
+                    (test_id,),
+                ).fetchall()
+                # Same predicate as the page below, built once: a count that
+                # applied a different one would advertise rows the page then
+                # never hands over.
+                total = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM test_runs t {run_join} "
+                    f"WHERE {rwhere}",
+                    rparams,
+                ).fetchone()["n"]
+                # v is joined on its PRIMARY KEY, so this is at most one row
+                # per result and cannot fan out. LEFT, so a result naming no
+                # version survives the join with n NULL rather than being
+                # dropped from its own test's timeline.
+                results = conn.execute(
+                    "SELECT t.run_id, t.status, t.created_at, v.n "
+                    f"FROM test_runs t {run_join} "
+                    "LEFT JOIN test_versions v"
+                    "  ON v.version_id = t.test_version_id "
+                    f"WHERE {rwhere} "
+                    "ORDER BY t.created_at DESC, t.run_id DESC "
+                    "LIMIT %s OFFSET %s",
+                    rparams + [limit, offset],
+                ).fetchall()
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] get_test_detail failed: {e}")
+            return None
+        return {
+            "test": {
+                "test_id": row["test_id"],
+                "name": row["name"],
+                "user_query": row["user_query"],
+                "user_id": row["user_id"],
+                "user_email": row["user_email"],
+                "author_is_platform_admin":
+                    row["author_is_platform_admin"],
+                "org_id": row["org_id"],
+                "group_id": row["group_id"],
+                "group_name": row["group_name"],
+                "current_version": row["current_version"],
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+                "health": _health_value(row["health_status"]),
+            },
+            "versions": [{
+                "n": v["n"],
+                "user_query": v["user_query"],
+                "robot_code": v["robot_code"],
+                "created_by": v["created_by"],
+                # The appender's email, and the ONE case it may be filled in
+                # from the test: a row written before created_by_email
+                # existed has created_by equal to the test's author by
+                # construction (the mint and the migration collapse both set
+                # it from the value they write into tests.user_id), so
+                # tests.user_email IS that version's author's email. The
+                # fallback must not fire when created_by differs -- naming
+                # the test's author beside a version someone else wrote is
+                # worse than naming nobody -- and `created_by is not None`
+                # is load-bearing for the usual reason: two NULLs must not
+                # compare equal, or an author-less version would borrow an
+                # author-less test's email.
+                "created_by_email": (
+                    v["created_by_email"] if v["created_by_email"] is not None
+                    else (row["user_email"]
+                          if v["created_by"] is not None
+                          and v["created_by"] == row["user_id"] else None)
+                ),
+                "creator_is_platform_admin":
+                    v["creator_is_platform_admin"],
+                "reason": v["reason"],
+                "created_at": v["created_at"].isoformat(),
+            } for v in versions],
+            "results": [{
+                "run_id": x["run_id"],
+                "status": x["status"],
+                "n": x["n"],
+                "created_at": x["created_at"].isoformat(),
+                # P3 columns (section 8); see the docstring above.
+                "failure_class": None,
+                "failure_locator": None,
+            } for x in results],
+            "results_total": total,
+        }
+
     def assign_runs(
         self,
         org_id: Optional[str],
@@ -1033,7 +3250,56 @@ class RunRegistry:
         beside it is therefore REDUNDANT (verified: the whole suite passes
         without it) and is kept only to state that intent in the SQL rather
         than leaving it to a NULL-semantics subtlety a later edit could
-        undo."""
+        undo.
+
+        Since 2026-09-07 filing a run also files its TEST, because publication
+        is the test's. Two consequences are deliberate and are the target
+        model, and neither may be described as "no visible change":
+
+        Filing ONE result of a test publishes that test's other results too.
+
+        And the sharper half: because a test has ONE folder, filing run-2 into
+        folder Y sets the TEST's folder to Y, so a sibling run-1 whose own
+        test_runs.group_id is folder X stops displaying in X and displays in
+        Y — a run silently moved OUT of a folder someone deliberately put it
+        in, not merely a sibling added. Under the target model that IS the
+        right answer; it is written down because P1 otherwise claims to move
+        no number.
+
+        Both are AUTHORIZATION changes, not merely display ones. A run's
+        resolved folder is what feeds is_grouped into caller_can_access rule 3
+        at three gates — auth/jwt_utils.py for /reports,
+        api/history_endpoints.py for the detail row, api/endpoints.py for
+        re-run — so filing one result admits every member of the org to the
+        siblings' reports, which carry the credentials someone typed into the
+        script. Measured live: filing run a1 moved a peer from 403 to 404 on
+        siblings a2 and a3 — the gate began admitting him to /reports for runs
+        the filer never filed. A foreign-org caller stayed 403, so the org
+        boundary itself holds.
+
+        Neither is reachable on the owner's current database (measured:
+        0 folders, 46 runs, none filed). Both ARE reachable on migrated
+        data, because the migration gives a test the folder of its newest
+        filed run while that test's other runs keep their own.
+
+        The suite produces both today. The first is also ASSERTED, by
+        test_run_registry_visibility_join.py::
+        test_filing_one_result_publishes_its_siblings, which files one of
+        two runs sharing a test and pins the folder at run_count 2.
+
+        The second is produced but NOT asserted, by
+        test_rerun_group_inheritance.py::
+        test_chain_rerun_follows_the_immediate_source_not_the_original: it
+        files a run into F, then files that run's re-run — which SHARES its
+        test, see the rerun branch of _attach_test — into G, so from that
+        point the first run answers for G. The test never looks at F again;
+        it is about lineage. Anyone wanting to pin the displacement has the
+        shape already built there.
+
+        What gives those two runs a test to move is that its _seed_run
+        passes robot_code. Do not generalise that: most folder tests seed
+        deliberately WITHOUT robot_code, so their runs have no test at all
+        and exercise the COALESCE fallback instead."""
         if org_id is None:
             # No org: nothing to file into, and no org to test a run against.
             return False
@@ -1049,6 +3315,83 @@ class RunRegistry:
                 allowed = "user_id = %s"
                 params.append(user_id)
             try:
+                # TESTS FIRST, before either test_runs write below. Every
+                # writer that touches both tables has to take them in one
+                # order, and the order is forced rather than chosen:
+                # record_start calls _attach_test before its own run upsert,
+                # so the mint, the org write-back and the version append all
+                # reach `tests` first by construction — and record_start is
+                # also the party that swallows its own abort, so a deadlock
+                # there loses a history row in silence. assign_tests already
+                # goes tests-then-runs. This method went the other way, and
+                # measured against both of them it deadlocked: no route
+                # handler has a try, and the except below catches only
+                # ForeignKeyViolation, so DeadlockDetected reached the caller
+                # as an unhandled 500.
+                #
+                # The tests of the NAMED runs, which is a SUPERSET of what the
+                # third UPDATE touches — that one adds the authority filter,
+                # which can only narrow — so nothing it writes is unlocked. A
+                # re-run child shares its parent's test (see _attach_test's
+                # rerun branch), so the cascade needs no row of its own here.
+                # A run whose test_id is NULL (decision D8) contributes
+                # nothing and needs nothing: it has no test to contend over.
+                #
+                # FOR NO KEY UPDATE, not FOR UPDATE, for the reason
+                # _attach_test states at its own lock: FOR UPDATE also
+                # conflicts with the FOR KEY SHARE a foreign-key check takes,
+                # so it would stall every concurrent INSERT of a run
+                # referencing these tests. ORDER BY test_id so two callers
+                # naming overlapping batches agree between themselves too.
+                #
+                # Cost, on the same throwaway 500k-run / 50-org / 200-folder
+                # schema the cascade note below was measured on (median of
+                # 7, one connection): 0.91 ms for one id, 1.15 ms at fifty,
+                # 8.06 ms at the endpoint's 500-id cap — against 0.69 ms
+                # and 8.82 ms for the parent UPDATE on the same batches. It
+                # costs about what one of the writes already here costs.
+                conn.execute(
+                    "SELECT test_id FROM tests WHERE test_id IN"
+                    "   (SELECT test_id FROM test_runs WHERE run_id = ANY(%s))"
+                    " ORDER BY test_id FOR NO KEY UPDATE",
+                    [list(run_ids)],
+                )
+                # Filing a run files its TEST, so the caller needs authority
+                # over the TEST, not merely over the run. Owning a RESULT is
+                # not authority over the test (D4; spec 5 "A peer who re-ran a
+                # published test still cannot file it", spec 6.6). Deciding it
+                # from test_runs let a peer who owns one re-run re-publish,
+                # unfile or relocate the author's test -- and re-admit the org
+                # to /reports for the author's own runs after the author took
+                # them private. This is the same rule assign_tests applies,
+                # read off the same columns, so the two movers agree.
+                #
+                # INNER JOIN on purpose: a run with no test (D8 scenario a,
+                # no robot_code) has no test authority to have, and its owner
+                # still files it on the run rule below, exactly as before.
+                #
+                # COALESCE, not a bare NOT: te.org_id or te.user_id being NULL
+                # makes the comparison NULL, and NOT NULL is NULL, so an
+                # author-less or org-less test would slip through the filter
+                # that is meant to catch it -- the NULL-is-not-a-value rule
+                # this file applies at every other identity comparison.
+                if is_org_admin:
+                    test_allowed, test_params = "te.org_id = %s", [org_id]
+                else:
+                    test_allowed = "(te.org_id = %s AND te.user_id = %s)"
+                    test_params = [org_id, user_id]
+                if conn.execute(
+                    "SELECT 1 FROM test_runs r"
+                    "  JOIN tests te ON te.test_id = r.test_id"
+                    " WHERE r.run_id = ANY(%s)"
+                    f"   AND NOT COALESCE({test_allowed}, FALSE) LIMIT 1",
+                    [list(run_ids)] + test_params,
+                ).fetchone() is not None:
+                    # All-or-nothing, like every other refusal here: one
+                    # unfilable test writes NOTHING, so a batch cannot carry
+                    # the caller's own test in beside a colleague's.
+                    conn.rollback()
+                    return False
                 # Children FIRST, in the same transaction: the self-join reads
                 # the parent's folder off the row, so once the parent UPDATE
                 # below has run there is no pre-move value left to match on.
@@ -1075,6 +3418,25 @@ class RunRegistry:
                     f"WHERE run_id = ANY(%s) AND org_id = %s AND {allowed}",
                     params,
                 )
+                # Publication belongs to the TEST now, so filing a run files
+                # its test. `r.{allowed}` here is the RUN's authority, which
+                # is NOT what decides a test: the same `{allowed}` string
+                # means tests.user_id in assign_tests and test_runs.user_id
+                # here, so reading it as "the same filter" is the mistake
+                # that shipped. What makes this statement safe is the TEST
+                # authority check above, which has already refused the whole
+                # call if any named run's test is not the caller's to file.
+                #
+                # test_runs.group_id keeps being written above, unchanged:
+                # spec 4.4 requires the old column to stay populated through P1
+                # so that dropping the new tables restores prior behaviour.
+                conn.execute(
+                    f"UPDATE tests te SET group_id = %s, updated_at = now() "
+                    f"FROM test_runs r "
+                    f"WHERE r.test_id = te.test_id "
+                    f"  AND r.run_id = ANY(%s) AND r.org_id = %s AND r.{allowed}",
+                    params,
+                )
             except psycopg.errors.ForeignKeyViolation:
                 # Lost the race: delete_group removed the folder between the
                 # visibility check and this write. Fail closed like any other
@@ -1090,15 +3452,198 @@ class RunRegistry:
                 return False
             return True
 
+    def assign_tests(
+        self,
+        org_id: Optional[str],
+        user_id: str,
+        is_org_admin: bool,
+        test_ids: List[str],
+        group_id: Optional[str],
+    ) -> bool:
+        """Atomically file TESTS into a folder (group_id None = unfile).
+
+        assign_runs' rule, over the unit that actually owns a folder now. The
+        folder must be in the caller's org, and every test must be one the
+        caller may file: their own, or — for an org_admin — any test in their
+        org. Seeing a shared test does NOT confer this: a peer reads and
+        re-runs another member's published test, but only its author or an
+        org_admin moves it (owner decision D4).
+
+        Every test must ALSO be in the caller's org, org_admin or not.
+        Without that clause a member could file a test they still author in
+        an org they have since left into a folder of the org they are in now,
+        leaving a row whose org_id and folder disagree. The clause equally
+        excludes a test with no org at all (AUTH_ENFORCED off, the bench, or
+        _lookup_org_id having swallowed a failure at mint): run_groups.org_id
+        is NOT NULL, so there is nothing for such a test to equal.
+
+        BOTH authority terms are read off `tests` — te.org_id and te.user_id
+        — never off a result of the test. Reading them from test_runs would
+        decide an authorization fact about a TEST from a row that is not the
+        test: a member owning one RESULT of a colleague's test would file the
+        colleague's test, and the colleague's own results would move with it.
+
+        All-or-nothing: filing is a per-row authority decision, which is
+        exactly when partial writes appear, so a batch containing one test
+        the caller may not file writes NOTHING and returns False.
+
+        THE RUN COLUMN IS WRITTEN TOO, and that is not bookkeeping. Every
+        caller-scoped read whose rows are results resolves its folder as
+        COALESCE(te.group_id, t.group_id) — see _group_join and list_groups'
+        run_count join — so clearing only tests.group_id leaves each result
+        falling back to its own stale column: _VISIBLE_RUN_SQL's published
+        term stays TRUE and the org goes on reading every result of a test
+        the caller has just made private, /reports included (a resolved
+        folder is what feeds is_grouped into caller_can_access rule 3).
+        Measured on a throwaway schema before this method existed: after
+        clearing tests.group_id alone a peer still counted the run and no
+        longer counted the test. Stated at its real size — in the FILING
+        direction the run write changes no answer any read here gives, since
+        every one of them resolves a run's folder as g.group_id off that
+        COALESCE join and the test's new folder already wins there; it is
+        UNGROUPING that needs it. It also keeps spec 4.4's promise
+        that test_runs.group_id stays populated and readable until P3 drops
+        it, so P1/P2 remain reversible.
+
+        No re-run cascade, and none is missing. assign_runs needs one because
+        a re-run carries its own folder id and can drift from the test it
+        copied; here the test IS the unit being moved and every result of it
+        — the caller's, a peer's, a re-run's — is picked up by the same
+        test_id predicate. A result whose test_id is NULL (owner decision D8,
+        a permanent legal state) has no test to travel with and is reachable
+        only through assign_runs, which files by run_id and demands no test.
+
+        Filing a test PUBLISHES it, and this is decided per ROW rather than
+        by the test: _VISIBLE_TEST_SQL admits the test itself only while
+        te.user_id IS NOT NULL, and _VISIBLE_RUN_SQL admits each result only
+        while that RESULT's own t.user_id IS NOT NULL. Measured: an
+        author-less test in a folder publishes its authored results while
+        staying invisible in the Tests list itself, and an unattributed
+        result under an authored test stays invisible while its siblings are
+        published. It escalates nobody's authority — an org_admin reaching
+        the author-less case could already file those same results directly
+        through assign_runs, and a member filing their own test already
+        publishes a peer's result of it today, because assign_runs' own
+        test-side UPDATE sets tests.group_id and the COALESCE carries it to
+        every sibling.
+
+        The two UPDATEs may run in either order: the second reads te.test_id,
+        te.org_id and te.user_id, none of which the first writes. That
+        independence is what lets the atomicity gate sit BETWEEN them, so a
+        refused batch never performs the results write at all -- assign_runs
+        has to gate after both, because its cascade reads pre-move values."""
+        if org_id is None:
+            # No org: nothing to file into, and no org to test a test
+            # against. Measured redundant for a non-empty batch -- a named
+            # folder fails _visible_group below (run_groups.org_id is NOT
+            # NULL, so nothing equals NULL) and an ungroup fails the org
+            # term in the UPDATE -- so this is an early-out that takes no
+            # connection, not the refusal. Kept to mirror assign_runs'
+            # identical first line.
+            return False
+        with self._pool.connection() as conn:
+            if group_id is not None:
+                if self._visible_group(conn, org_id, group_id) is None:
+                    return False
+            params: list = [group_id, list(test_ids), org_id]
+            if is_org_admin:
+                allowed = "org_id = %s"
+                params.append(org_id)
+            else:
+                allowed = "user_id = %s"
+                params.append(user_id)
+            try:
+                # The batch's `tests` rows in test_id ORDER, before the
+                # UPDATE takes them in whatever order its scan returns.
+                # 4550db4 gave every writer that touches both tables one
+                # TABLE order and this method already obeyed it; what that
+                # change could not see is the order INSIDE `tests`, because
+                # every pair it measured was a SINGLE-test batch. Both
+                # siblings lock ORDER BY test_id -- assign_runs before its
+                # cascade, delete_group before its DELETE -- so a multi-test
+                # batch scanned in physical order met them head-on
+                # (measured: Index Scan using idx_tests_user, ids locked
+                # 3,2,1). Neither method catches DeadlockDetected, and the
+                # route has no try, so it reached the caller as the
+                # unhandled 500 that change set out to remove.
+                #
+                # No authority filter, exactly as assign_runs' lock has
+                # none: this locks a SUPERSET of what the UPDATE below
+                # writes, and a superset is what makes the order total. A
+                # row the caller may not file is released a statement later
+                # by the rowcount rollback.
+                #
+                # FOR NO KEY UPDATE for the reason both siblings give: FOR
+                # UPDATE also conflicts with the FOR KEY SHARE a foreign-key
+                # check takes, so it would stall every concurrent INSERT of
+                # a run referencing these tests.
+                conn.execute(
+                    "SELECT test_id FROM tests WHERE test_id = ANY(%s)"
+                    " ORDER BY test_id FOR NO KEY UPDATE",
+                    [list(test_ids)],
+                )
+                cur = conn.execute(
+                    f"UPDATE tests SET group_id = %s, updated_at = now() "
+                    f"WHERE test_id = ANY(%s) AND org_id = %s AND {allowed}",
+                    params,
+                )
+                # The tests UPDATE's rowcount alone, and BEFORE the results
+                # UPDATE rather than after it. The results dragged along are
+                # not in test_ids, so folding them into the count would make
+                # every move of a test that has ever run fail its own
+                # atomicity check. Gating here costs nothing and skips a
+                # write that a refusal is about to roll back anyway: on a
+                # batch of 500 where one test is unfilable, the statement
+                # below would otherwise rewrite every result of the other
+                # 499 first. Safe in this order only because the two
+                # statements are independent -- see the note at the end of
+                # this docstring; assign_runs cannot do the same, because its
+                # cascade has to read pre-move values.
+                if cur.rowcount != len(set(test_ids)):
+                    conn.rollback()
+                    return False
+                # Driven off the SAME authority filter, qualified onto `te`
+                # because two tables are in scope here: a result moves only
+                # as a consequence of its TEST moving, so it can never be
+                # reached through a run the caller could not have filed.
+                #
+                # Those two authority terms are defence in depth and no test
+                # can observe them. Since the gate moved above this statement
+                # that holds for a stronger reason than "it gets rolled back
+                # anyway": reaching this line means the UPDATE above matched
+                # every distinct id in test_ids under org_id AND {allowed},
+                # so every named test is already authorized, and it took row
+                # locks on exactly those `tests` rows — no concurrent writer
+                # can change org_id or user_id under us before we commit. The
+                # terms therefore re-select a set that is provably identical.
+                # They are kept so each statement is independently correct.
+                conn.execute(
+                    f"UPDATE test_runs r SET group_id = %s "
+                    f"FROM tests te "
+                    f"WHERE te.test_id = r.test_id "
+                    f"  AND te.test_id = ANY(%s) AND te.org_id = %s "
+                    f"  AND te.{allowed}",
+                    params,
+                )
+            except psycopg.errors.ForeignKeyViolation:
+                # Lost the race: delete_group removed the folder between the
+                # visibility check and this write. Fail closed like any other
+                # unusable folder — the endpoint turns False into a 404.
+                conn.rollback()
+                return False
+            return True
+
     @staticmethod
     def _group_join(
         org_id: Optional[str], *, identified: bool = False
     ) -> Tuple[str, list]:
-        """(SQL, params) for the ONE folder join every read derives its
-        folder answers from: a row's folder tag is g.name, its folder id is
-        g.group_id, and "in no folder I can see" is g.group_id IS NULL.
-        _VISIBLE_RUN_SQL reads "published to me" off this same alias, so this
-        is also the only place the published half of visibility is expressed.
+        """(SQL, params) for the folder join every CALLER-SCOPED read over
+        test_runs derives its folder answers from: a row's folder tag is
+        g.name, its folder id is g.group_id, and "in no folder I can see" is
+        g.group_id IS NULL. _VISIBLE_RUN_SQL reads "published to me" off this
+        same alias, so this is where the published half of visibility is
+        expressed for those reads (see the accounting below for the sites that
+        express it themselves).
 
         Three forms. With an org it is that org's folders, which is the
         ordinary caller. Without one the answer depends on whether there is a
@@ -1124,16 +3669,62 @@ class RunRegistry:
         these placeholders sit earlier in the SQL text and psycopg binds %s
         strictly by position.
 
-        ONE other query expresses publication in SQL and cannot call this:
-        get_run_owner, which has no caller to bind and anchors to the run's
-        own org instead. Change what "published" means here and change it
-        there too."""
+        Several reads here resolve folder membership in SQL, and they do not
+        all have to agree. FOUR of them answer "which folder is this RUN in"
+        and must stay identical in that answer — this join, get_run_owner
+        (no caller to bind, so it anchors to the run's own org), list_groups'
+        run_count join (which binds run_org_id in the JOIN), and
+        _group_join_for_test_results, whose COALESCE(te.group_id, t.group_id)
+        inside the results lateral means the RESULT'S folder. None of the
+        other three can call this one, for exactly those reasons.
+        Change what "published" means for a run and change all four. The
+        fourth was added by c20c176 and went unlisted here until the P2
+        whole-branch review, so a maintainer following "change all three"
+        left the Tests row and the drawer computing health on the old rule.
+
+        The rest differ ON PURPOSE and must not be dragged in with those four.
+        _group_join_for_tests and list_groups' test_count subquery read
+        tests.group_id with NO COALESCE, because their rows ARE the tests and
+        there is no run column to fall back to. delete_group's audit SELECT
+        reads BOTH columns as a UNION rather than a COALESCE, so it
+        over-reports one shape deliberately; its docstring says why.
+
+        Since 2026-09-07 this join makes ONE HOP first: folder membership
+        belongs to the TEST, so it reaches run_groups through tests, falling
+        back to the run's own column while runs without a test still exist.
+        The returned params are unchanged, so binding order is unchanged — but
+        anything added to the hop must re-check every caller, because these
+        placeholders bind before any WHERE params."""
+        # One hop: a row's folder is its TEST'S folder now. _VISIBLE_RUN_SQL is
+        # unchanged, character for character — every property its docstring
+        # argues for is preserved, because the org term still lives in this
+        # join and only the row whose group_id it reads has moved.
+        #
+        # COALESCE, not a bare te.group_id: `test_id IS NULL` is a permanently
+        # legal state (owner decision D8), and a run with no test would
+        # otherwise be filable but never publishable — a silent no-op in the
+        # UI. assign_runs files by run_id and demands no test, so a code-less
+        # run really is filable. The fallback is therefore PERMANENT, not
+        # transitional: "once every run has a test" is unreachable while D8
+        # stands, so it can only go if the model changes.
+        #
+        # Which makes its cost permanent too, and worth stating. The COALESCE
+        # is an expression over a JOINED relation, so idx_test_runs_group
+        # cannot serve it. Measured on a 200k-run schema:
+        # /api/history?group=X goes from a 0.03 ms index scan to a 25.8 ms
+        # parallel seq scan of every run plus a full scan of `tests`, and
+        # /api/groups from 0.037 ms to 17.7 ms. The P2 option, noted and not
+        # taken here: mirror the test's folder down onto its runs, so reads
+        # can key on t.group_id alone and use the index again.
+        hop = "LEFT JOIN tests te ON te.test_id = t.test_id "
+        folder = "COALESCE(te.group_id, t.group_id)"
         if org_id is None:
             if identified:
-                return "LEFT JOIN run_groups g ON FALSE", []
-            return "LEFT JOIN run_groups g ON g.group_id = t.group_id", []
+                return hop + "LEFT JOIN run_groups g ON FALSE", []
+            return (hop + f"LEFT JOIN run_groups g ON g.group_id = {folder}",
+                    [])
         return (
-            "LEFT JOIN run_groups g ON g.group_id = t.group_id"
+            hop + f"LEFT JOIN run_groups g ON g.group_id = {folder}"
             " AND g.org_id = %s",
             [org_id],
         )
@@ -1177,7 +3768,16 @@ class RunRegistry:
         include_unowned=False drops rows no user owns. Only a platform admin
         (and the token-less dev caller) may read those, so only they may list
         them — auth/ownership fails them closed for everyone else, and a list
-        that offers a row the drawer then refuses is a list that lies."""
+        that offers a row the drawer then refuses is a list that lies.
+
+        test_user_id / test_org_id are the TEST's authority columns, carried
+        on each row so history_endpoints can answer "may this caller file
+        this run" the way assign_runs decides it — off the test, not off the
+        run. They cost no join: _group_join already reaches `tests` for the
+        folder hop. They are INTERNAL, like org_id, and that endpoint pops
+        both before the response; nothing in the run shape the SPA types
+        describes them. Both are NULL for a run with no test (decision D8),
+        which is exactly how the endpoint tells the two rules apart."""
         join, join_params = self._group_join(
             folder_org_id or org_id, identified=user_id is not None)
         clauses: list = []
@@ -1202,8 +3802,25 @@ class RunRegistry:
             # Escape LIKE wildcards so a typed % / _ matches literally (default
             # ESCAPE is backslash); the search box is substring, not glob.
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            # D7 reaches the SEARCH BOX, not only the row. _hide_admin_author
+            # blanks the address on an admin-authority run, but this clause
+            # still MATCHED on it, and the match is a substring -- so a caller
+            # who did not know the address could derive it about 26 requests
+            # per character, through the public API, with no SPA involved.
+            # R11-2 chose server-side suppression precisely because "the next
+            # reader of row.user_email reintroduces the leak"; this clause was
+            # that reader.
+            #
+            # The disjunction is include_unowned, which history_endpoints
+            # computes as `scope.is_admin or scope.caller_user_id is None` --
+            # character for character what _hide_admin_author keeps the
+            # address for. Anyone who may READ the address may search it.
+            # user_query and run_id are untouched: neither names a person.
+            email_term = ("t.user_email ILIKE %s" if include_unowned
+                          else "(t.user_email ILIKE %s"
+                               " AND NOT t.ran_as_platform_admin)")
             clauses.append(
-                "(t.user_query ILIKE %s OR t.user_email ILIKE %s OR t.run_id ILIKE %s)"
+                f"(t.user_query ILIKE %s OR {email_term} OR t.run_id ILIKE %s)"
             )
             params.extend([like, like, like])
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -1221,9 +3838,15 @@ class RunRegistry:
                     f"SELECT t.run_id, t.user_id, t.user_email, t.org_id, "
                     f"       t.user_query, "
                     f"       t.rerun_of, t.status, t.created_at, t.updated_at, "
+                    f"       t.test_id, t.ran_as_platform_admin, "
+                    f"       te.name AS test_name, "
+                    f"       te.user_query AS test_query, "
+                    f"       te.user_id AS test_user_id, "
+                    f"       te.org_id AS test_org_id, "
+                    f"       tv.n AS test_version_n, "
                     f"       g.group_id, g.name AS group_name "
                     f"FROM test_runs t "
-                    f"{join}"
+                    f"{join}{_VERSION_JOIN}"
                     f"{where} "
                     f"ORDER BY t.created_at DESC, t.run_id LIMIT %s OFFSET %s",
                     params + [limit, offset],
@@ -1259,15 +3882,35 @@ class RunRegistry:
         caller's); anchoring to t.org_id here makes the pair mean exactly
         what list_runs' _group_join means for the same caller.
 
-        This is the ONE publication join that is not _group_join, and nothing
-        couples them but this sentence: _group_join binds a CALLER's org and
-        this binds the row's, so it cannot literally reuse it. Change either
-        notion of "published" and change both."""
+        This is one of THREE run-publication joins that are not _group_join —
+        list_groups' run_count join and _group_join_for_test_results are the
+        others — and nothing couples the four but this sentence:
+        _group_join binds a CALLER's org, list_groups binds run_org_id in its
+        JOIN, _group_join_for_test_results resolves it inside the results
+        lateral, and this binds the row's own, so none of them can literally
+        reuse it. Change any of those notions of "published" over runs and
+        change all four.
+
+        The folder is read through the run's TEST since 2026-09-07, matching
+        _group_join's hop and its permanent COALESCE fallback to the run's own
+        column. This must change in the SAME COMMIT as that join: this answer
+        anchors /reports while the join anchors History, and a window where
+        they disagree offers a row one of them then refuses. The ORG anchoring
+        is deliberately untouched — it stays the RUN's own org. D6 aims at
+        tests.org_id = test_runs.org_id, and _attach_test's NULL-org fallback
+        now repairs the test as well as the run in the common case, but the
+        two can still differ for a test whose runs span two orgs, and for
+        such a test this method resolves the shared folder for one of them
+        and not the other. The run's org is still the right anchor here, for
+        the reason given above: it is what makes this answer mean what
+        _group_join means for the same caller."""
         try:
             with self._pool.connection() as conn:
                 row = conn.execute(
                     "SELECT t.user_id, t.org_id, g.group_id FROM test_runs t "
-                    "LEFT JOIN run_groups g ON g.group_id = t.group_id "
+                    "LEFT JOIN tests te ON te.test_id = t.test_id "
+                    "LEFT JOIN run_groups g"
+                    " ON g.group_id = COALESCE(te.group_id, t.group_id) "
                     "                      AND g.org_id = t.org_id "
                     "WHERE t.run_id = %s",
                     (run_id,),
@@ -1354,7 +3997,38 @@ class RunRegistry:
         many-to-many org membership lands, this must target the user's
         actual active org explicitly (e.g. a dedicated lookup ordered like
         get_orgs_for_user, not a bare join) instead of trusting org_members
-        to return exactly one row, to stay deterministic."""
+        to return exactly one row, to stay deterministic.
+
+        The SECOND update carries the same org onto `tests`, and it is not
+        optional. This method runs from backfill_data_org_ids, which reaches
+        it through get_run_registry() — whose construction has already
+        executed the collapse. So on a database whose data_org_id_backfill
+        marker is not yet set, the collapse mints tests.org_id = NULL for
+        every org-less row and this method then sets test_runs.org_id, which
+        would leave tests.org_id NULL against a run that HAS an org: the D6
+        invariant (tests.org_id = test_runs.org_id) broken by our own
+        migration. A plain member's later "Run again" would take the rerun
+        branch, inherit that NULL, and the new run would drop out of
+        org-scoped History with its traces attributed to no org.
+
+        It reassigns key_n as well, because org_id is half of the
+        (org_id, key_n) unique index: a test carrying key_n 1 out of the
+        NULL bucket into an org that already has a key_n 1 would raise
+        UniqueViolation and abort the whole backfill. The window function
+        numbers the movers from the destination bucket's existing maximum.
+        Reading `tests` inside an UPDATE of `tests` is safe here — subqueries
+        see the pre-statement snapshot, so both maxima are the pre-move ones.
+
+        The return value still means RUNS updated, unchanged; the tests count
+        is logged rather than added to it, so existing callers and the
+        migration marker keep reading the same number. That holds even when
+        the tests UPDATE fails: it runs inside a SAVEPOINT, so its failure
+        rolls back only itself, the runs repair still commits, and this still
+        returns the runs count rather than 0. Deliberate — run_migration_once
+        writes the data_org_id_backfill marker unconditionally once migrate()
+        returns, so a 0 here would report "nothing to do" for a boot that in
+        fact repaired rows, and the number callers log would stop describing
+        what happened."""
         try:
             with self._pool.connection() as conn:
                 cur = conn.execute(
@@ -1364,9 +4038,68 @@ class RunRegistry:
                     "  AND m.user_id::text = t.user_id"
                 )
                 n = cur.rowcount
+                # After the runs, never before: the org is read back off the
+                # rows the statement above has just repaired.
+                #
+                # SAVEPOINT, for the same reason _attach_test uses one: the
+                # runs UPDATE above is not committed yet, and this statement
+                # has a live failure mode (a concurrent record_start inserting
+                # into the destination org can still collide on
+                # idx_tests_org_key). Without the savepoint that failure would
+                # roll the transaction back, discard the RUNS repair too, and
+                # return 0 — while run_migration_once writes the
+                # data_org_id_backfill marker unconditionally after migrate()
+                # returns, so the backfill would
+                # never run again. The tests repair is allowed to fail; taking
+                # the runs repair with it, permanently, is not.
+                n_tests = 0
+                try:
+                    with conn.transaction():
+                        cur_t = conn.execute(
+                            "UPDATE tests x SET org_id = s.new_org,"
+                            "                   key_n = s.new_key,"
+                            "                   updated_at = now()"
+                            " FROM ("
+                            "   SELECT c.test_id, c.new_org,"
+                            "          coalesce((SELECT max(e.key_n)"
+                            "                      FROM tests e"
+                            "                     WHERE e.org_id IS NOT"
+                            "                           DISTINCT FROM"
+                            "                           c.new_org), 0)"
+                            "          + row_number() OVER ("
+                            "                PARTITION BY c.new_org"
+                            "                ORDER BY c.created_at, c.test_id)"
+                            "            AS new_key"
+                            "     FROM (SELECT t.test_id, t.created_at,"
+                            "                  (SELECT r.org_id"
+                            "                     FROM test_runs r"
+                            "                    WHERE r.test_id = t.test_id"
+                            "                      AND r.org_id IS NOT NULL"
+                            "                    ORDER BY r.created_at,"
+                            "                             r.run_id"
+                            "                    LIMIT 1) AS new_org"
+                            "             FROM tests t"
+                            "            WHERE t.org_id IS NULL) c"
+                            "    WHERE c.new_org IS NOT NULL"
+                            " ) s WHERE x.test_id = s.test_id"
+                        )
+                    n_tests = cur_t.rowcount
+                except Exception as e:
+                    # Broad, and never re-raised: the runs repair above is
+                    # still good and must reach the commit below. psycopg.Error
+                    # alone was not enough — anything else escaping here lands
+                    # in the outer handler, which returns 0 with the runs
+                    # repair discarded, which is exactly the outcome the
+                    # savepoint was added to prevent.
+                    logger.error(
+                        "[RUN_REGISTRY] test org backfill failed (runs repair "
+                        "kept): %s", e)
                 conn.commit()
             if n:
                 logger.info("[RUN_REGISTRY] backfilled org_id on %d run(s)", n)
+            if n_tests:
+                logger.info(
+                    "[RUN_REGISTRY] backfilled org_id on %d test(s)", n_tests)
             return n
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] backfill_org_ids failed: {e}")
@@ -1399,7 +4132,13 @@ class RunRegistry:
         The rerun path DOES pass a scope, and reads the authorization
         decision itself off the group_id this join returns: a re-run inherits
         its source's folder, and "is this run published to my org" is exactly
-        "did the folder resolve"."""
+        "did the folder resolve".
+
+        test_user_id / test_org_id ride along for the same reason they do on
+        list_runs — the drawer's can_move must agree with the list's, so both
+        read the TEST's authority from the same two columns. Internal:
+        history_endpoints pops them, and the other callers here read named
+        fields, never the whole row."""
         join, params = self._group_join(org_id, identified=identified)
         try:
             with self._pool.connection() as conn:
@@ -1407,9 +4146,15 @@ class RunRegistry:
                     "SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
                     "       t.robot_code, t.rerun_of, t.status, t.org_id, "
                     "       t.created_at, t.updated_at, "
+                    "       t.test_id, t.ran_as_platform_admin, "
+                    "       te.name AS test_name, "
+                    "       te.user_query AS test_query, "
+                    "       te.user_id AS test_user_id, "
+                    "       te.org_id AS test_org_id, "
+                    "       tv.n AS test_version_n, "
                     "       g.group_id, g.name AS group_name "
                     "FROM test_runs t "
-                    f"{join} "
+                    f"{join}{_VERSION_JOIN} "
                     "WHERE t.run_id = %s",
                     params + [run_id],
                 ).fetchone()

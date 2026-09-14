@@ -75,7 +75,10 @@ class TestGroupRegistryCrud:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_test.test_runs, run_groups_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_test.test_runs,"
+            " run_groups_test.test_versions, run_groups_test.tests,"
+            " run_groups_test.run_groups")
         admin.close()
 
     def test_registry_construction_is_idempotent(self, reg):
@@ -91,6 +94,15 @@ class TestGroupRegistryCrud:
         assert g["name"] == "Checkout" and g["run_count"] == 0 and g["group_id"]
         listed = reg.list_groups(ORG_A)
         assert [x["name"] for x in listed] == ["Checkout"]
+
+    def test_a_created_group_has_the_same_keys_as_a_listed_one(self, reg):
+        """The SPA types both responses as one RunGroup, and the Tests page
+        reads test_count off it: a created folder that lacks a key the list
+        carries is a shape the client cannot trust."""
+        created = reg.create_group(ORG_A, "u1", "Checkout")
+        listed = reg.list_groups(ORG_A)[0]
+        assert created["test_count"] == 0
+        assert set(listed) <= set(created)
 
     def test_list_groups_is_per_org_and_name_sorted(self, reg):
         reg.create_group(ORG_A, "u1", "smoke")
@@ -218,7 +230,10 @@ class TestGroupAuthorityMatrix:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_authz_test.test_runs, run_groups_authz_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_authz_test.test_runs,"
+            " run_groups_authz_test.test_versions,"
+            " run_groups_authz_test.tests, run_groups_authz_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -407,6 +422,28 @@ class TestReadPathVisibility:
         admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         admin.close()
 
+    @pytest.fixture(scope="class")
+    def db(self):
+        """A direct connection on the same schema as this class's `reg`, for
+        seeding state the registry has no public method to write — a test's
+        folder, which only assign_runs sets and which the fan-out test needs
+        to set on three tests at once.
+
+        dict_row explicitly: psycopg.connect defaults to tuple_row, while the
+        pool the registry itself uses is built with dict_row, so any row a
+        future test reads through here indexes the same way as one read
+        through `reg`."""
+        import psycopg
+        from psycopg.rows import dict_row
+        from src.backend.core.config import settings
+
+        sep = "&" if "?" in settings.DATABASE_URL else "?"
+        dsn = settings.DATABASE_URL + (
+            f"{sep}options=-c%20search_path%3Drun_groups_read_test,public")
+        conn = psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+        yield conn
+        conn.close()
+
     @pytest.fixture(autouse=True)
     def _clean(self, reg):
         import psycopg
@@ -414,7 +451,10 @@ class TestReadPathVisibility:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_read_test.test_runs, run_groups_read_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_read_test.test_runs,"
+            " run_groups_read_test.test_versions,"
+            " run_groups_read_test.tests, run_groups_read_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -592,6 +632,164 @@ class TestReadPathVisibility:
                                      folder_org_id=self.ORG, group=gid)
             assert [g["run_count"] for g in listed] == [total] == [2], scope_user
 
+    def test_folder_counts_do_not_fan_out_across_tests_and_results(self, reg, db):
+        """Two one-to-many joins off run_groups multiply. A folder with 3 tests
+        and 2 results each must read 3 and 6 — not 6 and 6, and not 18 and 18.
+
+        The shape matters: a folder with ONE test, or one result per test,
+        cannot distinguish the correct query from the broken one, because
+        1 x N == N.
+
+        The chip is then checked against its own filtered table, which is the
+        stated reason the read hop, the write move and this count had to ship
+        as ONE commit: list_groups hand-writes a third copy of the folder
+        resolution, and a chip that resolves a folder differently from the
+        table it labels is the exact defect the merge exists to prevent.
+        """
+        db.execute(
+            "INSERT INTO run_groups (group_id, name, org_id, created_by)"
+            " VALUES ('fan-1', 'FanOut', 'org-fan', 'alice')")
+        user = {"user_id": "alice", "org_id": "org-fan", "email": "a@x.com"}
+        for t in range(3):
+            reg.record_start(f"fan-{t}-a", user, f"fan query {t}", "generated",
+                             robot_code="c")
+            reg.record_start(f"fan-{t}-b", user, f"fan query {t}", "running",
+                             robot_code="c", rerun_of=f"fan-{t}-a")
+        db.execute(
+            "UPDATE tests SET group_id = 'fan-1' WHERE org_id = 'org-fan'")
+
+        row = [g for g in reg.list_groups(folder_org_id="org-fan",
+                                          run_org_id="org-fan")
+               if g["group_id"] == "fan-1"][0]
+        assert row["test_count"] == 3
+        assert row["run_count"] == 6
+
+        # ...and the chip equals the table it labels, for both caller shapes
+        # the folder is meant to serve: the org_admin scope that narrows by no
+        # user, and a PEER, who reaches all six only because the folder
+        # publishes their author's tests to the org.
+        for scope_user in (None, "peer"):
+            listed, total = reg.list_runs(user_id=scope_user, org_id="org-fan",
+                                          folder_org_id="org-fan",
+                                          group="fan-1")
+            assert total == row["run_count"] == 6, scope_user
+            assert len(listed) == 6, scope_user
+
+    # Spec section 14 D4: each chip must EQUAL the table beneath it. The two
+    # tests below are the two shapes where it did not, both reachable without
+    # fabrication -- an unowned ROW is what AUTH_ENFORCED=false writes, and
+    # the bench and local dev run in that mode.
+    def _chip(self, reg, gid, **kw):
+        row = [g for g in reg.list_groups(self.ORG, run_org_id=self.ORG, **kw)
+               if g["group_id"] == gid]
+        return row[0]
+
+    def test_the_run_chip_does_not_count_a_run_no_table_can_show(self, reg):
+        """A token-less "Run again" of a filed run leaves a run with NO owner.
+        It inherits the folder through its test, so the chip's join reaches
+        it -- but every readable table drops an unowned row, because nobody
+        but a platform admin may open one. The chip then stood at 2 above a
+        table of 1 for a member, a peer and an org_admin alike."""
+        a1 = str(uuid.uuid4())
+        reg.record_start(
+            a1, {"user_id": self.ADMIN, "org_id": self.ORG,
+                 "email": "a@e.com"}, "q", "passed", robot_code="c")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [a1], gid) is True
+        # The token-less re-run: no user, no org, same test.
+        reg.record_start(str(uuid.uuid4()),
+                         {"user_id": None, "org_id": None, "email": None},
+                         "q", "passed", robot_code="c", rerun_of=a1)
+
+        chip = self._chip(reg, gid, include_unowned=False)
+        for scope_user in (self.MEMBER, None):   # plain member, then org_admin
+            _, total = reg.list_runs(user_id=scope_user, org_id=self.ORG,
+                                     folder_org_id=self.ORG, group=gid,
+                                     include_unowned=False)
+            assert chip["run_count"] == total == 1, scope_user
+
+        # The control, in the same test: a platform admin MAY read an unowned
+        # row, so for them the chip and the table are both 2. The rule is
+        # "the chip equals the table", not "the chip is smaller".
+        admin_chip = self._chip(reg, gid, include_unowned=True)
+        _, admin_total = reg.list_runs(user_id=None, org_id=None,
+                                       folder_org_id=self.ORG, group=gid,
+                                       include_unowned=True)
+        assert admin_chip["run_count"] == admin_total == 2
+
+    def test_the_test_chip_does_not_count_a_test_no_table_can_show(self, reg, db):
+        """An AUTHOR-LESS test with a CONCRETE org.
+
+        A token-less mint writes (tests.user_id NULL, tests.org_id NULL); a
+        later owned write adopts the RUN, and backfill_org_ids' tests UPDATE
+        then carries that org onto the TEST -- it keys on the test's NULL org
+        and derives the value from the test's runs, with no user_id condition
+        of its own. The org is set here directly rather than by calling
+        backfill_org_ids, which reads org_members from the shared public
+        schema and would make this test depend on live membership rows.
+
+        That row matters because an org_admin may still FILE it: assign_runs'
+        authority filter binds only te.org_id for them. test_count then
+        counted a test the Tests table refuses to list, because
+        _VISIBLE_TEST_SQL drops a row nobody owns."""
+        rid = str(uuid.uuid4())
+        reg.record_start(rid, {"user_id": None, "org_id": None, "email": None},
+                         "orphan", "generated", robot_code="c")
+        reg.record_start(rid, {"user_id": self.ADMIN, "org_id": self.ORG,
+                               "email": "a@e.com"}, "orphan", "passed")
+        db.execute("UPDATE tests SET org_id = %s WHERE org_id IS NULL",
+                   (self.ORG,))
+        assert db.execute(
+            "SELECT user_id, org_id FROM tests").fetchone() == {
+                "user_id": None, "org_id": self.ORG}, (
+            "the row this test is about was not built")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [rid], gid) is True
+
+        chip = self._chip(reg, gid, include_unowned=False)
+        for scope_user in (self.MEMBER, None):
+            _, total = reg.list_tests(user_id=scope_user, org_id=self.ORG,
+                                      folder_org_id=self.ORG, group=gid,
+                                      include_unowned=False)
+            assert chip["test_count"] == total == 0, scope_user
+
+        # Control: the platform admin, who may read an unowned row, sees 1
+        # on both sides.
+        admin_chip = self._chip(reg, gid, include_unowned=True)
+        _, admin_total = reg.list_tests(user_id=None, org_id=None,
+                                        folder_org_id=self.ORG, group=gid,
+                                        include_unowned=True)
+        assert admin_chip["test_count"] == admin_total == 1
+
+    def test_the_test_chip_does_not_count_another_orgs_test(self, reg, db):
+        """A test whose own org is NOT the folder's.
+
+        list_tests narrows on te.org_id, so such a test is absent from the
+        table; test_count carried no org term at all and counted it anyway.
+        The two producers are an org MOVE, which rewrites tests.org_id while
+        group_id keeps pointing at the old org's folder, and the one-shot
+        collapse, which sets group_id at INSERT. assign_runs can no longer
+        make one — it binds te.org_id to the caller's own org — so the state
+        is built directly here rather than through a route that refuses it.
+
+        Fail-closed by design: if the chip and the table ever disagree about
+        which org a test belongs to, the chip is the one that must give way."""
+        rid = str(uuid.uuid4())
+        reg.record_start(rid, {"user_id": self.ADMIN, "org_id": self.ORG,
+                               "email": "a@e.com"}, "q", "passed",
+                         robot_code="c")
+        gid = reg.create_group(self.ORG, self.ADMIN, "Team")["group_id"]
+        assert reg.assign_runs(self.ORG, self.ADMIN, True, [rid], gid) is True
+        # The org move: the test leaves, its folder pointer does not.
+        db.execute("UPDATE tests SET org_id = 'org-elsewhere'")
+
+        chip = self._chip(reg, gid, include_unowned=False)
+        for scope_user in (self.MEMBER, None):
+            _, total = reg.list_tests(user_id=scope_user, org_id=self.ORG,
+                                      folder_org_id=self.ORG, group=gid,
+                                      include_unowned=False)
+            assert chip["test_count"] == total == 0, scope_user
+
     # 14 ------------------------------------------------------------------
     def test_filtering_by_a_foreign_orgs_folder_returns_nothing(self, reg):
         """A folder id the caller's org does not own narrows to nothing rather
@@ -681,7 +879,11 @@ class TestGroupAssignmentAndFilter:
         admin = psycopg.connect(settings.DATABASE_URL, autocommit=True)
         # ONE statement, not two: test_runs' foreign key makes
         # run_groups untruncatable on its own.
-        admin.execute("TRUNCATE run_groups_assign_test.test_runs, run_groups_assign_test.run_groups")
+        admin.execute(
+            "TRUNCATE run_groups_assign_test.test_runs,"
+            " run_groups_assign_test.test_versions,"
+            " run_groups_assign_test.tests,"
+            " run_groups_assign_test.run_groups")
         admin.close()
 
     @staticmethod
@@ -1215,6 +1417,32 @@ def test_assignments_endpoint(client):
     assert body["groups"][0]["run_count"] == 0 and body["ungrouped_count"] == 1
 
 
+def test_groups_endpoint_reports_ungrouped_test_count(client):
+    """ungrouped_test_count is the Tests-page counterpart of ungrouped_count
+    (spec section 6.5: purely additive, from count_ungrouped_tests, with
+    ungrouped_count unchanged in name and meaning — a count of RESULTS).
+
+    _seed_run_for never passes robot_code, so it mints no test row (owner
+    decision D8) — every other test in this module that uses it exercises
+    run_count only. This test records through the registry directly so the
+    seeded run has a real test to count."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.core.run_registry import get_run_registry
+
+    tok = _register(client, f"utc-{uuid.uuid4().hex[:8]}@e.com")
+    claims = decode_token(tok)
+    rid = str(uuid.uuid4())
+    get_run_registry().record_start(
+        rid,
+        {"user_id": claims["user_id"], "email": claims["email"],
+         "org_id": claims["org_id"]},
+        "q", "generated", robot_code="*** Tasks ***")
+
+    body = client.get("/api/groups", headers=_auth(tok)).json()
+    assert body["ungrouped_count"] == 1
+    assert body["ungrouped_test_count"] == 1
+
+
 def test_assignments_reject_foreign_run_atomically(client):
     tok_a = _register(client, f"fa-{uuid.uuid4().hex[:8]}@e.com")
     tok_b = _register(client, f"fb-{uuid.uuid4().hex[:8]}@e.com")
@@ -1293,7 +1521,7 @@ def test_orgless_caller_sees_no_folders(client):
     client.post("/api/groups", json={"name": "Someone elses"}, headers=_auth(other))
 
     body = client.get("/api/groups", headers=_auth(_orgless_token(client))).json()
-    assert body == {"groups": [], "ungrouped_count": 0}
+    assert body == {"groups": [], "ungrouped_count": 0, "ungrouped_test_count": 0}
 
 
 def test_orgless_caller_cannot_mutate_folders(client):
@@ -1472,10 +1700,17 @@ def test_platform_admin_folder_chip_equals_its_filtered_table(client):
     })
 
     chips = client.get("/api/groups", headers=_auth(admin_tok)).json()["groups"]
-    chip = [g for g in chips if g["group_id"] == gid][0]["run_count"]
+    folder = [g for g in chips if g["group_id"] == gid][0]
+    chip = folder["run_count"]
     page = client.get(f"/api/history?group={gid}", headers=_auth(admin_tok)).json()
     assert {r["run_id"] for r in page["runs"]} == {attributed}
-    assert chip == page["total"] == 1
+    assert chip == page["total"] == 1   # run_count unchanged by P1
+
+    # P1 adds test_count beside run_count; run_count keeps its meaning.
+    # The full chip-equals-table invariant for TESTS cannot be asserted at the
+    # HTTP layer until /api/tests exists — that assertion belongs to P2.
+    assert "test_count" in folder
+    assert isinstance(folder["test_count"], int)
 
 
 # ---------------------------------------------------------------------------

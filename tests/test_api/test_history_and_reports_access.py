@@ -854,11 +854,12 @@ def _rerun_client(registry, user, validated_admin=False):
 
     async def fake_stream(robot_code, user_query=None, workflow_id=None,
                           user=None, history_query=None, rerun_of=None,
-                          group_id=None):
+                          group_id=None, is_platform_admin=None):
         captured.update(
             robot_code=robot_code, user_query=user_query,
             workflow_id=workflow_id, user=user, history_query=history_query,
             rerun_of=rerun_of, group_id=group_id,
+            is_platform_admin=is_platform_admin,
         )
         yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
 
@@ -897,6 +898,10 @@ class TestRerunEndpoint:
         assert captured["user"] == _USER1
         # Lineage anchor: the new row links back to the source run.
         assert captured["rerun_of"] == _RID_OWNED
+        # Finding 1: the rerun route's own history_scope() call already
+        # re-validated this caller as non-admin; stream_execute_only must
+        # receive that answer rather than recompute it.
+        assert captured["is_platform_admin"] is False
 
     def test_chain_rerun_flattens_to_the_original(self, detail_seeded):
         # _RID_CHAIN is itself a re-run of _RID_OWNED. Re-running it must
@@ -933,6 +938,9 @@ class TestRerunEndpoint:
             _close_feedback(client)
         assert resp.status_code == 200
         assert captured["robot_code"] == "*** Code 2 ***"
+        # Finding 1: history_scope()'s re-validated admin flag must reach
+        # stream_execute_only, not be recomputed a second time downstream.
+        assert captured["is_platform_admin"] is True
 
     def test_run_without_stored_code_is_409(self, detail_seeded, tmp_path):
         from src.backend.core.artifact_store import LocalArtifactStore
@@ -1011,6 +1019,60 @@ class TestRerunServicePlumbing:
         assert row["user_id"] == "u2"                      # attributed to clicker
         assert row["rerun_of"] == "root-run-id"            # lineage for feedback
         assert seen["learning_query"] is None              # learning skipped
+
+    def test_is_validated_admin_runs_once_end_to_end_on_the_real_rerun_route(
+            self, detail_seeded):
+        """Finding 1 (round 1 review). endpoints.py's history_scope() call and
+        workflow_service.stream_execute_only's own (now-conditional)
+        computation must not BOTH read the users table for one rerun request.
+        Unlike every other rerun test in this file, stream_execute_only is
+        NOT faked here — only its Docker leg is — so this drives the real
+        conditional-computation branch this finding is about, through the
+        real /execute-test {rerun_of} route.
+
+        is_validated_admin is counted at BOTH of its import sites —
+        api.history_scope and services.workflow_service each bind their own
+        module-level reference via `from ... import is_validated_admin`, so
+        patching only one would silently miss a regression on the other."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.backend.api.endpoints import router as api_router
+        from src.backend.services import workflow_service as ws
+
+        admin_calls = {"n": 0}
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            return u is not None and u.get("role") == "admin"
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot):
+            release_slot()
+            yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
+
+        app = FastAPI()
+        app.include_router(api_router)
+        app.dependency_overrides[require_user] = lambda: _ADMIN
+
+        patchers = [
+            patch("src.backend.api.endpoints.get_run_registry", return_value=detail_seeded),
+            patch.object(ws, "get_run_registry", return_value=detail_seeded),
+            patch.object(ws, "_stream_docker_execution", fake_docker),
+            patch("src.backend.api.history_scope.is_validated_admin",
+                  side_effect=_count_admin_calls),
+            patch.object(ws, "is_validated_admin", side_effect=_count_admin_calls),
+        ]
+        for p in patchers:
+            p.start()
+        client = TestClient(app)
+        try:
+            resp = client.post("/execute-test", json={"rerun_of": _RID_FOREIGN})
+        finally:
+            for p in patchers:
+                p.stop()
+            client.close()
+
+        assert resp.status_code == 200
+        assert admin_calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------

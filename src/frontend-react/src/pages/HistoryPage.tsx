@@ -22,12 +22,16 @@ import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
 import {
-  Check, ChevronRight, Copy, Download, Folder, FolderInput, ListChecks,
+  Check, ChevronRight, Copy, Download, FlaskConical, Folder, FolderInput,
+  ListChecks,
   Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
+import { formatDate, timeAgo } from '@/lib/time'
+import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { useFetch } from '@/lib/useFetch'
+import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
 import { GroupChipsRow } from '@/components/history/GroupChipsRow'
 import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
 import { useRunGroups, type GroupFilter } from '@/components/history/RunGroupsContext'
@@ -56,6 +60,21 @@ interface Run {
   created_at: string
   updated_at: string
   has_report: boolean
+  // The test this result belongs to, and the version of THAT test it ran
+  // (spec 7.5). Both are permanently nullable and neither means "missing":
+  // test_id is NULL for a generation that failed before any code existed
+  // (owner decision D8(a)), and test_version_n for a regeneration that failed
+  // after the test already existed (D8(b), spec case 10).
+  test_id?: string | null
+  test_name?: string | null
+  test_query?: string | null
+  test_version_n?: number | null
+  // Server-computed (D7): this result was made with platform-admin authority.
+  // The server withholds the author's ADDRESS on such a row from every caller
+  // who does not hold that authority, so this is what the author column
+  // renders in its place. Never re-derive it: the role is evaluated per
+  // request and test_runs stores none.
+  ran_as_platform_admin?: boolean
   // Server-computed: may THIS caller file THIS run? Seeing a run and being
   // able to move it are different questions — a grouped run is visible to
   // the whole org, but only its owner or an org_admin moves it. Never
@@ -65,6 +84,12 @@ interface Run {
 
 interface RunDetail extends Run {
   robot_code: string | null
+  // Server-computed: would GET /api/feedback/{run_id} answer this caller
+  // at all? The drawer asks only when this says so. It cannot be derived
+  // here — the feedback route withholds is_grouped where the detail route
+  // passes it, and both a platform admin and the token-less dev caller may
+  // read a peer's corrections while the client knows it is neither.
+  can_read_feedback?: boolean
 }
 
 interface HistoryResponse {
@@ -86,14 +111,27 @@ interface FeedbackCorrectionsResponse {
 
 const PAGE = 100
 
+/* The three coloured badges' dark variants are the SAME values
+   TestsPage's RESULT_BADGE carries, and that map's comment named this
+   retrofit. Measured in Chromium before it: on a body of rgb(2,8,23)
+   the Failed badge still painted rgb(185,28,28) on rgb(254,226,226)
+   — the light pastel pill, legible but one of the two places the
+   list pages visibly disagreed. The Running dot below was the other.
+   Generated is deliberately left alone: variant="outline" resolves
+   through the theme already, and a dark: override on it would be a
+   second answer to a question the token has answered. Running's BADGE
+   is left alone for the same reason (variant="secondary") — but that
+   answers the CHROME only. The pulsing dot inside it is a raw
+   bg-blue-500 that no token speaks for, so it carries the dark variant
+   TestsPage's RunningBadge already pairs with the identical span. */
 const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
-  passed: <Badge className="bg-green-100 text-green-700 border-green-200 hover:bg-green-100 text-xs">Passed</Badge>,
-  failed: <Badge className="bg-red-100 text-red-700 border-red-200 hover:bg-red-100 text-xs">Failed</Badge>,
-  error:  <Badge className="bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-100 text-xs">Error</Badge>,
+  passed: <Badge className="bg-green-100 text-green-700 border-green-200 hover:bg-green-100 dark:bg-green-950 dark:text-green-300 dark:border-green-900 dark:hover:bg-green-950 text-xs">Passed</Badge>,
+  failed: <Badge className="bg-red-100 text-red-700 border-red-200 hover:bg-red-100 dark:bg-red-950 dark:text-red-300 dark:border-red-900 dark:hover:bg-red-950 text-xs">Failed</Badge>,
+  error:  <Badge className="bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-900 dark:hover:bg-amber-950 text-xs">Error</Badge>,
   generated: <Badge variant="outline" className="text-xs">Generated</Badge>,
   running: (
     <Badge variant="secondary" className="gap-1.5 text-xs">
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" />
       <span>Running</span>
     </Badge>
   ),
@@ -101,28 +139,6 @@ const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
 
 const FILTERS = ['all', 'passed', 'failed', 'generated', 'error'] as const
 type Filter = (typeof FILTERS)[number]
-
-function formatDate(iso: string): string {
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit',
-  })
-}
-
-/** "2h ago" for the table; the exact stamp lives in the cell tooltip. */
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
-  if (Number.isNaN(ms)) return iso
-  const mins = Math.floor(ms / 60_000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(iso).toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' })
-}
 
 /** scope='all' means "no per-user narrowing", NOT "every user on the
     platform": the server returns it to any org_admin, and every solo signup
@@ -168,6 +184,55 @@ function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
       {d.user_query ? ' Use Regenerate to produce it again.' : ''}
     </p>
   )
+}
+
+/** Which test a result belongs to, and the version of it that ran — the chip
+ *  that replaced the re-run pill (spec 7.5).
+ *
+ *  The test's LABEL is drawn only when it differs from the row's own
+ *  description. Owner decision D2 made a test's name its per-org key and left
+ *  `tests.name` NULL for good, so labelFrom always falls through to the
+ *  TEST's description — which, on a test nobody has edited, is the same
+ *  sentence this cell already shows an inch to the right. Printing it twice
+ *  would be the whole column, permanently. It reappears the moment the two
+ *  diverge, which is exactly when it says something the row does not: the
+ *  description travels with each new version, so an older result's test
+ *  acquires a different name as soon as someone updates it.
+ *
+ *  That suppression hides nothing and needs no sr-only counterpart, unlike
+ *  the inaccessible re-run pill it replaced: the label is dropped only when
+ *  the identical string is already on the row as the description. The title
+ *  carries both facts for a mouse.
+ *
+ *  No chip at all when the run names no test. That is permanent and legal
+ *  rather than missing data (owner decision D8(a)) — a generation that failed
+ *  before any code existed belongs to no test and never will. */
+function ResultTestChip({ run }: Readonly<{ run: Run }>) {
+  if (!run.test_id) return null
+  const label = labelFrom(run.test_name ?? null, run.test_query ?? null)
+  const version = versionLabel(run.test_version_n ?? null)
+  const echoesTheRow = label === (run.user_query ?? '').trim()
+  return (
+    <span className="shrink-0" title={`Test: ${label} — ${version.title}`}>
+      {/* FlaskConical is the sidebar's own Tests icon, so the chip reads as
+          "this belongs to a test" in the vocabulary the nav already taught. */}
+      <Badge variant="outline" className="gap-1 text-xs font-normal text-muted-foreground">
+        <FlaskConical className="h-3 w-3" />
+        {!echoesTheRow && <span className="max-w-[10rem] truncate">{label}</span>}
+        <span>{version.text}</span>
+      </Badge>
+    </span>
+  )
+}
+
+/** Who the drawer names as this result's author, or null for nobody worth
+ *  naming. The viewer's own address says nothing and is suppressed; an
+ *  address the server withheld under D7 is replaced by the authority that ran
+ *  it, because the row does the same and the two must agree. */
+function drawerAuthor(d: RunDetail | null, viewerEmail: string | undefined): string | null {
+  if (!d) return null
+  if (d.user_email) return d.user_email === viewerEmail ? null : d.user_email
+  return d.ran_as_platform_admin ? PLATFORM_ADMIN : null
 }
 
 /* ── The drawer's "re-run of {id}" trail. The original id is always shown in
@@ -242,15 +307,16 @@ function RunDrawerHeader({ selected, d, detailError, viewerEmail, copied, onCopy
     <SheetHeader className="space-y-2 pr-6 text-left">
       <div className="flex items-center gap-2">
         {d && STATUS_BADGE[d.status]}
+        {d && <ResultTestChip run={d} />}
         {d?.rerun_of && (
           <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-100">
             <Repeat2 className="h-3 w-3" />
             <span>Re-run</span>
           </Badge>
         )}
-        {d?.user_email && d.user_email !== viewerEmail && (
+        {drawerAuthor(d, viewerEmail) && (
           <span className="text-xs text-muted-foreground" title="Who ran this test">
-            {d.user_email}
+            {drawerAuthor(d, viewerEmail)}
           </span>
         )}
       </div>
@@ -358,11 +424,12 @@ function RunDrawerActions({ d, selected, hasUser, groups, rerunDisabled, onRunAg
 
 /**
  * What this run has already told the learning system — read-only here;
- * Retract stays the Generate panel's action alone (see feedbackPath in
- * HistoryPage). `corrections` is already [] for every case that must render
- * nothing — still loading, stale for this row, refused, or genuinely empty —
- * so this needs no separate loading/error/staleness check: silence claims
- * nothing, same as RecordedCorrections' own empty-array case.
+ * Retract stays the Generate panel's action alone (see RunDrawerFeedback).
+ * `corrections` is already [] for every case that must render nothing — not
+ * offered, still loading, refused, or genuinely empty — and can never be
+ * another run's (RunDrawerFeedback's key), so this needs no separate
+ * loading/error/staleness check: silence claims nothing, same as
+ * RecordedCorrections' own empty-array case.
  */
 function RunDrawerCorrections({ corrections, appliedTo, selected, copied, onCopy }: Readonly<{
   corrections: RecordedCorrectionItem[]
@@ -440,46 +507,72 @@ function RunDrawerCode({ d, detailError, copied, onCopy, onDownload }: Readonly<
 }
 
 /**
- * The corrections the drawer may show for the open row, or [] for every case
- * that must render nothing.
+ * The corrections the drawer may show for the open run, or [] while that
+ * run's own read is still out or was refused.
  *
- * `d` is borrowed on purpose. This payload carries no run_id of its own to
- * check against `selected` (only `applied_to`, the resolved ORIGINAL run,
- * which legitimately differs from `selected` on a re-run), so the "does the
- * response match the open row" trick doesn't apply to it directly. `loading`
- * and `error` are the first substitute, and BOTH are required: useFetch's
- * reload() sets loading true and error '' at the START of every attempt for
- * the CURRENT path (useFetch.ts) — from inside an EFFECT, so for the one
- * render between `feedbackPath` changing and that effect firing, both still
- * describe the PREVIOUS path. useFetch never clears `data` in either case, in
- * its catch branch least of all (only setError runs there), so a fetch that
- * FAILS for a freshly-selected row — the 403 case below is the everyday one,
- * not an edge one — leaves the PREVIOUS row's data sitting there with loading
- * already back to false. Gating on loading alone closes only the in-flight
- * window; without error too, opening an owned run with corrections on file
- * and then a colleague's shared run (whose corrections read the server
- * refuses) would go on showing the FIRST run's corrections, and a "filed
- * against" notice that may be entirely fabricated, under the SECOND run's
- * drawer.
- *
- * That leaves exactly the one render loading/error can't cover on their own —
- * and it is exactly the render where `d` is ALSO null, for the same reason
- * (detail hasn't caught up to `selected` either). Requiring `d` closes it,
- * and costs nothing on the success path: GET /api/history/{run_id} passes
- * is_grouped=true while GET /api/feedback/{run_id} deliberately does not, and
- * is_grouped only ADDS an allow rule (caller_can_access, ownership.py) — so
- * feedback-allowed strictly implies detail-allowed, and `d` is never null for
- * permission reasons while the corrections fetch itself succeeds.
+ * It does NOT decide whether an answer belongs to the open run, and cannot:
+ * the payload carries no run_id of its own (only `applied_to`, the resolved
+ * ORIGINAL run, which legitimately differs from the open run on a re-run), and
+ * useFetch keeps its last good answer while a new path's read is out, and
+ * across a null path (useFetch.ts). A reader that outlived its run therefore
+ * served that run's corrections under the next one in two ways: a run whose
+ * read is not offered gets a null path, which leaves loading false and error
+ * empty over the previous run's data; and the first render after a switch to
+ * another readable run comes before useFetch's effect marks the new read
+ * loading.
+ * RunDrawerFeedback owns the read and is keyed by run id, so its useFetch
+ * starts empty with every run and cannot hold another run's answer.
  */
 function visibleCorrections(
-  d: RunDetail | null,
   feedbackLoading: boolean,
   feedbackError: string,
   feedback: FeedbackCorrectionsResponse | null,
 ): RecordedCorrectionItem[] {
-  if (!d) return []
   if (feedbackLoading || feedbackError) return []
   return Array.isArray(feedback?.corrections) ? feedback.corrections : []
+}
+
+/**
+ * What this run has already contributed to the learning store — the History
+ * drawer's read of the same data GeneratePage's FeedbackPanel shows while the
+ * run is still on screen. Render it only as `key={d.run_id}`: the key is what
+ * ties the read's lifetime to one run (visibleCorrections above).
+ *
+ * Errors are read but never rendered as their own text, and that stays the
+ * backstop rather than the mechanism. A 403 here is legitimate and always
+ * was: GET /api/history/{run_id} passes is_grouped=true (a colleague's run
+ * published into a shared folder opens in this drawer), while
+ * GET /api/feedback/{run_id} deliberately does not — publishing a test does
+ * not publish the corrections filed against it (get_run_corrections,
+ * endpoints.py). An error banner would put a red box on every shared run in
+ * the org. An empty list degrades the same way, silently: silence claims
+ * nothing either way.
+ *
+ * The request is not offered when the server has already said it will refuse
+ * it. can_read_feedback is that answer, computed by run_detail with the same
+ * gate the feedback route applies — and only the server can compute it, since
+ * a platform admin and the token-less dev caller may both read a peer's
+ * corrections while the client knows it is neither. It is read from `d`, the
+ * detail that already names the open run, so the flag always belongs to the
+ * run on screen and the request waits for the detail read instead of racing
+ * it.
+ */
+function RunDrawerFeedback({ d, copied, onCopy }: Readonly<{
+  d: RunDetail
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
+  const feedbackPath = d.can_read_feedback ? `/api/feedback/${d.run_id}` : null
+  const { data: feedback, loading, error } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
+  return (
+    <RunDrawerCorrections
+      corrections={visibleCorrections(loading, error, feedback)}
+      appliedTo={feedback?.applied_to}
+      selected={d.run_id}
+      copied={copied}
+      onCopy={onCopy}
+    />
+  )
 }
 
 /** Run again needs stored code, an open row, no re-run of that row already in
@@ -692,25 +785,10 @@ export default function HistoryPage() {
   // still loads, because GET /api/groups answers 200 with an empty list.
   const { user, isAdmin } = useAuth()
 
-  // Mirrors the server's rules, which differ per action. A hint only — the
-  // server 404s any folder the caller may not mutate either way.
-  const canRename = useCallback((g: RunGroup) => (
-    !!user && (g.created_by === user.id || user.can_manage_org_folders === true)
-  ), [user])
-
-  // Narrower on purpose: deleting a folder returns every run inside it to
-  // Ungrouped, which un-shares them from the whole org. That consequence is
-  // the org's, so the authority is an org-admin's — not the folder creator's.
-  //
-  // can_manage_org_folders, NOT is_org_admin. The two are different questions:
-  // is_org_admin is is_team_admin(), team orgs only, and gates the Team page;
-  // folder authority is the org_role claim, which ensure_personal_org grants
-  // every user over their own personal org. Reading the wrong one drew no
-  // Delete control for any solo user while DELETE /api/groups/{id} answered
-  // 204 for them — i.e. for every new signup.
-  const canDelete = useCallback((_g: RunGroup) => (
-    !!user && user.can_manage_org_folders === true
-  ), [user])
+  // Mirrors the server's rules, which differ per action — see
+  // folderPermissions for each rule and the trap the delete one avoids.
+  const canRename = useCallback((g: RunGroup) => canRenameFolder(user, g), [user])
+  const canDelete = useCallback((_g: RunGroup) => canDeleteFolder(user), [user])
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
   // paginates only its matching rows, so "Load more (N older)" and the "N of M"
@@ -826,26 +904,6 @@ export default function HistoryPage() {
   // briefly render the PREVIOUS run's code/query. Only trust detail once it
   // matches the open row.
   const d = detail?.run_id === selected ? detail : null
-
-  // What this run has already contributed to the learning store — the
-  // History drawer's read of the same data GeneratePage's FeedbackPanel
-  // shows while the run is still on screen.
-  //
-  // Which of those rows may actually be shown for the open drawer is a
-  // question about staleness rather than about fetching — visibleCorrections
-  // above states the rule and why each half of it is required.
-  //
-  // Errors are read but never rendered as their own text. A 403 here is
-  // EXPECTED and correct: GET /api/history/{run_id} above passes
-  // is_grouped=true (a colleague's run published into a shared folder opens
-  // in this drawer), while GET /api/feedback/{run_id} deliberately does not
-  // — publishing a test does not publish the corrections filed against it
-  // (get_run_corrections, endpoints.py). An error banner would put a red
-  // box on every shared run in the org. An empty list degrades the same
-  // way, silently: silence claims nothing either way.
-  const feedbackPath = selected ? `/api/feedback/${selected}` : null
-  const { data: feedback, loading: feedbackLoading, error: feedbackError } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
-  const corrections = visibleCorrections(d, feedbackLoading, feedbackError, feedback)
 
   // fromBulk: the toolbar's multi-select move — only that path exits select
   // mode, and only on success. A failed move keeps the selection so the user
@@ -1020,7 +1078,7 @@ export default function HistoryPage() {
     <div className="mx-auto max-w-6xl">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Test Runs</h1>
+          <h1 className="text-xl font-bold tracking-tight">Activity</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
             {subtitle}
           </p>
@@ -1157,44 +1215,12 @@ export default function HistoryPage() {
                       <td className="py-3 px-4">{STATUS_BADGE[row.status] ?? row.status}</td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
-                          {row.rerun_of && (row.rerun_of_accessible ? (
-                            <button
-                              type="button"
-                              className="shrink-0"
-                              title={`Re-run of ${row.rerun_of} — click to open the original run`}
-                              onClick={e => { e.stopPropagation(); setSelected(row.rerun_of!) }}
-                            >
-                              {/* Same pill family as the status badges so it
-                                  reads as a first-class chip, not a footnote. */}
-                              <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-200">
-                                <Repeat2 className="h-3 w-3" />
-                                <span>Re-run</span>
-                              </Badge>
-                            </button>
-                          ) : (
-                            /* Still a re-run — that stays true — but the
-                               original is no longer ours to open, so the pill
-                               is a statement, not a control. Muted and
-                               non-interactive; the full original id lives in
-                               the tooltip, never truncated. */
-                            <span
-                              className="shrink-0"
-                              title={`Re-run of ${row.rerun_of} — you no longer have access to the original run`}
-                            >
-                              <Badge className="gap-1 border-border bg-muted text-xs text-muted-foreground hover:bg-muted">
-                                <Repeat2 className="h-3 w-3" />
-                                <span>Re-run</span>
-                                {/* The title attribute is mouse-only. This
-                                    span is the same sentence as real text, so
-                                    a keyboard or screen-reader user is told
-                                    why the pill does nothing instead of
-                                    meeting a badge with no explanation. */}
-                                <span className="sr-only">
-                                  {` of ${row.rerun_of} — you no longer have access to the original run`}
-                                </span>
-                              </Badge>
-                            </span>
-                          ))}
+                          {/* What the re-run pill used to be (spec 7.5).
+                              Lineage between two RESULTS is gone as a
+                              concept; lineage to the TEST replaces it. The
+                              drawer still shows `rerun_of` in full, and P3
+                              drops that column and the trail together. */}
+                          <ResultTestChip run={row} />
                           <span className="line-clamp-1 text-sm" title={row.user_query ?? undefined}>
                             {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
                           </span>
@@ -1220,6 +1246,14 @@ export default function HistoryPage() {
                             >
                               {row.user_email}
                             </button>
+                          ) : row.ran_as_platform_admin ? (
+                            /* D7. A statement, not a control: there is no
+                               individual to filter by, and the address such a
+                               button would need is precisely what the server
+                               withheld from this viewer. */
+                            <span className="block max-w-full truncate" title="Who ran this test">
+                              {PLATFORM_ADMIN}
+                            </span>
                           ) : '—'}
                         </td>
                       )}
@@ -1340,13 +1374,7 @@ export default function HistoryPage() {
               a move that failed from in here would otherwise be silent. */}
           {moveError && <p className="text-xs text-destructive">{moveError}</p>}
 
-          <RunDrawerCorrections
-            corrections={corrections}
-            appliedTo={feedback?.applied_to}
-            selected={selected}
-            copied={copied}
-            onCopy={copyText}
-          />
+          {d && <RunDrawerFeedback key={d.run_id} d={d} copied={copied} onCopy={copyText} />}
 
           <Separator />
 

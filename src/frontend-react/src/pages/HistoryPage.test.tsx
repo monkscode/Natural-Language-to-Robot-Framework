@@ -8,18 +8,20 @@
  * HintDrawer.test.tsx already use for the same three hooks.
  *
  * What this pins: opening a run in the drawer fires
- * GET /api/feedback/{run_id}; a successful read renders the correction
+ * GET /api/feedback/{run_id} — but only when the detail read's
+ * can_read_feedback says the server will answer it, which Task 11 added
+ * because a peer's published run 403s there by design and the drawer used to
+ * find that out by being refused; a successful read renders the correction
  * text on screen, and — when `applied_to` differs from the open row — the
  * "filed against the original run" notice with its full, untruncated id;
  * a refused read renders no error text (the behaviour GeneratePage's
  * FeedbackPanel already proved once for its own surface); and a row
  * switch never shows a PREVIOUS row's corrections under the newly-selected
- * row — not while that row's own fetch is still in flight, not once it has
- * settled to an error, and not in the single stale commit between the row
- * changing and the run-detail fetch catching up to it (useFetch clears
- * neither `data` nor, on the error path, anything at all beyond `error`
- * itself — see HistoryPage.tsx's comment above `feedbackPath` for why
- * `loading`, `error` AND `d` all have to gate `corrections`). The two
+ * row. The mocked tests pin the corrections reader's own guards (still
+ * loading, refused, not rendered until the detail names the open row); the
+ * last corrections block drives the REAL useFetch across a switch, because
+ * the stale answer lives in what the hook keeps and a mock keeps nothing
+ * (see HistoryPage.tsx's visibleCorrections and RunDrawerFeedback). The two
  * positive-rendering tests exist because the others are all
  * absence-assertions, which a mutation that hardcodes
  * `corrections` to `[]` sails through undetected — see the `it`s below for
@@ -70,9 +72,9 @@ function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, d
     login: vi.fn(), signup: vi.fn(), loginWithToken: vi.fn(), logout: vi.fn(), logoutAll: vi.fn(),
   })
   mockUseRunGroups.mockReturnValue({
-    groups: [], ungroupedCount: 0, error: '', loaded: true,
+    groups: [], ungroupedCount: 0, ungroupedTestCount: 0, error: '', loaded: true,
     refresh: vi.fn(), createGroup: vi.fn(), renameGroup: vi.fn(),
-    deleteGroup: vi.fn(), assignRuns: vi.fn(),
+    deleteGroup: vi.fn(), assignRuns: vi.fn(), assignTests: vi.fn(),
     groupFilter: null, setGroupFilter: vi.fn(),
   })
   mockApi.mockResolvedValue({ runs: [RUN], total: 1, scope: 'own' })
@@ -87,25 +89,61 @@ function setup(feedbackFetch: { data: any; error: string; loading?: boolean }, d
     if (path?.startsWith('/api/feedback/')) {
       return { data: feedbackFetch.data, loading: feedbackFetch.loading ?? false, error: feedbackFetch.error, reload: vi.fn() }
     }
-    return { data: { ...RUN, run_id: detailRunId, robot_code: null, ...detailExtra }, loading: false, error: '', reload: vi.fn() }
+    // can_read_feedback defaults TRUE because the corrections fetch is now
+    // gated on it: the drawer asks only for a read the server has already
+    // said this caller may make (R5). detailExtra overrides it to false,
+    // which is the peer's-published-run case.
+    return { data: { ...RUN, run_id: detailRunId, robot_code: null, can_read_feedback: true, ...detailExtra }, loading: false, error: '', reload: vi.fn() }
   })
 }
 
 async function openDrawer() {
   render(<MemoryRouter><HistoryPage /></MemoryRouter>)
   fireEvent.click(await screen.findByText('search flipkart for shoes'))
-  await waitFor(() => expect(mockUseFetch).toHaveBeenCalledWith('/api/feedback/run-1'))
+  // Waits on the DETAIL read, not the corrections one: the corrections fetch
+  // is conditional now, and one of the tests below deliberately produces a
+  // drawer that must never fire it.
+  await waitFor(() => expect(mockUseFetch).toHaveBeenCalledWith('/api/history/run-1'))
 }
 
 describe('HistoryPage drawer — the corrections fetch', () => {
-  it('fires GET /api/feedback/{run_id} when a row is opened', async () => {
+  it('fires GET /api/feedback/{run_id} when the server says this caller may read it', async () => {
     setup({ data: null, error: '' })
 
     await openDrawer()
 
-    // openDrawer's own waitFor is the assertion; this is just its
-    // documented restatement.
-    expect(mockUseFetch).toHaveBeenCalledWith('/api/feedback/run-1')
+    await waitFor(() =>
+      expect(mockUseFetch).toHaveBeenCalledWith('/api/feedback/run-1'))
+  })
+
+  // Defect 2, fixed server-side under ruling R5. GET /api/history/{id}
+  // passes is_grouped to caller_can_access and GET /api/feedback/{id}
+  // deliberately does not, so a peer's published run 200s in the drawer and
+  // 403s here — by design on both sides. The drawer used to learn that by
+  // being refused, once per open, and P1 made every peer row reach it.
+  it('does not ask for corrections the server has already said it will refuse', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { can_read_feedback: false })
+
+    await openDrawer()
+
+    expect(mockUseFetch).not.toHaveBeenCalledWith('/api/feedback/run-1')
+    // useFetch takes null to mean "do not fetch", so the call still happens
+    // — with nothing to fetch. Asserting the ARGUMENT is what distinguishes
+    // "suppressed" from "the hook was never reached at all".
+    expect(mockUseFetch).toHaveBeenCalledWith(null)
+  })
+
+  it('asks for nothing while the detail read has not caught up to the open row', async () => {
+    // The flag belongs to a run, so it is only trustworthy once the detail
+    // echoes the row that is open. Until then there is no answer to act on
+    // and the drawer asks for neither.
+    setup({ data: null, error: '' }, 'run-DIFFERENT-FROM-OPENED-ROW')
+
+    await openDrawer()
+
+    expect(mockUseFetch).not.toHaveBeenCalledWith('/api/feedback/run-1')
+    expect(mockUseFetch).not.toHaveBeenCalledWith(
+      '/api/feedback/run-DIFFERENT-FROM-OPENED-ROW')
   })
 
   it('renders no error text when the corrections read is refused (403 — a published run whose corrections stay private)', async () => {
@@ -120,13 +158,10 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 
   it('does not render a previous row’s corrections while this row’s fetch is still in flight', async () => {
-    // The corrections payload carries no run_id of its own (only
-    // `applied_to`, the resolved ORIGINAL run — see HistoryPage.tsx), so a
-    // just-left row's stale `data` can only be caught via `loading`, not by
-    // comparing an echoed id the way the run-detail fetch does. loading:
-    // true is useFetch's real state for exactly this window: the effect for
-    // the newly-selected row's path has fired, but that fetch has not
-    // resolved yet.
+    // Pins the reader's `loading` guard: nothing renders while the open
+    // run's own read is still out. The mock forces another run's data into
+    // that window; with the real hook the keyed reader starts empty (the
+    // real-useFetch block below), so this guards the guard, not the key.
     setup({
       data: { applied_to: 'run-1', corrections: [{ hint_id: 1, feedback_text: 'stale from the last row' }] },
       error: '', loading: true,
@@ -138,17 +173,12 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 
   it('does not render a previous row’s stale corrections when this row’s fetch fails (e.g. a 403 refusing a colleague’s shared run)', async () => {
-    // useFetch never clears `data` in its catch branch (useFetch.ts) — only
-    // `error` is set, and `loading` is already back to false by then. This
-    // is the fix-round-1 repro: open an owned run with corrections on
-    // file, then a colleague's shared run whose corrections read the
-    // server refuses (GET /api/history/{id} passes is_grouped=true and
-    // 200s; GET /api/feedback/{id} deliberately does not and 403s). A
-    // loading-only guard is blind to this: `loading` has already settled
-    // false by the time the failure lands, so the FIRST run's stale `data`
-    // — its correction text, and a "filed against" notice that may
-    // describe a run that isn't even a re-run — would render under the
-    // SECOND run's drawer.
+    // Pins the reader's `error` guard: a refused read renders nothing. The
+    // everyday refusal is a colleague's shared run, whose detail read 200s
+    // (GET /api/history/{id} passes is_grouped=true) while its corrections
+    // read deliberately 403s (GET /api/feedback/{id} does not). The mock
+    // forces another run's data alongside the error; a `loading`-only guard
+    // would render it — the correction text and a "filed against" notice.
     setup({
       data: {
         applied_to: 'run-A',
@@ -165,13 +195,10 @@ describe('HistoryPage drawer — the corrections fetch', () => {
   })
 
   it('does not render a previous row’s corrections in the single stale commit before the detail fetch has caught up to the newly-selected row', async () => {
-    // This is the one window `loading`/`error` alone cannot see: feedback
-    // for the new row has already landed and settled (loading: false,
-    // error: '') carrying a real correction, but the run-detail fetch
-    // (mocked via detailRunId below) still names a DIFFERENT run — the
-    // render between `selected` changing and useFetch's own effect firing,
-    // where useFetch still returns the PREVIOUS path's fully settled state.
-    // Only `d`, folded into `corrections` in HistoryPage.tsx, catches this.
+    // Settled feedback (loading: false, error: '') carrying a real
+    // correction, while the run-detail fetch (mocked via detailRunId below)
+    // still names a DIFFERENT run. `loading` and `error` cannot see this;
+    // the reader is simply not rendered until `d` names the open row.
     setup(
       {
         data: {
@@ -219,6 +246,231 @@ describe('HistoryPage drawer — the corrections fetch', () => {
 
     expect(await screen.findByText(/Filed against the original run/)).toBeInTheDocument()
     expect(screen.getByText(ORIGINAL_ID)).toBeInTheDocument()
+  })
+})
+
+describe('HistoryPage drawer — corrections never outlive their run (the real useFetch)', () => {
+  // Every other test in this file mocks useFetch, and a mock answers a path
+  // the same way whatever came before it. The defect these pin lives in what
+  // the REAL hook keeps between two runs: it holds its last answer across a
+  // path change, and across a null path (keep-previous-data, useFetch.ts), so
+  // a corrections read that outlived its run served that run's corrections
+  // under the next one. `api` stays mocked and routed by path, so nothing
+  // leaves the process.
+  const RUN_A = { ...RUN, run_id: 'run-A', user_query: 'open run A first' }
+  const RUN_B = { ...RUN, run_id: 'run-B', user_query: 'then open run B' }
+  const A_TEXT = /RUN A CORRECTION MUST STAY WITH RUN A/
+  const B_TEXT = /run B correction/
+  // Rendered from the DETAIL read only (the list rows carry no test fields),
+  // so seeing it proves run B's detail landed and `d` names run B.
+  const B_DETAIL_TITLE = 'Test: then open run B — Ran version 7'
+
+  const detailA = { ...RUN_A, robot_code: null, can_read_feedback: true }
+  const detailB = (extra: Record<string, unknown>) => ({
+    ...RUN_B, robot_code: null, test_id: 't-B', test_name: null,
+    test_query: 'then open run B', test_version_n: 7, ...extra,
+  })
+  const feedbackA = { applied_to: 'run-A', corrections: [{ hint_id: 1, feedback_text: 'RUN A CORRECTION MUST STAY WITH RUN A' }] }
+
+  async function renderWithRealFetch(routes: Record<string, () => Promise<unknown>>) {
+    const actual = await vi.importActual<typeof import('@/lib/useFetch')>('@/lib/useFetch')
+    setup({ data: null, error: '' }) // auth + groups; the useFetch mock is replaced next
+    mockUseFetch.mockImplementation(actual.useFetch)
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/history?')) return { runs: [RUN_A, RUN_B], total: 2, scope: 'own' }
+      const route = routes[path]
+      if (!route) throw new Error(`unrouted ${path}`)
+      return route()
+    })
+    render(<MemoryRouter><HistoryPage /></MemoryRouter>)
+  }
+
+  async function openAThenCloseIt() {
+    fireEvent.click(await screen.findByText('open run A first'))
+    // Premise: run A's corrections really reached the screen, so their
+    // absence below is not an empty read passing for a correct one.
+    expect(await screen.findByText(A_TEXT)).toBeInTheDocument()
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  }
+
+  it('does not show the last run’s corrections under a run whose corrections the server will not serve', async () => {
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => detailA,
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: false }),
+    })
+    await openAThenCloseIt()
+
+    fireEvent.click(screen.getByText('then open run B'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+    expect(screen.queryByText(/Filed against the original run/)).toBeNull()
+  })
+
+  it('does not flash the last run’s corrections while the next run’s own read is still out', async () => {
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => detailA,
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: true }),
+      // Never settles, so the only way run A's text can appear is a commit
+      // made before run B's read even started.
+      '/api/feedback/run-B': () => new Promise(() => {}),
+    })
+    await openAThenCloseIt()
+
+    // A final-state query cannot see a single commit that is undone by the
+    // next one, so record every node React ADDS from here on.
+    const added: string[] = []
+    const observer = new MutationObserver(records => {
+      for (const r of records) for (const n of Array.from(r.addedNodes)) added.push(n.textContent ?? '')
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    fireEvent.click(screen.getByText('then open run B'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/feedback/run-B'))
+    for (const r of observer.takeRecords()) for (const n of Array.from(r.addedNodes)) added.push(n.textContent ?? '')
+    observer.disconnect()
+
+    expect(added.filter(t => A_TEXT.test(t))).toEqual([])
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+  })
+
+  it('does not carry a re-run’s corrections to the original opened from inside the drawer', async () => {
+    // The drawer's own "re-run of" link switches runs without closing it —
+    // the other way a run changes under the corrections panel.
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => ({ ...detailA, rerun_of: 'run-B', rerun_of_accessible: true }),
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: false }),
+    })
+    fireEvent.click(await screen.findByText('open run A first'))
+    expect(await screen.findByText(A_TEXT)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTitle('Open the original run — feedback on this re-run applies to it'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+  })
+
+  it('keys the reader by run, so a detail read that answers a switch in the same render still starts the next run empty', async () => {
+    // Today `d` is null for at least one render on every switch (the detail
+    // read lags `selected`), and that alone unmounts the reader. The key does
+    // not depend on that lag. Here the detail answers at once, so `d` moves
+    // from run A to run B in a single render and only the key can reset the
+    // corrections read. The detail stays mocked (no hooks); the corrections
+    // read is the real useFetch.
+    const actual = await vi.importActual<typeof import('@/lib/useFetch')>('@/lib/useFetch')
+    setup({ data: null, error: '' })
+    const details: Record<string, unknown> = {
+      '/api/history/run-A': { ...detailA, rerun_of: 'run-B', rerun_of_accessible: true },
+      '/api/history/run-B': detailB({ can_read_feedback: true }),
+    }
+    mockUseFetch.mockImplementation(((path: string | null) => (
+      path?.startsWith('/api/feedback/')
+        ? actual.useFetch(path)
+        : { data: path ? details[path] ?? null : null, loading: false, error: '', reload: vi.fn() }
+    )) as typeof actual.useFetch)
+    mockApi.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/history?')) return { runs: [RUN_A, RUN_B], total: 2, scope: 'own' }
+      if (path === '/api/feedback/run-A') return feedbackA
+      if (path === '/api/feedback/run-B') return new Promise(() => {})
+      throw new Error(`unrouted ${path}`)
+    })
+    render(<MemoryRouter><HistoryPage /></MemoryRouter>)
+    fireEvent.click(await screen.findByText('open run A first'))
+    expect(await screen.findByText(A_TEXT)).toBeInTheDocument()
+
+    // Run A's text is ALREADY on screen when the drawer switches, so a stale
+    // commit adds nothing — it only removes run A's corrections one commit too
+    // late. Record the ORDER instead: they must leave the DOM no later than
+    // run B's detail arrives in it.
+    const log: string[] = []
+    const hasBTitle = (n: Node) => n instanceof Element
+      && (n.getAttribute('title') === B_DETAIL_TITLE || n.querySelector(`[title="${B_DETAIL_TITLE}"]`) !== null)
+    const record = (records: MutationRecord[]) => {
+      for (const r of records) {
+        for (const n of Array.from(r.removedNodes)) if (A_TEXT.test(n.textContent ?? '')) log.push('A removed')
+        for (const n of Array.from(r.addedNodes)) if (hasBTitle(n)) log.push('B shown')
+      }
+    }
+    const observer = new MutationObserver(record)
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    fireEvent.click(screen.getByTitle('Open the original run — feedback on this re-run applies to it'))
+    expect(await screen.findByTitle(B_DETAIL_TITLE)).toBeInTheDocument()
+    await waitFor(() => expect(mockApi).toHaveBeenCalledWith('/api/feedback/run-B'))
+    await waitFor(() => expect(screen.queryByText(A_TEXT)).toBeNull())
+    record(observer.takeRecords())
+    observer.disconnect()
+
+    expect(log).toContain('A removed')
+    expect(log).toContain('B shown')
+    expect(log.indexOf('A removed')).toBeLessThan(log.indexOf('B shown'))
+  })
+
+  it('still shows the next run’s own corrections once its read lands', async () => {
+    // The control for the three above: a reader that showed nothing at all
+    // would pass every one of them.
+    await renderWithRealFetch({
+      '/api/history/run-A': async () => detailA,
+      '/api/feedback/run-A': async () => feedbackA,
+      '/api/history/run-B': async () => detailB({ can_read_feedback: true }),
+      '/api/feedback/run-B': async () => ({ applied_to: 'run-B', corrections: [{ hint_id: 2, feedback_text: 'run B correction' }] }),
+    })
+    await openAThenCloseIt()
+
+    fireEvent.click(screen.getByText('then open run B'))
+
+    expect(await screen.findByText(B_TEXT)).toBeInTheDocument()
+    expect(screen.queryByText(A_TEXT)).toBeNull()
+  })
+})
+
+describe('HistoryPage drawer — the test, the version and who ran it', () => {
+  // The table reads the list and the drawer reads the detail. Both carry the
+  // same five fields now, so both must say the same thing about one run — a
+  // drawer that named a different version, or named the person the row would
+  // not, is the defect these pin.
+  it('names the same version the row does', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { test_id: 't-1', test_name: null, test_query: 'search flipkart for shoes', test_version_n: 2 })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Test: search flipkart for shoes — Ran version 2'))
+      .toBeInTheDocument()
+  })
+
+  it('names the test when the description has moved on without it', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { test_id: 't-2', test_name: null, test_query: 'checkout with a coupon', test_version_n: 3 })
+
+    await openDrawer()
+
+    expect(await screen.findByText('checkout with a coupon')).toBeInTheDocument()
+    expect(screen.getByText('v3')).toBeInTheDocument()
+  })
+
+  it('says Platform admin where the server withheld the address', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { user_email: null, ran_as_platform_admin: true })
+
+    await openDrawer()
+
+    expect(await screen.findByText('Platform admin')).toBeInTheDocument()
+  })
+
+  it('still shows a colleague’s address when the server sent one', async () => {
+    setup({ data: null, error: '' }, RUN.run_id,
+          { user_email: 'colleague@x.com', ran_as_platform_admin: true })
+
+    await openDrawer()
+
+    expect(await screen.findByText('colleague@x.com')).toBeInTheDocument()
+    expect(screen.queryByText('Platform admin')).toBeNull()
   })
 })
 
@@ -277,7 +529,34 @@ const RUN_B = {
   user_email: 'colleague@x.com', created_at: '2026-08-30T00:00:00Z', updated_at: '2026-08-30T00:00:00Z',
   has_report: false, can_move: false,
 }
-const CHECKOUT = { group_id: 'g-1', name: 'Checkout', created_by: 'u-me', run_count: 0 }
+// The four shapes the test/version chip has to tell apart. RUN_A's own
+// description is 'search flipkart for shoes', so TEST_SAME is the ordinary
+// row — D2 froze tests.name at NULL, so the test's label IS its description
+// and on an untouched test that is the same sentence the row already shows.
+const TEST_SAME = {
+  ...RUN_A, test_id: 't-1', test_name: null,
+  test_query: 'search flipkart for shoes', test_version_n: 2,
+}
+const TEST_EDITED = {
+  ...RUN_A, run_id: 'run-E', user_query: 'checkout flow',
+  test_id: 't-2', test_name: null,
+  test_query: 'checkout with a coupon', test_version_n: 3,
+}
+const TEST_NO_VERSION = {
+  ...RUN_A, run_id: 'run-N', user_query: 'a failed regeneration',
+  test_id: 't-3', test_name: null,
+  test_query: 'a failed regeneration', test_version_n: null,
+}
+const TEST_NONE = {
+  ...RUN_A, run_id: 'run-X', user_query: 'a generation that died early',
+  test_id: null, test_name: null, test_query: null, test_version_n: null,
+}
+
+function rowOf(description: string): HTMLElement {
+  return screen.getByText(description).closest('tr') as HTMLElement
+}
+
+const CHECKOUT = { group_id: 'g-1', name: 'Checkout', created_by: 'u-me', run_count: 0, test_count: 0 }
 const CODE = '*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nSearch\n    New Page    https://example.com'
 
 function stubClipboard() {
@@ -338,9 +617,10 @@ function setupList(runs: unknown[], opts: {
     setGroupFilter: vi.fn(),
   }
   mockUseRunGroups.mockReturnValue({
-    groups: opts.groups ?? [], ungroupedCount: opts.ungroupedCount ?? 0, error: opts.groupsError ?? '', loaded: true,
+    groups: opts.groups ?? [], ungroupedCount: opts.ungroupedCount ?? 0, ungroupedTestCount: 0,
+    error: opts.groupsError ?? '', loaded: true,
     refresh: spies.refreshGroups, createGroup: spies.createGroup, renameGroup: spies.renameGroup,
-    deleteGroup: spies.deleteGroup, assignRuns: spies.assignRuns,
+    deleteGroup: spies.deleteGroup, assignRuns: spies.assignRuns, assignTests: vi.fn(),
     groupFilter: opts.groupFilter ?? null, setGroupFilter: spies.setGroupFilter,
   })
   mockApi.mockImplementation(async (path: string) => {
@@ -377,6 +657,13 @@ describe('HistoryPage — the runs table', () => {
     expect(await screen.findByText('search flipkart for shoes')).toBeInTheDocument()
     expect(screen.getByText('checkout flow')).toBeInTheDocument()
     expect(screen.getByText('2 of 2 runs')).toBeInTheDocument()
+  })
+
+  it('names itself Activity, the title its sidebar entry and header carry', async () => {
+    setupList([RUN_A])
+    renderPage()
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Activity' })).toBeInTheDocument()
   })
 
   it('shows the loading placeholder before the first page resolves', async () => {
@@ -527,6 +814,179 @@ describe('HistoryPage — who ran it', () => {
     fireEvent.click(screen.getByText('colleague@x.com'))
 
     expect(screen.getByPlaceholderText(/Search description/)).toHaveValue('colleague@x.com')
+  })
+
+  // D7. The server withholds the address on a run made with platform-admin
+  // authority from every caller who does not hold it, and ships the flag in
+  // its place (_hide_admin_author, history_endpoints.py). The client's whole
+  // job is to render the role instead of an unattributed dash — and NOT to
+  // offer a control that would need the address it was not given.
+  it('names the role, not a person, on a run made with platform-admin authority', async () => {
+    setupList([
+      RUN_A,
+      { ...RUN_B, run_id: 'run-ADM', user_query: 'an admin ran this',
+        user_email: null, ran_as_platform_admin: true },
+    ])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const label = within(rowOf('an admin ran this')).getByText('Platform admin')
+    // A statement, not a control: there is no individual to filter by, and a
+    // button here could only put an address on screen that the server
+    // deliberately withheld.
+    expect(label.closest('button')).toBeNull()
+  })
+
+  it('still shows the address when the server sent one, flag or no flag', async () => {
+    // A platform admin viewing the same row gets the email, so the flag
+    // alone must not drive the rendering.
+    setupList([
+      RUN_A,
+      { ...RUN_B, run_id: 'run-ADM', user_query: 'an admin ran this',
+        user_email: 'admin@x.com', ran_as_platform_admin: true },
+    ])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const row = rowOf('an admin ran this')
+    expect(within(row).getByText('admin@x.com')).toBeInTheDocument()
+    expect(within(row).queryByText('Platform admin')).toBeNull()
+  })
+
+  it('still shows a dash for a row with no author and no authority', async () => {
+    setupList([RUN_A, { ...RUN_B, user_email: null }])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    expect(within(rowOf('checkout flow')).getByText('—')).toBeInTheDocument()
+  })
+})
+
+describe('HistoryPage — the status badges in dark mode', () => {
+  // The three coloured badges carried a light-only palette, so on a dark
+  // page they kept a pastel pill (measured in Chromium: Failed rendered
+  // rgb(185,28,28) on rgb(254,226,226) against a body of rgb(2,8,23)).
+  // TestsPage's RESULT_BADGE already held the dark variants and its comment
+  // said this page would get them; this is that retrofit. Asserted as
+  // classes rather than computed colours because jsdom applies no Tailwind
+  // stylesheet — the browser check is what confirms the colours.
+  it.each([
+    ['passed', 'Passed', 'dark:bg-green-950'],
+    ['failed', 'Failed', 'dark:bg-red-950'],
+    ['error', 'Error', 'dark:bg-amber-950'],
+  ])('gives the %s badge a dark variant', async (status, label, darkClass) => {
+    setupList([{ ...RUN_A, status }])
+    renderPage()
+
+    const badge = await screen.findByText(label)
+    expect(badge.className).toContain(darkClass)
+    // The light palette stays: this adds a dark variant, it does not swap one.
+    expect(badge.className).toMatch(/bg-(green|red|amber)-100/)
+  })
+
+  it('leaves the Generated badge’s theme token alone', async () => {
+    // Generated is variant="outline", which resolves through the theme.
+    // A dark: override on it would be a second source of truth for a
+    // colour the token already answers.
+    setupList([{ ...RUN_A, status: 'generated' }])
+    renderPage()
+
+    expect((await screen.findByText('Generated')).className).not.toMatch(/dark:/)
+  })
+
+  it('gives the Running badge’s raw dot a dark variant, as TestsPage does', async () => {
+    // variant="secondary" carries the Badge CHROME through the theme,
+    // and it is left alone for the same reason Generated is. The pulsing
+    // dot INSIDE it is not chrome: bg-blue-500 is a raw palette value no
+    // token answers, and TestsPage's RunningBadge already pairs it with
+    // dark:bg-blue-400. This page's copy did not, so the two list pages
+    // disagreed on the one status colour they otherwise draw alike.
+    setupList([{ ...RUN_A, status: 'running' }])
+    renderPage()
+
+    const badge = (await screen.findByText('Running')).parentElement!
+    const dot = badge.querySelector('span.animate-pulse')!
+    // The light palette stays: this adds a dark variant, it does not
+    // swap one.
+    expect(dot.className).toContain('bg-blue-500')
+    expect(dot.className).toContain('dark:bg-blue-400')
+    // The chrome around it stays token-resolved.
+    expect(badge.className).not.toMatch(/dark:/)
+  })
+})
+
+describe('HistoryPage — which test and version a result ran', () => {
+  it('shows the version a result ran, in place of the re-run pill', async () => {
+    setupList([TEST_SAME])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const row = rowOf('search flipkart for shoes')
+    expect(within(row).getByText('v2')).toBeInTheDocument()
+    expect(within(row).getByTitle('Test: search flipkart for shoes — Ran version 2'))
+      .toBeInTheDocument()
+  })
+
+  it('does not print the test’s name beside a description that already says it', async () => {
+    // D2 keeps tests.name NULL, so labelFrom always falls through to the
+    // test's description — which, on an untouched test, is the sentence one
+    // cell to the right. Drawing it twice would be every row, forever.
+    setupList([TEST_SAME])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    expect(within(rowOf('search flipkart for shoes'))
+      .getAllByText('search flipkart for shoes')).toHaveLength(1)
+  })
+
+  it('names the test once it stops matching the row’s own description', async () => {
+    // The description travels with each new version, so an older result's
+    // test acquires a different name the moment someone edits it — which is
+    // exactly when naming it carries something.
+    setupList([TEST_EDITED])
+    renderPage()
+    await screen.findByText('checkout flow')
+
+    const row = rowOf('checkout flow')
+    expect(within(row).getByText('checkout with a coupon')).toBeInTheDocument()
+    expect(within(row).getByText('v3')).toBeInTheDocument()
+  })
+
+  it('says so when a result recorded no version at all', async () => {
+    // D8(b) / spec case 10: a regeneration that failed attaches to its test
+    // and writes no version. Ordinary and permanent, not missing data.
+    setupList([TEST_NO_VERSION])
+    renderPage()
+    await screen.findByText('a failed regeneration')
+
+    const row = rowOf('a failed regeneration')
+    expect(within(row).getByText('no version')).toBeInTheDocument()
+    expect(within(row).getByTitle(/This result names no version/)).toBeInTheDocument()
+  })
+
+  it('draws no chip at all for a run that belongs to no test', async () => {
+    // D8(a): a generation that failed before any code existed. There is no
+    // test to name and there never will be.
+    setupList([TEST_NONE])
+    renderPage()
+    await screen.findByText('a generation that died early')
+
+    const row = rowOf('a generation that died early')
+    expect(within(row).queryByTitle(/^Test: /)).toBeNull()
+    expect(within(row).queryByText('no version')).toBeNull()
+  })
+
+  it('no longer offers a re-run pill on the row; the trail is the drawer’s', async () => {
+    // Spec 7.5 replaces the pill. `rerun_of` stays on the wire through P2 and
+    // the DRAWER still shows the original's full id, so the lineage is not
+    // lost — it moved off the table, which is where the version now sits.
+    setupList([{ ...TEST_SAME, rerun_of: 'run-ORIGINAL', rerun_of_accessible: true }])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+
+    const row = rowOf('search flipkart for shoes')
+    expect(within(row).queryByText('Re-run')).toBeNull()
+    expect(within(row).queryByTitle(/Re-run of run-ORIGINAL/)).toBeNull()
   })
 })
 
@@ -693,13 +1153,18 @@ describe('HistoryPage — running a row again', () => {
     await waitFor(() => expect(playBtn).not.toBeDisabled())
   })
 
-  it('clicking the Re-run pill opens the ORIGINAL run’s drawer, not the re-run’s own', async () => {
+  it('opens the ORIGINAL run from the drawer’s trail, not the re-run’s own', async () => {
+    // This pinned the ROW's re-run pill until Task 11 replaced it with the
+    // test/version chip (spec 7.5). The capability itself did not go: it is
+    // the drawer's "re-run of {id}" line, which keeps the full id and opens
+    // the original, and which survives until P3 drops `rerun_of` entirely.
     const RUN_RERUN = { ...RUN_A, run_id: 'run-RERUN', rerun_of: 'run-ORIGINAL', rerun_of_accessible: true }
     setupList([RUN_RERUN])
+    withDetail('run-RERUN', { rerun_of: 'run-ORIGINAL', rerun_of_accessible: true })
     renderPage()
-    const row = (await screen.findByText('search flipkart for shoes')).closest('tr')!
+    fireEvent.click(await screen.findByText('search flipkart for shoes'))
 
-    fireEvent.click(within(row).getByTitle('Re-run of run-ORIGINAL — click to open the original run'))
+    fireEvent.click(await screen.findByTitle(/Open the original run/))
 
     const idBtn = await screen.findByTitle('Copy run id')
     expect(idBtn.textContent).toContain('run-ORIGINAL')

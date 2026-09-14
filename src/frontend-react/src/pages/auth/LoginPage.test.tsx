@@ -49,7 +49,7 @@ describe('LoginPage — the form', () => {
     expect(submit()).toBeEnabled()
   })
 
-  it('signs in with what was typed, then navigates to /generate replacing history', () => {
+  it('signs in with what was typed, then navigates home replacing history', () => {
     // `replace: true` matters: without it Back returns to the login page of a
     // session that is now signed in.
     const login = setup()
@@ -60,7 +60,7 @@ describe('LoginPage — the form', () => {
 
     return waitFor(() => {
       expect(login).toHaveBeenCalledWith('a@b.com', 'hunter2')
-      expect(mockNavigate).toHaveBeenCalledWith('/generate', { replace: true })
+      expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true })
     })
   })
 

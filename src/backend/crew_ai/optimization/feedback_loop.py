@@ -83,8 +83,17 @@ def _get_with_retry(
     lands milliseconds behind the result SSE, so on the SPA path the first
     attempt normally hits and nothing sleeps at all.  The full ceiling is spent
     only on runs that have no record and never will — paste-and-execute,
-    errored and unknown runs — none of which the SPA can reach the feedback
-    panel from.
+    errored and unknown runs, and a Tests-page Run of a test's current version
+    (_run_current_version passes no user_query, so _process_learning_record's
+    empty-query guard skips it exactly as it skips paste-and-execute; and
+    unlike a history re-run it sets no rerun_of, so _gated_feedback_target
+    leaves the feedback pointing at a run that owns no record).  None of these
+    can reach the feedback panel from the SPA: GeneratePage renders it only
+    when its own typed generation filled generatedQuery, and every other SPA
+    call to /api/feedback is a GET — so a direct API caller is the only party
+    that lands here.  A surface that grows a feedback control on a result it
+    did not itself generate makes that false, and the "Please send it again in
+    a moment" this returns has to be rewritten before it does.
 
     Neither LLM pipeline runs on the writer thread (fire_usage_attribution and
     fire_conflict_detection both call the model on their caller's thread), so a
@@ -1299,7 +1308,7 @@ class FeedbackLoop:
                 # row exists — verified: AntiPatternEngine, KeywordCorrection-
                 # Engine and StructuralRuleEngine define no learn_from_feedback
                 # of their own and inherit LearningEngine's no-op `pass`
-                # (learning_config.py:428-437), so their outcome can never
+                # (in learning_config.py), so their outcome can never
                 # speak for "the correction was stored." That is why only this
                 # call is awaited for a real verdict; the three above stay
                 # fire-and-forget, unchanged from before this task.

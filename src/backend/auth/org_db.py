@@ -157,7 +157,8 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
       'nl_feedback_corrections','execution_records','execution_embeddings',
       'anti_patterns','learning_anchors','kw_query_patterns',
-      'test_runs','workflow_metrics','llm_traces','run_groups','hint_review_pages'
+      'test_runs','tests','workflow_metrics','llm_traces','run_groups',
+      'hint_review_pages'
   ] LOOP
     rel := to_regclass(t);
     IF rel IS NOT NULL AND EXISTS (

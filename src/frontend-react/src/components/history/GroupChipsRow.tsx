@@ -1,5 +1,6 @@
 /**
- * Group filter row — the Test Runs page's folder bar.
+ * Group filter row — the folder bar on Activity and on Tests. Both pages
+ * read the same folders; `unit` decides whether a chip counts runs or tests.
  *
  * Deliberately fixed-width: the row never grows with the number of groups.
  * It carries at most three controls — Ungrouped, the groups control, and
@@ -11,7 +12,7 @@
  * The groups control is the whole taxonomy behind one button: it reads
  * "All Groups" while no group is filtered, and becomes the selected group's
  * own chip (with an ✕ to clear) once one is. Clicking it either way opens the
- * browse dialog, which lists every group with its run count and is also where
+ * browse dialog, which lists every group with its count and is also where
  * edit/delete live — so group management has one obvious home instead of
  * icons that only appear beside an active chip.
  *
@@ -50,6 +51,39 @@ interface Props {
   /** False without an identity: the server refuses every mutation with 403,
    *  so offering the control would only produce a dead end. */
   canCreate: boolean
+  /** What this page files. Activity files RUNS (the default); the Tests page
+   *  files TESTS, so its chips count test_count and name tests. The caller
+   *  passes the matching Ungrouped number in `ungroupedCount`. */
+  unit?: Unit
+}
+
+type Unit = 'run' | 'test'
+
+/** Everything the row says that depends on what it counts. The 'run' strings
+ *  are the row's original wording, unchanged. */
+const UNIT: Record<Unit, {
+  count: (g: RunGroup) => number
+  noun: string
+  ungroupedTitle: string
+  deleteTitle: string
+  deleteBody: string
+}> = {
+  run: {
+    count: g => g.run_count,
+    noun: 'run',
+    ungroupedTitle: 'Show only runs that are in no group',
+    deleteTitle: 'Delete group (runs are kept, but stop being shared)',
+    deleteBody: 'The runs are NOT deleted — they return to Ungrouped, where only the person who ran each one can see it. Move them into another group to share them again.',
+  },
+  test: {
+    count: g => g.test_count,
+    noun: 'test',
+    ungroupedTitle: 'Show only tests that are in no group',
+    deleteTitle: 'Delete group (tests are kept, but stop being shared)',
+    // Unfiled, a test stops being shared: its author still sees it, and so
+    // does an org admin, whose view spans the org filed or not.
+    deleteBody: 'The tests are NOT deleted — they return to Ungrouped and stop being shared with your team; each test’s author and your org admins can still see it. Move them into another group to share them again.',
+  },
 }
 
 /** One overlay at a time. `from: 'browse'` returns there after a successful
@@ -67,8 +101,9 @@ const actionLabel = (verb: string, group: RunGroup) => `${verb} ${group.name}`
 
 export function GroupChipsRow({
   groups, ungroupedCount, active, onSelect,
-  onCreate, onRename, onDelete, canRename, canDelete, canCreate,
+  onCreate, onRename, onDelete, canRename, canDelete, canCreate, unit = 'run',
 }: Props) {
+  const words = UNIT[unit]
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [name, setName] = useState('')
   const [error, setError] = useState('')
@@ -165,7 +200,7 @@ export function GroupChipsRow({
           size="sm"
           variant={active === 'ungrouped' ? 'secondary' : 'ghost'}
           className={`h-7 gap-1.5 rounded-full text-xs ${active === 'ungrouped' ? '' : 'text-muted-foreground'}`}
-          title={active === 'ungrouped' ? 'Clear the filter' : 'Show only runs that are in no group'}
+          title={active === 'ungrouped' ? 'Clear the filter' : words.ungroupedTitle}
           onClick={() => onSelect(active === 'ungrouped' ? null : 'ungrouped')}
         >
           Ungrouped
@@ -187,7 +222,7 @@ export function GroupChipsRow({
             >
               <Folder className="h-3 w-3" />
               {activeGroup.name}
-              <span className="text-muted-foreground">· {activeGroup.run_count}</span>
+              <span className="text-muted-foreground">· {words.count(activeGroup)}</span>
             </Button>
             <Button
               size="sm"
@@ -211,7 +246,8 @@ export function GroupChipsRow({
             <FolderOpen className="h-3 w-3" />
             All Groups
             {/* Labelled on purpose: the chips either side of this one count
-                RUNS, so a bare "· 3" here would read as three runs. */}
+                runs or tests, so a bare "· 3" here would read as three of
+                those. */}
             <span className="text-muted-foreground">
               · {groups.length} group{groups.length === 1 ? '' : 's'}
             </span>
@@ -236,8 +272,8 @@ export function GroupChipsRow({
           <DialogHeader>
             <DialogTitle>All Groups</DialogTitle>
             <DialogDescription>
-              Pick a group to filter the runs. Everyone in your organization
-              sees the same groups and the tests inside them.
+              Pick a group to filter the {words.noun}s. Everyone in your
+              organization sees the same groups and the tests inside them.
             </DialogDescription>
           </DialogHeader>
 
@@ -264,7 +300,7 @@ export function GroupChipsRow({
                   <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span className="truncate">{g.name}</span>
                   <span className="shrink-0 text-xs text-muted-foreground">
-                    · {g.run_count} run{g.run_count === 1 ? '' : 's'}
+                    · {words.count(g)} {words.noun}{words.count(g) === 1 ? '' : 's'}
                   </span>
                 </button>
                 {canRename(g) && (
@@ -280,7 +316,7 @@ export function GroupChipsRow({
                 {canDelete(g) && (
                   <Button
                     variant="ghost" size="icon" className="h-7 w-7 shrink-0"
-                    title="Delete group (runs are kept, but stop being shared)"
+                    title={words.deleteTitle}
                     aria-label={actionLabel('Delete', g)}
                     onClick={() => open({ kind: 'delete', group: g, from: 'browse' })}
                   >
@@ -345,11 +381,7 @@ export function GroupChipsRow({
             <DialogTitle>
               Delete “{overlay?.kind === 'delete' ? overlay.group.name : ''}”?
             </DialogTitle>
-            <DialogDescription>
-              The runs are NOT deleted — they return to Ungrouped, where only
-              the person who ran each one can see it. Move them into another
-              group to share them again.
-            </DialogDescription>
+            <DialogDescription>{words.deleteBody}</DialogDescription>
           </DialogHeader>
           {error && <p className="text-xs text-destructive">{error}</p>}
           <DialogFooter>
