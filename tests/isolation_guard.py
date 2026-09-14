@@ -1,41 +1,59 @@
-"""Whole-session isolation of the suite from the real artifact staging directory
-and from the runner-exec service.
+"""Whole-session isolation of the suite from the real artifact staging
+directory, the real logs directory, and the runner-exec service.
 
-The defect (measured 2026-09-14): artifact_store.STAGING_ROOT is a module
-constant naming the repo's robot_tests/, and nothing redirected it. A test
-whose re-run reached the execution stream left a real run directory there on
-every run, and whenever run.sh's runner-exec was listening on 127.0.0.1:4998
-the suite executed it in a real container.
+The defects (measured 2026-09-14):
+- artifact_store.STAGING_ROOT is a module constant naming the repo's
+  robot_tests/, and nothing redirected it. A test whose re-run reached the
+  execution stream left a real run directory there on every run, and whenever
+  run.sh's runner-exec was listening on 127.0.0.1:4998 the suite executed it
+  in a real container.
+- A full local gate wrote application.log, a temp_metrics/<uuid>.json and both
+  crewai logs into the repo's logs/, which the running API container writes
+  too. Each gate added two fake slowapi "ratelimit" lines to application.log,
+  which the 429 count matches, and a test process rotated the live file.
 
 Two halves:
-- redirect_staging() points every copy of that root at a per-session temp
-  directory. tests/conftest.py calls isolate_session() from a session fixture.
+- redirect_staging() and redirect_logs() point every copy of those paths at
+  per-session temp directories; application.log follows LOG_DIR, which
+  tests/conftest.py sets at import. tests/conftest.py calls isolate_session()
+  from a session fixture.
 - StagingGuard is a sys.addaudithook hook, installed when this module is first
   imported, so it sees writes whichever module computed the path and connects
   whichever HTTP client made them. It REFUSES — and records — any write or
-  delete under the real root and any connect to the runner's port: refusing
+  delete under either real root and any connect to the runner's port: refusing
   keeps a live runner from executing anything and a test from deleting a real
-  run, and recording lets pytest_sessionfinish fail a run whose tests all
-  passed. The refusals are OSErrors, so the code under test sees what it would
-  see if the directory were unwritable or the runner were down.
+  run or rotating a live log, and recording lets pytest_sessionfinish fail a
+  run whose tests all passed. The refusals are OSErrors, so the code under
+  test sees what it would see if the directory were unwritable or the runner
+  were down.
 
-Not covered: writes made INSIDE a container. A test that started a real one
-would mount the host path docker_service resolves from nlrf-fastapi's mounts,
-not the redirected root. No test starts one today.
+Not covered:
+- Writes made INSIDE a container. A test that started a real one would mount
+  the host path docker_service resolves from nlrf-fastapi's mounts, not the
+  redirected root. No test starts one today.
+- Writes through a handle opened before this module was imported: the hook
+  sees an open, not the writes after it. A `-p` plugin that imports
+  src.backend.main ahead of tests/conftest.py opens the real application.log
+  that way, before LOG_DIR is set.
+- Other processes. The live API and browser-service containers keep writing
+  the real logs/, so its sizes and mtimes say nothing about the suite.
 
 Stdlib and pytest only at import: a `-p` plugin can import this module before
 tests/conftest.py has redirected DATABASE_URL, so it must not import src.backend.
 
-Referenced by: tests/conftest.py, tests/test_infra/test_staging_isolation_guard.py.
+Referenced by: tests/conftest.py, tests/test_infra/test_staging_isolation_guard.py,
+tests/test_infra/test_logs_isolation.py.
 Depends on: nothing at import time; redirect_staging() imports
-src.backend.core.artifact_store and src.backend.services.docker_service, and
-isolate_session() src.backend.core.config.
+src.backend.core.artifact_store and src.backend.services.docker_service,
+redirect_logs() src.backend.core.temp_metrics_storage and
+src.backend.crew_ai.callbacks/crew, and isolate_session() src.backend.core.config.
 """
 
 import errno
 import ipaddress
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -44,6 +62,11 @@ import pytest
 # <repo-root>/robot_tests — the directory artifact_store.STAGING_ROOT names in
 # production. Computed here rather than imported, for the reason above.
 REPO_STAGING_ROOT = Path(__file__).resolve().parent.parent / "robot_tests"
+
+# <repo-root>/logs — where application.log, both crewai logs and the temp
+# metrics store land unless redirected. All four are relative to the working
+# directory, which is the repo root for the suite.
+REPO_LOGS_ROOT = REPO_STAGING_ROOT.parent / "logs"
 
 # core/config.py's default. Used until isolate_session() reads settings.
 DEFAULT_RUNNER_URL = "http://127.0.0.1:4998"
@@ -86,13 +109,40 @@ def redirect_staging(staging: Path) -> None:
         run_bench.STAGING_ROOT = staging
 
 
-class StagingGuard:
-    """Refuses and records what a test must never do: write under the real
-    staging root, or connect to runner-exec."""
+def redirect_logs(logs: Path) -> None:
+    """Point every log path the suite can reach, other than application.log,
+    into *logs*.
 
-    def __init__(self, staging_root: Path, runner_url: str = DEFAULT_RUNNER_URL):
-        self._root = os.path.normcase(os.path.abspath(staging_root))
-        self._root_prefix = self._root + os.sep
+    application.log follows LOG_DIR (src/backend/main.py), which
+    tests/conftest.py sets at import: main.py opens it at import time, before
+    any fixture could run. LOG_DIR moves nothing else, so three more names are
+    rebound here:
+      - temp_metrics_storage._temp_storage, the singleton the browser tool
+        writes through and app startup cleans — the cleanup deletes files
+        older than 24 h, so a boot test could delete real ones;
+      - callbacks.CREWAI_STEP_LOG_FILE and crew.CREWAI_LOG_FILE, both read at
+        call time.
+    Importing crew costs nothing extra: redirect_staging's docker_service
+    import already loads it, through src/backend/services/__init__.py.
+    """
+    from src.backend.core import temp_metrics_storage
+    from src.backend.crew_ai import callbacks, crew
+
+    temp_metrics_storage._temp_storage = temp_metrics_storage.TempMetricsStorage(str(logs / "temp_metrics"))
+    callbacks.CREWAI_STEP_LOG_FILE = str(logs / "crewai_steps.log")
+    crew.CREWAI_LOG_FILE = str(logs / "crewai.log.txt")
+
+
+class StagingGuard:
+    """Refuses and records what a test must never do: write under a real
+    shared directory — the staging root, the logs dir — or connect to
+    runner-exec."""
+
+    def __init__(self, roots: Iterable[Path], runner_url: str = DEFAULT_RUNNER_URL):
+        self.roots = tuple(roots)
+        # (normalised root, the same with a trailing separator), per root.
+        self._roots = tuple((norm, norm + os.sep) for norm in
+                            (os.path.normcase(os.path.abspath(root)) for root in self.roots))
         # (test id, audit event, refused path or host:port), in refusal order.
         self.violations: list[tuple[str, str, str]] = []
         self.set_runner_url(runner_url)
@@ -142,7 +192,7 @@ class StagingGuard:
         if text.startswith(_LONG_PATH_PREFIX):
             text = text[len(_LONG_PATH_PREFIX):]
         normalised = os.path.normcase(os.path.abspath(text))
-        return normalised == self._root or normalised.startswith(self._root_prefix)
+        return any(normalised == root or normalised.startswith(prefix) for root, prefix in self._roots)
 
     def _connect_refusal(self, address) -> OSError | None:
         if not (isinstance(address, tuple) and len(address) >= 2 and address[1] == self.runner_port):
@@ -158,9 +208,10 @@ class StagingGuard:
         if not self.violations:
             return
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        roots = ", ".join(str(root) for root in self.roots)
         lines = [
             f"{len(self.violations)} operation(s) reached outside the test session and were refused.",
-            f"Tests must not write under {REPO_STAGING_ROOT} or connect to runner-exec "
+            f"Tests must not write under {roots}, or connect to runner-exec "
             f"(port {self.runner_port}); see tests/isolation_guard.py.",
         ]
         lines += [f"  {test}: {event} {target}" for test, event, target in self.violations]
@@ -185,17 +236,18 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-GUARD = StagingGuard(REPO_STAGING_ROOT)
+GUARD = StagingGuard((REPO_STAGING_ROOT, REPO_LOGS_ROOT))
 sys.addaudithook(GUARD.hook)
 
 
-def isolate_session(staging: Path) -> None:
-    """Redirect the staging root and aim the guard at the runner the settings
-    name — .env can move it off the default port, and that is the one the
-    client would call."""
+def isolate_session(staging: Path, logs: Path) -> None:
+    """Redirect the staging root and the log paths, and aim the guard at the
+    runner the settings name — .env can move it off the default port, and
+    that is the one the client would call."""
     from src.backend.core.config import settings
 
     redirect_staging(staging)
+    redirect_logs(logs)
     GUARD.set_runner_url(settings.RUNNER_EXEC_URL)
 
 

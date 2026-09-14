@@ -24,6 +24,7 @@ explicitly truthy, independent of whether the guard itself succeeded.
 import logging
 import os
 import secrets
+import tempfile
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -45,6 +46,17 @@ logger = logging.getLogger(__name__)
 # Pinned here rather than in a fixture because the damage is done at import
 # time, which is before any fixture runs.
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
+
+# application.log goes to LOG_DIR (src/backend/main.py), and main.py opens it
+# at IMPORT time — test modules that import main at module level do so during
+# collection, before any fixture runs. So it is pinned here like the
+# OBSERVABILITY_BACKEND pin above, and forced rather than setdefault: a shell
+# that exported a real LOG_DIR must not reach the session. isolate_session()
+# puts the other log paths in the same directory. It is left behind at exit:
+# on Windows application.log stays open until the interpreter ends, so the
+# session cannot delete it.
+SESSION_LOG_DIR = Path(tempfile.mkdtemp(prefix="nlrf_test_logs_"))
+os.environ["LOG_DIR"] = str(SESSION_LOG_DIR)
 
 # Installs the staging/runner guard's audit hook now, before any test code can
 # write or connect; see tests/isolation_guard.py. It imports no src.backend, so
@@ -477,6 +489,22 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(autouse=True)
+def _clear_structlog_contextvars():
+    """Drop whatever a test left bound in structlog's context once it is done.
+
+    run_agentic_workflow binds a fresh workflow_id in the calling thread and
+    nothing clears it: production runs every workflow on its own thread, a
+    test runs it on the main one. tools/browser_use_tool.py reads workflow_id
+    from that context, so every later test that called the tool wrote a
+    temp-metrics file under it. Autouse here, so it tears down after every
+    function-scoped fixture a test module adds."""
+    yield
+    import structlog
+
+    structlog.contextvars.clear_contextvars()
+
+
+@pytest.fixture(autouse=True)
 def _disable_auth_rate_limit():
     """Disable the auth rate limiter by default so suites that hammer /login or
     /register aren't throttled. The dedicated rate-limit tests re-enable it."""
@@ -503,10 +531,11 @@ def pytest_configure(config):
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_staging_root(tmp_path_factory):
     """Stage every run this session writes into a temp dir, never the repo's
-    robot_tests/ — see tests/isolation_guard.py for the defect and for why the
-    constant alone is not the only copy to rebind."""
+    robot_tests/, and write every log into SESSION_LOG_DIR, never the repo's
+    logs/ — see tests/isolation_guard.py for the defects and for why the
+    constants alone are not the only copies to rebind."""
     staging = tmp_path_factory.mktemp("robot_tests")
-    isolation_guard.isolate_session(staging)
+    isolation_guard.isolate_session(staging, SESSION_LOG_DIR)
     return staging
 
 

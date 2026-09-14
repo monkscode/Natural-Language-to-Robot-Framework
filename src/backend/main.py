@@ -29,14 +29,19 @@ if sys.platform.startswith('win'):
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 # --- Structured Logging (must be FIRST — before any logger calls) ---
+# LOG_DIR moves application.log, and only that file. It is read from the
+# process environment because this runs before settings exists: run.sh and
+# compose export .env, a bare `uvicorn` does not, so there a LOG_DIR set only
+# in .env is not seen. Unset or blank keeps ./logs.
 from src.backend.config.logging_config import setup_logging
-setup_logging()
+_LOG_DIR = os.environ.get("LOG_DIR") or "logs"
+setup_logging(log_dir=_LOG_DIR)
 
 # Disable crewai tracing prompts to prevent log spam
 os.environ['CREWAI_TRACING_ENABLED'] = 'false'
 
 logger = logging.getLogger(__name__)
-logger.info("Starting application with structured logging enabled at logs/application.log")
+logger.info("Starting application with structured logging enabled at %s/application.log", _LOG_DIR)
 
 # --- LLM Observability (must be BEFORE any import that loads CrewAI/LiteLLM) ---
 from src.backend.core.observability import init_observability
