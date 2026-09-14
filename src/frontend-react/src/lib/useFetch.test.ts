@@ -32,7 +32,7 @@
  * two.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
-import { StrictMode, createElement, type ReactNode } from 'react'
+import { StrictMode, createElement, useLayoutEffect, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./api', () => ({ api: vi.fn() }))
@@ -314,5 +314,91 @@ describe('useFetch — teardown and pile-ups', () => {
 
     expect(result.current.data).toEqual(ROWS_B)
     expect(result.current.error).toBe('')
+  })
+})
+
+describe('useFetch — a reload() that outlived its path', () => {
+  // A caller that awaits an action and then calls reload() gets the reload()
+  // from the render that STARTED the action (LearningPage's act(), decide()
+  // and applyApproved() all do this). If the path moved while the action was
+  // out — a filter clicked, another review session opened — that reload()
+  // still names the old path, and as the newest request its answer landed on
+  // top of the new path's. Measured on the Hints table: retract a hint, click
+  // "Retracted" before the POST returns, and the All-filter rows came back
+  // under the Retracted button.
+  const staleAfterPathChange = async (opts = {}) => {
+    const hook = renderHook(({ p }) => useFetch<typeof ROWS_A>(p), { initialProps: { p: '/runs' }, ...opts })
+    await waitFor(() => expect(hook.result.current.data).toEqual(ROWS_A))
+    const staleReload = hook.result.current.reload
+    hook.rerender({ p: '/runs?status=failed' })
+    await waitFor(() => expect(hook.result.current.data).toEqual(ROWS_B))
+    return { ...hook, staleReload }
+  }
+
+  it('neither refetches the old path nor replaces the new path’s data', async () => {
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, staleReload } = await staleAfterPathChange()
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.data).toEqual(ROWS_B)
+    expect(mockApi.mock.calls.filter(c => c[0] === '/runs')).toHaveLength(1)
+  })
+
+  it('does not put the old path’s failure over the new path’s data', async () => {
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, staleReload } = await staleAfterPathChange()
+    mockApi.mockImplementation((async () => { throw new Error('old filter refused') }) as typeof api)
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.error).toBe('')
+    expect(result.current.data).toEqual(ROWS_B)
+  })
+
+  it('still refetches once the path has come back to the one it names', async () => {
+    const ROWS_A_AGAIN = { total: 123, rows: ['a', 'a2'] }
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, rerender, staleReload } = await staleAfterPathChange()
+    rerender({ p: '/runs' })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+    mockApi.mockResolvedValue(ROWS_A_AGAIN)
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.data).toEqual(ROWS_A_AGAIN)
+  })
+
+  it('does nothing under StrictMode either', async () => {
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    const { result, staleReload } = await staleAfterPathChange(strict)
+
+    await act(async () => { await staleReload() })
+
+    expect(result.current.data).toEqual(ROWS_B)
+  })
+
+  it('does nothing even when it runs between the path change’s commit and its effects', async () => {
+    // React runs useEffect callbacks AFTER the commit — for an update that is
+    // not a click, after paint — so a stale reload() that fires in that window
+    // (an action's await resolving) used to find the guard still holding the
+    // OLD path and refetch it. A layout effect in the committing render runs
+    // exactly there, which is what makes this deterministic.
+    mockApi.mockImplementation((async (p: string) => (p === '/runs' ? ROWS_A : ROWS_B)) as typeof api)
+    let stale: (() => Promise<void>) | null = null
+    const { result, rerender } = renderHook(({ p }) => {
+      const r = useFetch<typeof ROWS_A>(p)
+      useLayoutEffect(() => {
+        if (stale && p !== '/runs') void stale()
+      }, [p])
+      return r
+    }, { initialProps: { p: '/runs' } })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_A))
+    stale = result.current.reload
+
+    rerender({ p: '/runs?status=failed' })
+    await waitFor(() => expect(result.current.data).toEqual(ROWS_B))
+
+    expect(mockApi.mock.calls.filter(c => c[0] === '/runs')).toHaveLength(1)
   })
 })

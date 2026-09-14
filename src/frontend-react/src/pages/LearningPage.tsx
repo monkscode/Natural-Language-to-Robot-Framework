@@ -519,8 +519,13 @@ function Review() {
           )}
         </CardContent>
       </Card>
+      {/* Keyed by session: the panel is inline, so opening another session's
+          row changes its id while it stays mounted. Its detail read, busy flag
+          and error/"Applied" messages all belong to one session, and without
+          the key they stayed on screen under the next one — beside an Apply
+          that posts to the next one. */}
       {selectedId != null && (
-        <ReviewSessionPanel id={selectedId} listStatus={selected?.status} onSessionsChanged={reload} />
+        <ReviewSessionPanel key={selectedId} id={selectedId} listStatus={selected?.status} onSessionsChanged={reload} />
       )}
     </div>
   )
