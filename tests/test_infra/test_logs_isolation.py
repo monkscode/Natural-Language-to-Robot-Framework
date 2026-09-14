@@ -87,13 +87,15 @@ def _run_session_with_conftest(tmp_path, body, env):
 
 def test_an_exported_log_dir_does_not_reach_the_session(tmp_path):
     """Forced, not setdefault: a shell that exported the real logs dir must not
-    point the session at it."""
+    point the session at it, and what replaces it must sit outside the repo."""
     exported = str(REPO_ROOT / "logs")
     result = _run_session_with_conftest(tmp_path, f"""
         import os
+        from pathlib import Path
 
-        def test_the_session_log_dir_is_not_the_exported_one():
+        def test_the_session_log_dir_replaces_the_exported_one_outside_the_repo():
             assert os.environ["LOG_DIR"] != {exported!r}
+            assert not Path(os.environ["LOG_DIR"]).resolve().is_relative_to(Path({str(REPO_ROOT)!r}).resolve())
     """, dict(os.environ, LOG_DIR=exported))
 
     assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
