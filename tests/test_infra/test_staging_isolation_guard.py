@@ -9,7 +9,9 @@ directory in a real container.
 
 Two halves are pinned here: the redirect (every copy of the root points at a
 temp dir) and the guard (anything that still reaches the real root or the
-runner is refused, recorded, and fails the session).
+runner is refused, recorded, and fails the session). The guard refuses the
+real logs/ directory the same way; the logs redirect is pinned in
+test_logs_isolation.py.
 
 Referenced by: none (leaf test module).
 Depends on: tests/isolation_guard.py, tests/conftest.py (_isolated_staging_root,
@@ -29,6 +31,9 @@ import pytest
 
 from tests import isolation_guard
 from tests.isolation_guard import REPO_STAGING_ROOT, StagingGuard
+
+# <repo-root>/logs, derived here rather than read from the guard.
+REAL_LOGS_DIR = Path(__file__).resolve().parents[2] / "logs"
 
 
 def test_the_guard_names_the_directory_production_stages_into():
@@ -90,7 +95,7 @@ class TestWhatTheGuardRefuses:
 
     @pytest.fixture
     def guard(self, root):
-        return StagingGuard(root, "http://127.0.0.1:4998")
+        return StagingGuard([root], "http://127.0.0.1:4998")
 
     @staticmethod
     def outcome(guard, event, *args):
@@ -196,6 +201,49 @@ class TestWhatTheGuardRefuses:
         ]
 
 
+class TestTheGuardWithTwoRoots:
+    """The session guard watches the staging root AND the logs dir: a write
+    under either is refused, and neither root may shadow the other."""
+
+    @pytest.fixture
+    def staging(self, tmp_path):
+        return tmp_path / "robot_tests"
+
+    @pytest.fixture
+    def logs(self, tmp_path):
+        return tmp_path / "logs"
+
+    @pytest.fixture
+    def guard(self, staging, logs):
+        return StagingGuard([staging, logs])
+
+    @pytest.mark.parametrize("event, args", [
+        ("os.mkdir", ("{logs}", 0o777, -1)),
+        ("open", ("{logs}/application.log", "a", 0)),
+        ("os.rename", ("{logs}/application.log", "{logs}/application.log.1", -1, -1)),
+        ("os.remove", ("{logs}/application.log.5", -1)),
+        ("os.mkdir", ("{logs}/temp_metrics", 0o777, -1)),
+        ("open", ("{logs}/temp_metrics/wf-1.json", "w", 0)),
+        ("open", ("{logs}/crewai_steps.log", "a", 0)),
+        ("open", ("{staging}/run-1/test.robot", "w", 0)),
+    ])
+    def test_a_write_under_either_root_is_refused(self, guard, staging, logs, event, args):
+        real_args = tuple(a.format(staging=staging, logs=logs) if isinstance(a, str) else a for a in args)
+
+        assert isinstance(TestWhatTheGuardRefuses.outcome(guard, event, *real_args), PermissionError)
+
+    @pytest.mark.parametrize("event, args", [
+        ("open", ("{logs}/application.log", "r", 0)),
+        ("os.mkdir", ("{outside}/logs_old", 0o777, -1)),
+        ("open", ("{outside}/session/application.log", "a", 0)),
+    ])
+    def test_a_read_or_a_path_beside_the_logs_root_passes(self, guard, logs, tmp_path, event, args):
+        real_args = tuple(a.format(logs=logs, outside=tmp_path) if isinstance(a, str) else a for a in args)
+
+        assert TestWhatTheGuardRefuses.outcome(guard, event, *real_args) is None
+        assert guard.violations == []
+
+
 class TestReportAndFail:
     @staticmethod
     def session(exitstatus):
@@ -207,14 +255,14 @@ class TestReportAndFail:
 
     @staticmethod
     def guard_with_one_violation(tmp_path):
-        guard = StagingGuard(tmp_path / "robot_tests")
+        guard = StagingGuard([tmp_path / "robot_tests"])
         guard.violations.append(("tests/x.py::test_y (call)", "open", "C:/repo/robot_tests/r/test.robot"))
         return guard
 
     def test_a_clean_session_is_left_alone(self, tmp_path):
         session, lines = self.session(pytest.ExitCode.OK)
 
-        StagingGuard(tmp_path / "robot_tests").report_and_fail(session)
+        StagingGuard([tmp_path / "robot_tests"]).report_and_fail(session)
 
         assert session.exitstatus == pytest.ExitCode.OK
         assert lines == []
@@ -238,6 +286,19 @@ class TestReportAndFail:
 
         assert session.exitstatus == before
         assert lines
+
+    def test_the_report_names_every_refused_root(self, tmp_path):
+        """A connect names neither root, so only the header can put them in the report."""
+        staging, logs = tmp_path / "robot_tests", tmp_path / "logs"
+        guard = StagingGuard([staging, logs])
+        guard.violations.append(("tests/x.py::test_y (call)", "socket.connect", "127.0.0.1:4998"))
+        session, lines = self.session(pytest.ExitCode.OK)
+
+        guard.report_and_fail(session)
+
+        report = "\n".join(lines)
+        assert str(staging) in report
+        assert str(logs) in report
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +325,18 @@ def test_this_session_refuses_a_write_under_the_real_root(session_violations):
     assert session_violations[before:] and session_violations[before][2] == target
 
 
+def test_this_session_refuses_a_write_under_the_real_logs_dir(session_violations):
+    """Unredirected, application.log, both crewai logs and temp_metrics land
+    here — the directory the running API container writes too."""
+    target = str(REAL_LOGS_DIR / "__guard_selftest__.log")
+    before = len(session_violations)
+
+    with pytest.raises(PermissionError):
+        sys.audit("open", target, "a", 0)
+
+    assert session_violations[before][2] == target
+
+
 def test_this_session_refuses_the_configured_runner(session_violations):
     from urllib.parse import urlsplit
 
@@ -282,8 +355,8 @@ def test_the_session_takes_the_runner_url_from_settings(tmp_path):
     session_root = artifact_store.STAGING_ROOT
     try:
         with patch.object(settings, "RUNNER_EXEC_URL", "http://127.0.0.1:4988"):
-            isolation_guard.isolate_session(tmp_path)
-        probe = StagingGuard(tmp_path)
+            isolation_guard.isolate_session(tmp_path, Path(os.environ["LOG_DIR"]))
+        probe = StagingGuard([tmp_path])
         probe.set_runner_url("http://127.0.0.1:4988")
         assert isolation_guard.GUARD.runner_port == probe.runner_port == 4988
         assert artifact_store.STAGING_ROOT == tmp_path
@@ -312,8 +385,11 @@ def _run_inner_session(tmp_path, body):
     )
 
 
-def test_a_passing_session_that_reached_the_real_root_exits_failed(tmp_path):
-    target = str(REPO_STAGING_ROOT / "__guard_e2e__" / "test.robot")
+@pytest.mark.parametrize("target", [
+    str(REPO_STAGING_ROOT / "__guard_e2e__" / "test.robot"),
+    str(REAL_LOGS_DIR / "__guard_e2e__.log"),
+], ids=["staging", "logs"])
+def test_a_passing_session_that_reached_the_real_root_exits_failed(tmp_path, target):
     result = _run_inner_session(tmp_path, f"""
         import sys
 
