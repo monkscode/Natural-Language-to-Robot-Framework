@@ -68,10 +68,13 @@ def test_same_org_admin_peer_can_rerun(client):
     - old code: compares peer.user_id != owner.user_id -> denies (wrong).
     - new code: caller_can_access sees peer is org_admin of the same org -> allows.
 
-    The rerun will attempt Docker execution and likely fail (no real Docker run
-    here), but the gate itself must not return 404/403 — any other status (200,
-    409, 500) means the ownership check passed.
+    The execution stream is faked: the gate is the subject here, and the real
+    stream calls runner-exec, which executed this test's code in a real
+    container whenever run.sh's runner was up. A passed gate answers 200 with
+    the run's stored code handed to the stream.
     """
+    from unittest.mock import patch
+
     from src.backend.auth.endpoints import _token_payload
     from src.backend.auth.repository import UserRepository
     from src.backend.auth.org_repository import OrgRepository
@@ -90,32 +93,37 @@ def test_same_org_admin_peer_can_rerun(client):
     o_org = orgs.create_team_org("Rerun QA", str(owner["id"]))  # seats owner as org_admin
     orgs.add_member(o_org, str(peer["id"]), "org_admin")        # peer: real org_admin
 
+    stored_code = "*** Settings ***\n*** Test Cases ***\nDummy\n    Log  hi\n"
     rid = str(uuid.uuid4())
     get_run_registry().record_start(
         rid,
         {"user_id": str(owner["id"]), "email": owner["email"], "org_id": o_org},
         "peer rerun source",
         "passed",
-        robot_code="*** Settings ***\n*** Test Cases ***\nDummy\n    Log  hi\n",
+        robot_code=stored_code,
     )
 
     # Peer token derived from real membership via the production token builder,
     # which reads org_id/org_role from get_orgs_for_user (not a forged claim).
     peer_tok = _token_payload(users.get_by_id(str(peer["id"])))["access_token"]
 
-    resp = client.post(
-        "/execute-test",
-        json={"rerun_of": rid},
-        headers={"Authorization": f"Bearer {peer_tok}"},
-    )
-    # The ownership gate must NOT return 404 or 403.
-    # The test may 409 (no stored code path issues), 500 (Docker unavailable),
-    # or 200 (streaming started) — all mean the gate passed.
-    # 401 is rejected too: authentication runs BEFORE the ownership gate, so a
-    # peer whose token never authenticated would pass without the org path ever
-    # executing — the gate would go green while proving nothing.
-    assert resp.status_code not in (401, 403, 404), (
+    streamed = []
+
+    async def fake_stream(robot_code, **_kwargs):
+        streamed.append(robot_code)
+        yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
+
+    with patch("src.backend.api.endpoints.stream_execute_only", fake_stream):
+        resp = client.post(
+            "/execute-test",
+            json={"rerun_of": rid},
+            headers={"Authorization": f"Bearer {peer_tok}"},
+        )
+    # Exact status: 401 would mean the peer token never authenticated (so the
+    # org gate never ran), 403/404 that the gate denied the peer.
+    assert resp.status_code == 200, (
         f"Same-org org_admin peer was denied (status {resp.status_code}): {resp.text}. "
         "OLD code denies by user_id mismatch; NEW code must allow via org_admin. "
         "A 401 means the peer token never authenticated — the org gate was never reached."
     )
+    assert streamed == [stored_code], "the gate passed but the run's stored code never reached execution"
