@@ -197,7 +197,7 @@ Example Test
 
 **Setting this has no effect.** `setup_logging()` in
 `src/backend/config/logging_config.py` takes the level as a function argument
-defaulting to `"INFO"`, and `src/backend/main.py:20` calls it with no arguments.
+defaulting to `"INFO"`, and `src/backend/main.py` never passes one.
 No code reads a `LOG_LEVEL` environment variable. To change the level you must
 pass it at the call site.
 
@@ -215,18 +215,31 @@ LOG_LEVEL=INFO   # inert
 - `WARNING` - Only warnings and errors
 - `ERROR` - Only errors
 
-### LOG_DIR — NOT WIRED UP
+### LOG_DIR
 
-**Setting this has no effect.** No code reads a `LOG_DIR` environment variable —
-`setup_logging()` takes the directory as a function argument and defaults to
-`"logs"`. Inert in exactly the same way as `LOG_LEVEL` above.
-
-(`BROWSER_USE_LOG_DIR` is a different variable and *is* read, by the browser
-service — see `tools/browser_service/__init__.py`.)
+Moves the API's `application.log`, and nothing else. Unset or empty means
+`logs`, relative to the working directory.
 
 ```env
-LOG_DIR=logs   # inert
+LOG_DIR=logs
 ```
+
+- **Only `application.log` moves.** `crewai.log.txt`, `crewai_steps.log` and
+  `temp_metrics/` stay under `./logs` whatever this is set to. The executor
+  (`runner_exec`) writes no log file at all; it logs to stdout.
+- **It has to be in the process environment.** `src/backend/main.py` reads it
+  with `os.environ` when it is imported, before `settings` loads `.env`.
+  `run.sh` exports `.env` (`set -a`) and compose passes it through `env_file`,
+  so both see a value set there. A bare `uvicorn src.backend.main:app` does
+  not — export it in the shell instead.
+- **Compose mounts `./logs` at `/app/logs`.** Inside a container, a `LOG_DIR`
+  outside `/app/logs` takes `application.log` off that mount, so it no longer
+  reaches the host's `./logs`. Alloy is unaffected either way: it ships
+  container stdout, not the file. A manual 429 count over `application.log`
+  (see `observability/README.md`) has to read the new path.
+
+(`BROWSER_USE_LOG_DIR` is a different variable, read by the browser service —
+see `tools/browser_service/__init__.py`.)
 
 ## Docker Settings
 
