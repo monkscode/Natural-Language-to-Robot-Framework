@@ -9,6 +9,7 @@ import pytest
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     normalize_robot_code,
+    rewrite_get_element_states_to_wait_for_condition,
     strip_redundant_css_prefix,
 )
 
@@ -464,3 +465,158 @@ def test_strip_redundant_css_prefix_handles_the_whole_failing_suite():
         "Verify Web Tables Filtering\n"
         "    Fill Text    ${search_box_locator}    Cierra\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# rewrite_get_element_states_to_wait_for_condition — Get Element States only
+# looks for the element for 250ms and retries its assertion for ~1s, ignoring
+# the Browser import's 30s timeout. After a page-changing action, a check can
+# fail before the element even appears. Wait For Condition runs the same keyword
+# under the library timeout instead.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        (
+            "Basic contains visible — rewritten",
+            "    Get Element States    ${h}    contains    visible",
+            "    Wait For Condition    Element States    ${h}    contains    visible",
+        ),
+        (
+            "Multiple states — rewritten",
+            "    Get Element States    ${b}    contains    visible    enabled",
+            "    Wait For Condition    Element States    ${b}    contains    visible    enabled",
+        ),
+        (
+            "not contains — rewritten",
+            "    Get Element States    ${p}    not contains    visible",
+            "    Wait For Condition    Element States    ${p}    not contains    visible",
+        ),
+        (
+            "== operator — rewritten",
+            "    Get Element States    ${x}    ==    detached",
+            "    Wait For Condition    Element States    ${x}    ==    detached",
+        ),
+        (
+            "validate operator — rewritten",
+            "    Get Element States    ${x}    validate    value & visible",
+            "    Wait For Condition    Element States    ${x}    validate    value & visible",
+        ),
+        (
+            "*= operator — rewritten",
+            "    Get Element States    ${x}    *=    visible",
+            "    Wait For Condition    Element States    ${x}    *=    visible",
+        ),
+        (
+            "Assigned variable — rewritten, WFC returns the value",
+            "    ${s}=    Get Element States    ${h}    contains    visible",
+            "    ${s}=    Wait For Condition    Element States    ${h}    contains    visible",
+        ),
+        (
+            "message= kept",
+            "    Get Element States    ${h}    contains    visible    message=Heading missing",
+            "    Wait For Condition    Element States    ${h}    contains    visible    message=Heading missing",
+        ),
+        (
+            "Browser. prefix preserved on the new keyword cell",
+            "    Browser.Get Element States    ${h}    contains    visible",
+            "    Browser.Wait For Condition    Element States    ${h}    contains    visible",
+        ),
+        (
+            "snake_case + tabs — rewritten, separators kept",
+            "\tget_element_states\t${h}\tcontains\tvisible",
+            "\tWait For Condition    Element States\t${h}\tcontains\tvisible",
+        ),
+        (
+            "CRLF line ending — rewritten, line ending survives intact",
+            "    Get Element States    ${h}    contains    visible\r",
+            "    Wait For Condition    Element States    ${h}    contains    visible\r",
+        ),
+        (
+            "No operator cell — unchanged",
+            "    ${s}=    Get Element States    ${h}",
+            "    ${s}=    Get Element States    ${h}",
+        ),
+        (
+            "then — unchanged (does not wait)",
+            "    Get Element States    ${h}    then    bool(value & visible)",
+            "    Get Element States    ${h}    then    bool(value & visible)",
+        ),
+        (
+            "evaluate — unchanged",
+            "    Get Element States    ${h}    evaluate    'visible' in value",
+            "    Get Element States    ${h}    evaluate    'visible' in value",
+        ),
+        (
+            "Non-operator third cell — unchanged",
+            "    Get Element States    ${h}    visible",
+            "    Get Element States    ${h}    visible",
+        ),
+        (
+            "Wrapped in Run Keyword And Return Status — unchanged (wrapper is the keyword)",
+            "    Run Keyword And Return Status    Get Element States    ${h}    contains    visible",
+            "    Run Keyword And Return Status    Get Element States    ${h}    contains    visible",
+        ),
+        (
+            "Wrapped in Run Keyword If — unchanged (wrapper is the keyword)",
+            "    Run Keyword If    ${cond}    Get Element States    ${h}    contains    visible",
+            "    Run Keyword If    ${cond}    Get Element States    ${h}    contains    visible",
+        ),
+        (
+            "Wrapped in Wait Until Keyword Succeeds — unchanged (wrapper is the keyword)",
+            "    Wait Until Keyword Succeeds    3x    1s    Get Element States    ${h}    contains    visible",
+            "    Wait Until Keyword Succeeds    3x    1s    Get Element States    ${h}    contains    visible",
+        ),
+        (
+            "return_names= argument — unchanged (unproven forwarding, skip per design doc)",
+            "    Get Element States    ${h}    contains    visible    return_names=True",
+            "    Get Element States    ${h}    contains    visible    return_names=True",
+        ),
+        (
+            "Uppercase operator — rewritten (case-insensitive match)",
+            "    Get Element States    ${h}    CONTAINS    visible",
+            "    Wait For Condition    Element States    ${h}    CONTAINS    visible",
+        ),
+        (
+            "Already Wait For Condition — unchanged (idempotent)",
+            "    Wait For Condition    Element States    ${h}    contains    visible",
+            "    Wait For Condition    Element States    ${h}    contains    visible",
+        ),
+        (
+            "Full-line comment — unchanged",
+            "# Get Element States    ${h}    contains    visible",
+            "# Get Element States    ${h}    contains    visible",
+        ),
+        (
+            "Continuation line — unchanged",
+            "    ...    Get Element States    ${h}    contains    visible",
+            "    ...    Get Element States    ${h}    contains    visible",
+        ),
+        (
+            "Unrelated keyword — unchanged",
+            "    Click    ${login}",
+            "    Click    ${login}",
+        ),
+    ],
+)
+def test_rewrite_get_element_states_to_wait_for_condition(label, source, expected):
+    assert rewrite_get_element_states_to_wait_for_condition(source) == expected, label
+
+
+def test_rewrite_get_element_states_empty_and_none_input():
+    assert rewrite_get_element_states_to_wait_for_condition("") == ""
+    assert rewrite_get_element_states_to_wait_for_condition(None) is None
+
+
+def test_rewrite_get_element_states_fast_path_no_match():
+    source = "*** Test Cases ***\nT\n    Click    #foo\n    Fill Text    #bar    hi"
+    assert rewrite_get_element_states_to_wait_for_condition(source) == source
+
+
+def test_rewrite_get_element_states_idempotent_on_own_output():
+    source = "    Get Element States    ${h}    contains    visible"
+    once = rewrite_get_element_states_to_wait_for_condition(source)
+    twice = rewrite_get_element_states_to_wait_for_condition(once)
+    assert once == twice
