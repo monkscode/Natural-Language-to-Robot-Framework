@@ -306,59 +306,39 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
     return stripped
 
 
-# Browser Library AssertionOperator names/values and documented aliases,
-# lowercased. `then` and `evaluate` are deliberately excluded: `Wait For
-# Condition` does not retry a `then` transform (measured — it still fails at
-# the library's default assertion window), and `evaluate` carries no
-# element-state condition to wait on. An operator cell not in this set is left
-# untouched — conservative, no rewrite beats a wrong rewrite.
-_ASSERTING_OPERATORS = frozenset({
-    "==", "equal", "equals", "should be",
-    "!=", "inequal", "should not be",
-    ">", "greater than", ">=",
-    "<", "less than", "<=",
-    "*=", "contains", "not contains",
-    "^=", "should start with", "starts",
-    "$=", "should end with", "ends",
-    "matches", "validate",
-})
+# Get Element States operator cells, with case, spaces and underscores removed as
+# Robot Framework does when converting them, mapped to the Wait For Elements State
+# state that means the same thing for a `visible` check. `contains hidden` is not
+# here on purpose: a missing element reports only `detached`, yet
+# `Wait For Elements State    hidden` passes for it.
+_VISIBILITY_OPERATORS = {"contains": "visible", "*=": "visible", "notcontains": "hidden"}
 
 
-def rewrite_get_element_states_to_wait_for_condition(robot_code: str) -> str:
-    """Rewrite an asserting `Get Element States` line to
-    `Wait For Condition    Element States    ...` with the same arguments.
+def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
+    """Rewrite `Get Element States    <loc>    contains    visible` to
+    `Wait For Elements State    <loc>    visible` (`not contains` -> `hidden`).
 
-    `Get Element States` only looks for the element for 250ms and retries its
-    assertion for `retry_assertions_for` (1s) — the Browser import's `timeout`
-    (raised to 30s by `ensure_browser_timeout`) never applies to it. A check
-    right after a page-changing action can fail before the element even
-    appears. `Wait For Condition` runs the same keyword under the library
-    timeout instead (Browser Library's own documented replacement).
+    `Get Element States` looks for the element for only 250ms and retries its
+    assertion for `retry_assertions_for` (1s); the Browser import's `timeout`
+    never applies to it, so a visibility check right after a page-changing
+    action fails before the element appears. `Wait For Elements State` waits
+    under the library timeout. It is a plain keyword with fixed arguments, so
+    Robot resolves its arguments once (backslash escapes survive) and dryrun
+    still checks them — `Wait For Condition` does neither.
 
-    Scope (conservative — no rewrite beats a wrong rewrite):
-      - Only lines whose keyword cell canonicalizes to `get element states`
-        (reuses the same cell-walk as normalize_robot_code, so an assignment
-        prefix and a `Browser.` library prefix are both recognized, and text
-        inside [Documentation]/comments/continuations is never touched).
-      - Only when the cell after the locator argument is a recognized
-        asserting operator (_ASSERTING_OPERATORS). `then`, `evaluate`, a
-        missing operator cell, or any other text: left untouched.
-      - A `Get Element States` call wrapped by another keyword (e.g.
-        `Run Keyword And Return Status`) is never touched — the wrapper, not
-        `Get Element States`, is the line's keyword cell.
-      - A line carrying `return_names=` is never touched — whether
-        `Wait For Condition`'s `run_keyword` forwarding accepts it is unproven
-        (no corpus instance; design doc §5), so it is skipped rather than
-        gambled on.
-      - Idempotent: a line already starting with `Wait For Condition` is a
-        different keyword cell and is never matched.
+    Only the exact visibility check is rewritten; anything whose meaning could
+    change is left alone: an assigned result (WFES returns nothing), any state
+    other than lowercase `visible`, any other operator, any extra cell except a
+    `message=` without `{}` placeholders (WFES formats the message with only
+    selector/function/timeout) and a trailing comment, wrapped calls, settings,
+    comments and continuation lines. Idempotent.
 
     Args:
         robot_code: The Robot Framework source as a string.
 
     Returns:
         The same string with matching lines rewritten. Returns the input
-        unchanged if it contains no "element states" text at all (fast path).
+        unchanged when it contains no "element states" text (fast path).
     """
     if not robot_code:
         return robot_code
@@ -370,72 +350,60 @@ def rewrite_get_element_states_to_wait_for_condition(robot_code: str) -> str:
     out_lines = []
     for line in robot_code.split("\n"):
         stripped = line.lstrip()
-
         if stripped.startswith("#") or stripped.startswith("..."):
             out_lines.append(line)
             continue
 
         parts = _CELL_SPLIT_RE.split(line)
-        cell_positions = [
-            i for i, p in enumerate(parts)
-            if p and not _CELL_SPLIT_RE.fullmatch(p)
-        ]
-        if not cell_positions:
+        cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
+        if len(cells) < 4 or _ASSIGN_PREFIX_RE.match(parts[cells[0]]):
             out_lines.append(line)
             continue
 
-        keyword_pos_in_cells = 0
-        for k, ci in enumerate(cell_positions):
-            if _ASSIGN_PREFIX_RE.match(parts[ci]):
-                keyword_pos_in_cells = k + 1
-                continue
-            break
-
-        if keyword_pos_in_cells >= len(cell_positions):
-            out_lines.append(line)
-            continue
-
-        keyword_idx = cell_positions[keyword_pos_in_cells]
+        keyword_idx, _, operator_idx, state_idx = cells[:4]
         keyword_cell = parts[keyword_idx]
-        canon = _canon_keyword(keyword_cell)
-        if canon != "get element states":
+        if _canon_keyword(keyword_cell) != "get element states":
             out_lines.append(line)
             continue
 
-        # Operator cell sits two content-cells after the keyword: +1 locator, +2 operator.
-        operator_cell_pos = keyword_pos_in_cells + 2
-        if operator_cell_pos >= len(cell_positions):
-            out_lines.append(line)
-            continue
-        operator_text = parts[cell_positions[operator_cell_pos]].strip().lower()
-        if operator_text not in _ASSERTING_OPERATORS:
+        operator = re.sub(r"[\s_]+", "", parts[operator_idx].lower())
+        target_state = _VISIBILITY_OPERATORS.get(operator)
+        state_cell = parts[state_idx]
+        if target_state is None or state_cell.strip() != "visible":
             out_lines.append(line)
             continue
 
-        # return_names= forwarding through Wait For Condition's run_keyword call
-        # is unproven (no corpus instance, not run in the runner image) — skip
-        # rather than gamble on unverified behavior (design doc §5).
-        if any(
-            parts[cell_positions[p]].strip().lower().startswith("return_names=")
-            for p in range(operator_cell_pos, len(cell_positions))
-        ):
+        extras_ok = True
+        for i in cells[4:]:
+            cell = parts[i].strip()
+            if cell.startswith("#"):
+                break
+            if not cell.startswith("message=") or "{" in cell or "}" in cell:
+                extras_ok = False
+                break
+        if not extras_ok:
             out_lines.append(line)
             continue
 
-        has_prefix = "." in keyword_cell.strip() and not keyword_cell.strip().startswith(".")
-        new_keyword = (
-            "Browser.Wait For Condition    Element States"
-            if has_prefix
-            else "Wait For Condition    Element States"
+        name = keyword_cell.strip()
+        prefix = (
+            name.rsplit(".", 1)[0].strip() + "."
+            if "." in name and not name.startswith(".")
+            else ""
         )
-        parts[keyword_idx] = new_keyword
+        indent = keyword_cell[: len(keyword_cell) - len(keyword_cell.lstrip())]
+        parts[keyword_idx] = f"{indent}{prefix}Wait For Elements State"
+        parts[state_idx] = state_cell.replace("visible", target_state, 1)
+        # Cells sit at even indices with their separators between them, so the
+        # separator in front of the operator is the part just before it.
+        del parts[operator_idx - 1 : operator_idx + 1]
         out_lines.append("".join(parts))
         rewrote += 1
 
     if rewrote:
         logger.info(
-            f"Locator normalizer: rewrote {rewrote} asserting Get Element States "
-            "line(s) to Wait For Condition"
+            f"Visibility check normalizer: rewrote {rewrote} Get Element States "
+            "line(s) to Wait For Elements State"
         )
     return "\n".join(out_lines)
 

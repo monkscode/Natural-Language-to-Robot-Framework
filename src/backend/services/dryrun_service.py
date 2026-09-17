@@ -47,7 +47,7 @@ from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     normalize_robot_code,
-    rewrite_get_element_states_to_wait_for_condition,
+    rewrite_visibility_checks_to_wait,
     strip_redundant_css_prefix,
 )
 from src.backend.core.artifact_store import get_artifact_store, make_shared_dir
@@ -129,12 +129,11 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # (`css=id=searchBox`). Never valid CSS, and dryrun cannot catch it.
     robot_code = strip_redundant_css_prefix(robot_code)
 
-    # Get Element States only waits 250ms + a 1s assertion retry — the Browser
-    # import's timeout never applies to it. Rewrite an asserting check to
-    # Wait For Condition so it waits under the library timeout instead (see
-    # robot_code_normalizer for full rationale). Runs after the css= passes
-    # above, while Get Element States is still recognized by _LOCATOR_KEYWORDS.
-    robot_code = rewrite_get_element_states_to_wait_for_condition(robot_code)
+    # Get Element States waits only 250ms + a 1s assertion retry — the Browser
+    # import's timeout never applies to it. Rewrite a visibility check to
+    # Wait For Elements State so it waits under the library timeout (see
+    # robot_code_normalizer for the full rationale and scope).
+    robot_code = rewrite_visibility_checks_to_wait(robot_code)
 
     # Step 1: Handle multiple Settings blocks (LLM might output code multiple times)
     settings_matches = list(re.finditer(

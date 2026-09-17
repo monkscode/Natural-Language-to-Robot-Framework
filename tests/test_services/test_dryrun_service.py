@@ -588,29 +588,30 @@ class TestExtractAndNormalize:
         assert second == first
         assert second.count("timeout=") == 1
 
-    def test_get_element_states_rewritten_by_the_pipeline(self):
+    def test_visibility_check_rewritten_by_the_pipeline(self):
         """The rewrite is only worth anything if it is actually wired in here.
 
         Without this test, deleting the rewrite call from the pipeline leaves
-        the whole suite green.
+        the whole suite green. The bare `#heading` also proves the `css=`
+        prefixing still applies to the rewritten line.
         """
         raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
                "    Click    #login\n"
                "    Get Element States    #heading    contains    visible")
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
-        assert "Wait For Condition    Element States    css=#heading    contains    visible" in out
-        assert "Get Element States    css=#heading" not in out
+        assert "    Wait For Elements State    css=#heading    visible" in out
+        assert "Get Element States" not in out
 
-    def test_get_element_states_rewrite_survives_a_repair_round_trip(self):
+    def test_visibility_check_rewrite_survives_a_repair_round_trip(self):
         """This function runs on BOTH the generation path and the dryrun repair
-        path; a repair pass re-running cleanup on its own output must not
-        double-rewrite or corrupt an already-rewritten line."""
+        path; a repair pass re-running cleanup on its own output must leave
+        the rewritten line exactly as it was."""
         raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
-               "    Get Element States    ${h}    contains    visible")
+               "    Get Element States    ${h}    not contains    visible")
         first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "    Wait For Elements State    ${h}    hidden" in first
         assert second == first
-        assert first.count("Wait For Condition") == 1
 
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
