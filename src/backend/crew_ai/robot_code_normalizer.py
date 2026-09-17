@@ -32,8 +32,12 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
+The same cleanup step also applies three smaller deterministic rules defined
+here: `ensure_browser_timeout`, `strip_redundant_css_prefix` and
+`rewrite_visibility_checks_to_wait`.
+
 Referenced by:
-    src.backend.services.workflow_service._run_crew_thread (after tasks[-1] extraction)
+    src.backend.services.dryrun_service.extract_and_normalize_robot_code
 """
 
 import logging
@@ -313,6 +317,20 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
 # `Wait For Elements State    hidden` passes for it.
 _VISIBILITY_OPERATORS = {"contains": "visible", "*=": "visible", "notcontains": "hidden"}
 
+# Keywords that run another keyword and swallow or retry its failure. A check
+# inside one of the file's own keywords can be reached through them, and there a
+# 30s wait instead of a ~1s check changes the outcome (a probe that used to
+# return False quickly now waits, or flips to True when the element is late).
+_ERROR_CATCHING_WRAPPERS = frozenset({
+    "run keyword and return status",
+    "run keyword and ignore error",
+    "run keyword and expect error",
+    "run keyword and warn on failure",
+    "wait until keyword succeeds",
+})
+
+_KEYWORDS_SECTION_RE = re.compile(r"^\*++[ \t]*+keywords?[ \t]*+\*", re.IGNORECASE)
+
 
 def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     """Rewrite `Get Element States    <loc>    contains    visible` to
@@ -326,12 +344,17 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     Robot resolves its arguments once (backslash escapes survive) and dryrun
     still checks them — `Wait For Condition` does neither.
 
-    Only the exact visibility check is rewritten; anything whose meaning could
-    change is left alone: an assigned result (WFES returns nothing), any state
-    other than lowercase `visible`, any other operator, any extra cell except a
-    `message=` without `{}` placeholders (WFES formats the message with only
-    selector/function/timeout) and a trailing comment, wrapped calls, settings,
-    comments and continuation lines. Idempotent.
+    Only an indented step that is exactly that check is rewritten; anything
+    whose meaning could change is left alone: an assigned result (WFES returns
+    nothing), any state other than lowercase `visible`, any other operator, any
+    extra cell except a `message=` without `{}` placeholders (WFES formats the
+    message with only selector/function/timeout) and a trailing comment,
+    wrapped calls, settings, comments and continuation lines.
+
+    The whole file is left unchanged when it catches errors around code the
+    line cannot see: a `TRY` block, or its own keywords together with an
+    error-catching wrapper. There a longer wait can turn a caught failure into
+    a pass/fail flip or a 30s stall. Idempotent.
 
     Args:
         robot_code: The Robot Framework source as a string.
@@ -346,9 +369,14 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     if "element states" not in lower and "element_states" not in lower:
         return robot_code
 
+    has_try = False
+    has_keywords_section = False
+    has_catching_wrapper = False
     rewrote = 0
     out_lines = []
     for line in robot_code.split("\n"):
+        if _KEYWORDS_SECTION_RE.match(line):
+            has_keywords_section = True
         stripped = line.lstrip()
         if stripped.startswith("#") or stripped.startswith("..."):
             out_lines.append(line)
@@ -356,7 +384,23 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
         parts = _CELL_SPLIT_RE.split(line)
         cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
-        if len(cells) < 4 or _ASSIGN_PREFIX_RE.match(parts[cells[0]]):
+        # parts[0] is empty only for an indented line; anything else is a
+        # section header or a test/keyword name, never a step.
+        if not cells or parts[0]:
+            out_lines.append(line)
+            continue
+
+        first = 0
+        while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
+            first += 1
+        if first < len(cells):
+            step_keyword = parts[cells[first]]
+            if step_keyword.strip() == "TRY":
+                has_try = True
+            elif _canon_keyword(step_keyword) in _ERROR_CATCHING_WRAPPERS:
+                has_catching_wrapper = True
+
+        if first or len(cells) < 4:
             out_lines.append(line)
             continue
 
@@ -391,8 +435,7 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
             if "." in name and not name.startswith(".")
             else ""
         )
-        indent = keyword_cell[: len(keyword_cell) - len(keyword_cell.lstrip())]
-        parts[keyword_idx] = f"{indent}{prefix}Wait For Elements State"
+        parts[keyword_idx] = f"{prefix}Wait For Elements State"
         parts[state_idx] = state_cell.replace("visible", target_state, 1)
         # Cells sit at even indices with their separators between them, so the
         # separator in front of the operator is the part just before it.
@@ -400,11 +443,19 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         out_lines.append("".join(parts))
         rewrote += 1
 
-    if rewrote:
+    if not rewrote:
+        return robot_code
+    if has_try or (has_keywords_section and has_catching_wrapper):
         logger.info(
-            f"Visibility check normalizer: rewrote {rewrote} Get Element States "
-            "line(s) to Wait For Elements State"
+            f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
+            "unchanged — the file catches errors (TRY, or its own keywords under an "
+            "error-catching wrapper), where a longer wait could change the outcome"
         )
+        return robot_code
+    logger.info(
+        f"Visibility check normalizer: rewrote {rewrote} Get Element States "
+        "line(s) to Wait For Elements State"
+    )
     return "\n".join(out_lines)
 
 

@@ -613,6 +613,16 @@ class TestExtractAndNormalize:
         assert "    Wait For Elements State    ${h}    hidden" in first
         assert second == first
 
+    def test_visibility_check_on_the_last_line_survives_a_leaked_json_brace(self):
+        """The model sometimes leaks `"}` after the code; the pipeline strips it.
+        The rewrite must see the stripped line, or the last-line check — where
+        a "verify X is visible" step usually sits — ships unchanged."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    id=go\n"
+               '    Get Element States    ${h}    contains    visible"}')
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert out.endswith("\n    Wait For Elements State    ${h}    visible")
+
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))

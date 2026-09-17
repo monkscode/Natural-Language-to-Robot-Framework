@@ -578,6 +578,12 @@ _WFES = "Wait For Elements State"
          "    Get Element States    selector=${h}    assertion_operator=contains    assertion_expected=visible", None),
         ("unrelated keyword",
          "    Click    ${login}", None),
+        ("commented-out step with a library prefix",
+         "    #Browser.Get Element States    ${h}    contains    visible", None),
+        ("not indented: Robot reads it as a test name",
+         "Get Element States    id=x    contains    visible", None),
+        ("one leading space: still a test name",
+         " Get Element States    id=x    contains    visible", None),
     ],
 )
 def test_rewrite_visibility_checks_to_wait(label, source, expected):
@@ -602,3 +608,41 @@ def test_rewrite_visibility_checks_is_idempotent():
     once = rewrite_visibility_checks_to_wait(source)
     assert once != source
     assert rewrite_visibility_checks_to_wait(once) == once
+
+
+_SUITE = "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        ("TRY block around the check",
+         _SUITE + "    TRY\n        Get Element States    id=x    contains    visible\n"
+                  "    EXCEPT\n        Log    no\n    END\n", None),
+        ("TRY anywhere leaves every check in the file alone",
+         _SUITE + "    Get Element States    id=x    contains    visible\n"
+                  "    TRY\n        Click    id=y\n    EXCEPT\n        Log    no\n    END\n", None),
+        ("TRY with a trailing comment",
+         _SUITE + "    TRY    # probe\n        Get Element States    id=x    contains    visible\n"
+                  "    EXCEPT\n        Log    no\n    END\n", None),
+        ("own keyword called through an error-catching wrapper",
+         _SUITE + "    ${ok}=    Run Keyword And Return Status    Check Dash\n\n"
+                  "*** Keywords ***\nCheck Dash\n    Get Element States    id=x    contains    visible\n", None),
+        ("singular Keyword section header counts too",
+         _SUITE + "    Run Keyword And Ignore Error    Check\n\n"
+                  "*** Keyword ***\nCheck\n    Get Element States    id=x    contains    visible\n", None),
+        ("own keyword without a wrapper is rewritten",
+         _SUITE + "    Check Dash\n\n*** Keywords ***\nCheck Dash\n"
+                  "    Get Element States    id=x    contains    visible\n",
+         _SUITE + "    Check Dash\n\n*** Keywords ***\nCheck Dash\n"
+                  f"    {_WFES}    id=x    visible\n"),
+        ("a direct wrapper without own keywords does not block other checks",
+         _SUITE + "    ${ok}=    Run Keyword And Return Status    Get Element States    id=p    contains    visible\n"
+                  "    Get Element States    id=x    contains    visible\n",
+         _SUITE + "    ${ok}=    Run Keyword And Return Status    Get Element States    id=p    contains    visible\n"
+                  f"    {_WFES}    id=x    visible\n"),
+    ],
+)
+def test_rewrite_visibility_checks_file_guards(label, source, expected):
+    expected = source if expected is None else expected
+    assert rewrite_visibility_checks_to_wait(source) == expected, label
