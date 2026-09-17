@@ -9,6 +9,7 @@ import pytest
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     normalize_robot_code,
+    rewrite_visibility_checks_to_wait,
     strip_redundant_css_prefix,
 )
 
@@ -464,3 +465,192 @@ def test_strip_redundant_css_prefix_handles_the_whole_failing_suite():
         "Verify Web Tables Filtering\n"
         "    Fill Text    ${search_box_locator}    Cierra\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# rewrite_visibility_checks_to_wait — Get Element States looks for the element
+# for only 250ms and retries its assertion for ~1s, ignoring the Browser
+# import's 30s timeout, so a visibility check right after a page change fails
+# before the element appears. Wait For Elements State waits under the timeout.
+# ---------------------------------------------------------------------------
+
+_WFES = "Wait For Elements State"
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        ("contains visible",
+         "    Get Element States    ${h}    contains    visible",
+         f"    {_WFES}    ${{h}}    visible"),
+        ("*= is the same operator",
+         "    Get Element States    ${h}    *=    visible",
+         f"    {_WFES}    ${{h}}    visible"),
+        ("operator case is ignored, as Robot ignores it",
+         "    Get Element States    ${h}    CONTAINS    visible",
+         f"    {_WFES}    ${{h}}    visible"),
+        ("not contains visible becomes hidden",
+         "    Get Element States    ${p}    not contains    visible",
+         f"    {_WFES}    ${{p}}    hidden"),
+        ("not_contains spelling",
+         "    Get Element States    ${p}    not_contains    visible",
+         f"    {_WFES}    ${{p}}    hidden"),
+        ("NotContains spelling",
+         "    Get Element States    ${p}    NotContains    visible",
+         f"    {_WFES}    ${{p}}    hidden"),
+        ("plain message is kept",
+         "    Get Element States    ${h}    contains    visible    message=Heading missing",
+         f"    {_WFES}    ${{h}}    visible    message=Heading missing"),
+        ("Browser. prefix is kept",
+         "    Browser.Get Element States    ${h}    contains    visible",
+         f"    Browser.{_WFES}    ${{h}}    visible"),
+        ("an import alias prefix is kept",
+         "    B.Get Element States    ${h}    contains    visible",
+         f"    B.{_WFES}    ${{h}}    visible"),
+        ("snake_case keyword, tab separators kept",
+         "\tget_element_states\t${h}\tcontains\tvisible",
+         f"\t{_WFES}\t${{h}}\tvisible"),
+        ("CRLF line ending kept",
+         "    Get Element States    ${h}    contains    visible\r",
+         f"    {_WFES}    ${{h}}    visible\r"),
+        ("CRLF line ending kept on the hidden form",
+         "    Get Element States    ${h}    not contains    visible\r",
+         f"    {_WFES}    ${{h}}    hidden\r"),
+        ("trailing comment kept",
+         "    Get Element States    ${h}    contains    visible    # check heading",
+         f"    {_WFES}    ${{h}}    visible    # check heading"),
+        ("iframe selector kept",
+         "    Get Element States    id=frm >>> id=x    contains    visible",
+         f"    {_WFES}    id=frm >>> id=x    visible"),
+        ("a comment-eaten locator still reaches dryrun as a broken call",
+         "    Get Element States    #1abc    contains    visible",
+         f"    {_WFES}    #1abc    visible"),
+        # --- left unchanged ---
+        ("assigned result: WFES returns nothing",
+         "    ${s}=    Get Element States    ${h}    contains    visible", None),
+        ("no operator, assigned",
+         "    ${s}=    Get Element States    ${h}", None),
+        ("no operator",
+         "    Get Element States    ${h}", None),
+        ("then does not assert",
+         "    Get Element States    ${h}    then    bool(value & visible)", None),
+        ("evaluate",
+         "    Get Element States    ${h}    evaluate    'visible' in value", None),
+        ("validate",
+         "    Get Element States    ${h}    validate    value & visible", None),
+        ("== is an exact list compare",
+         "    Get Element States    ${h}    ==    visible", None),
+        ("contains hidden differs from WFES hidden for a missing element",
+         "    Get Element States    ${h}    contains    hidden", None),
+        ("enabled is out of scope",
+         "    Get Element States    ${h}    contains    enabled", None),
+        ("VISIBLE is compared as text by Get Element States",
+         "    Get Element States    ${h}    contains    VISIBLE", None),
+        ("state from a variable",
+         "    Get Element States    ${h}    contains    ${state}", None),
+        ("two states",
+         "    Get Element States    ${h}    contains    visible    enabled", None),
+        ("return_names",
+         "    Get Element States    ${h}    contains    visible    return_names=True", None),
+        ("timeout is not a Get Element States argument",
+         "    Get Element States    ${h}    contains    visible    timeout=5s", None),
+        ("message with a format placeholder would raise KeyError in WFES",
+         "    Get Element States    ${h}    contains    visible    message=Got {value}", None),
+        ("wrapped in Run Keyword And Return Status",
+         "    Run Keyword And Return Status    Get Element States    ${h}    contains    visible", None),
+        ("wrapped in Run Keyword If",
+         "    Run Keyword If    ${c}    Get Element States    ${h}    contains    visible", None),
+        ("wrapped in Wait Until Keyword Succeeds",
+         "    Wait Until Keyword Succeeds    3x    1s    Get Element States    ${h}    contains    visible", None),
+        ("inline IF",
+         "    IF    ${c}    Get Element States    ${h}    contains    visible", None),
+        ("already Wait For Elements State",
+         f"    {_WFES}    ${{h}}    visible", None),
+        ("a Wait For Condition line is not ours to touch",
+         "    Wait For Condition    Element States    ${h}    contains    visible", None),
+        ("full-line comment",
+         "# Get Element States    ${h}    contains    visible", None),
+        ("continuation line",
+         "    ...    Get Element States    ${h}    contains    visible", None),
+        ("documentation setting",
+         "    [Documentation]    Get Element States    ${h}    contains    visible", None),
+        ("named arguments only",
+         "    Get Element States    selector=${h}    assertion_operator=contains    assertion_expected=visible", None),
+        ("unrelated keyword",
+         "    Click    ${login}", None),
+        ("commented-out step with a library prefix",
+         "    #Browser.Get Element States    ${h}    contains    visible", None),
+        ("not indented: Robot reads it as a test name",
+         "Get Element States    id=x    contains    visible", None),
+        ("one leading space: still a test name",
+         " Get Element States    id=x    contains    visible", None),
+    ],
+)
+def test_rewrite_visibility_checks_to_wait(label, source, expected):
+    expected = source if expected is None else expected
+    assert rewrite_visibility_checks_to_wait(source) == expected, label
+
+
+def test_rewrite_visibility_checks_operator_on_continuation_line_is_left_alone():
+    source = ("*** Test Cases ***\nT\n"
+              "    Get Element States    ${h}\n"
+              "    ...    contains    visible\n")
+    assert rewrite_visibility_checks_to_wait(source) == source
+
+
+def test_rewrite_visibility_checks_empty_and_none_input():
+    assert rewrite_visibility_checks_to_wait("") == ""
+    assert rewrite_visibility_checks_to_wait(None) is None
+
+
+def test_rewrite_visibility_checks_is_idempotent():
+    source = "    Get Element States    ${h}    contains    visible"
+    once = rewrite_visibility_checks_to_wait(source)
+    assert once != source
+    assert rewrite_visibility_checks_to_wait(once) == once
+
+
+_SUITE = "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        ("TRY block around the check",
+         _SUITE + "    TRY\n        Get Element States    id=x    contains    visible\n"
+                  "    EXCEPT\n        Log    no\n    END\n", None),
+        ("TRY anywhere leaves every check in the file alone",
+         _SUITE + "    Get Element States    id=x    contains    visible\n"
+                  "    TRY\n        Click    id=y\n    EXCEPT\n        Log    no\n    END\n", None),
+        ("TRY with a trailing comment",
+         _SUITE + "    TRY    # probe\n        Get Element States    id=x    contains    visible\n"
+                  "    EXCEPT\n        Log    no\n    END\n", None),
+        ("own keyword called through an error-catching wrapper",
+         _SUITE + "    ${ok}=    Run Keyword And Return Status    Check Dash\n\n"
+                  "*** Keywords ***\nCheck Dash\n    Get Element States    id=x    contains    visible\n", None),
+        ("singular Keyword section header counts too",
+         _SUITE + "    Run Keyword And Ignore Error    Check\n\n"
+                  "*** Keyword ***\nCheck\n    Get Element States    id=x    contains    visible\n", None),
+        ("own keyword without a wrapper is rewritten",
+         _SUITE + "    Check Dash\n\n*** Keywords ***\nCheck Dash\n"
+                  "    Get Element States    id=x    contains    visible\n",
+         _SUITE + "    Check Dash\n\n*** Keywords ***\nCheck Dash\n"
+                  f"    {_WFES}    id=x    visible\n"),
+        ("own keyword under Run Keyword And Continue On Failure is rewritten: "
+         "that wrapper does not swallow the failure",
+         _SUITE + "    Run Keyword And Continue On Failure    Check Dash\n\n"
+                  "*** Keywords ***\nCheck Dash\n"
+                  "    Get Element States    id=x    contains    visible\n",
+         _SUITE + "    Run Keyword And Continue On Failure    Check Dash\n\n"
+                  "*** Keywords ***\nCheck Dash\n"
+                  f"    {_WFES}    id=x    visible\n"),
+        ("a direct wrapper without own keywords does not block other checks",
+         _SUITE + "    ${ok}=    Run Keyword And Return Status    Get Element States    id=p    contains    visible\n"
+                  "    Get Element States    id=x    contains    visible\n",
+         _SUITE + "    ${ok}=    Run Keyword And Return Status    Get Element States    id=p    contains    visible\n"
+                  f"    {_WFES}    id=x    visible\n"),
+    ],
+)
+def test_rewrite_visibility_checks_file_guards(label, source, expected):
+    expected = source if expected is None else expected
+    assert rewrite_visibility_checks_to_wait(source) == expected, label

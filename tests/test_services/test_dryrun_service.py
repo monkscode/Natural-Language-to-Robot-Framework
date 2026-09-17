@@ -588,6 +588,41 @@ class TestExtractAndNormalize:
         assert second == first
         assert second.count("timeout=") == 1
 
+    def test_visibility_check_rewritten_by_the_pipeline(self):
+        """The rewrite is only worth anything if it is actually wired in here.
+
+        Without this test, deleting the rewrite call from the pipeline leaves
+        the whole suite green. The bare `#heading` also proves the `css=`
+        prefixing still applies to the rewritten line.
+        """
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    #login\n"
+               "    Get Element States    #heading    contains    visible")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "    Wait For Elements State    css=#heading    visible" in out
+        assert "Get Element States" not in out
+
+    def test_visibility_check_rewrite_survives_a_repair_round_trip(self):
+        """This function runs on BOTH the generation path and the dryrun repair
+        path; a repair pass re-running cleanup on its own output must leave
+        the rewritten line exactly as it was."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Get Element States    ${h}    not contains    visible")
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "    Wait For Elements State    ${h}    hidden" in first
+        assert second == first
+
+    def test_visibility_check_on_the_last_line_survives_a_leaked_json_brace(self):
+        """The model sometimes leaks `"}` after the code; the pipeline strips it.
+        The rewrite must see the stripped line, or the last-line check — where
+        a "verify X is visible" step usually sits — ships unchanged."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    id=go\n"
+               '    Get Element States    ${h}    contains    visible"}')
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert out.endswith("\n    Wait For Elements State    ${h}    visible")
+
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))

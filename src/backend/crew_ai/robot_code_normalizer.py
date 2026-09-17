@@ -32,8 +32,12 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
+The same cleanup step also applies three smaller deterministic rules defined
+here: `ensure_browser_timeout`, `strip_redundant_css_prefix` and
+`rewrite_visibility_checks_to_wait`.
+
 Referenced by:
-    src.backend.services.workflow_service._run_crew_thread (after tasks[-1] extraction)
+    src.backend.services.dryrun_service.extract_and_normalize_robot_code
 """
 
 import logging
@@ -304,6 +308,157 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
             f"from {cells} already-prefixed locator(s)"
         )
     return stripped
+
+
+# Get Element States operator cells, with case, spaces and underscores removed as
+# Robot Framework does when converting them, mapped to the Wait For Elements State
+# state that means the same thing for a `visible` check. `contains hidden` is not
+# here on purpose: a missing element reports only `detached`, yet
+# `Wait For Elements State    hidden` passes for it.
+_VISIBILITY_OPERATORS = {"contains": "visible", "*=": "visible", "notcontains": "hidden"}
+
+# Keywords that run another keyword and swallow or retry its failure. A check
+# inside one of the file's own keywords can be reached through them, and there a
+# 30s wait instead of a ~1s check changes the outcome (a probe that used to
+# return False quickly now waits, or flips to True when the element is late).
+# `Run Keyword And Continue On Failure` is left out on purpose: the failure still
+# fails the test, so a longer wait there only removes false failures.
+_ERROR_CATCHING_WRAPPERS = frozenset({
+    "run keyword and return status",
+    "run keyword and ignore error",
+    "run keyword and expect error",
+    "run keyword and warn on failure",
+    "wait until keyword succeeds",
+})
+
+_KEYWORDS_SECTION_RE = re.compile(r"^\*++[ \t]*+keywords?[ \t]*+\*", re.IGNORECASE)
+
+
+def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
+    """Rewrite `Get Element States    <loc>    contains    visible` to
+    `Wait For Elements State    <loc>    visible` (`not contains` -> `hidden`).
+
+    `Get Element States` looks for the element for only 250ms and retries its
+    assertion for `retry_assertions_for` (1s); the Browser import's `timeout`
+    never applies to it, so a visibility check right after a page-changing
+    action fails before the element appears. `Wait For Elements State` waits
+    under the library timeout. It is a plain keyword with fixed arguments, so
+    Robot resolves its arguments once (backslash escapes survive) and dryrun
+    still checks them — `Wait For Condition` does neither.
+
+    Only an indented step that is exactly that check is rewritten; anything
+    whose meaning could change is left alone: an assigned result (WFES returns
+    nothing), any state other than lowercase `visible`, any other operator, any
+    extra cell except a `message=` without `{}` placeholders (WFES formats the
+    message with only selector/function/timeout) and a trailing comment,
+    wrapped calls, settings, comments and continuation lines.
+
+    The whole file is left unchanged when it catches errors around code the
+    line cannot see: a `TRY` block, or its own keywords together with an
+    error-catching wrapper. There a longer wait can turn a caught failure into
+    a pass/fail flip or a 30s stall. Idempotent.
+
+    Args:
+        robot_code: The Robot Framework source as a string.
+
+    Returns:
+        The same string with matching lines rewritten. Returns the input
+        unchanged when it contains no "element states" text (fast path).
+    """
+    if not robot_code:
+        return robot_code
+    lower = robot_code.lower()
+    if "element states" not in lower and "element_states" not in lower:
+        return robot_code
+
+    has_try = False
+    has_keywords_section = False
+    has_catching_wrapper = False
+    rewrote = 0
+    out_lines = []
+    for line in robot_code.split("\n"):
+        if _KEYWORDS_SECTION_RE.match(line):
+            has_keywords_section = True
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("..."):
+            out_lines.append(line)
+            continue
+
+        parts = _CELL_SPLIT_RE.split(line)
+        cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
+        # parts[0] is empty only for an indented line; anything else is a
+        # section header or a test/keyword name, never a step.
+        if not cells or parts[0]:
+            out_lines.append(line)
+            continue
+
+        first = 0
+        while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
+            first += 1
+        if first < len(cells):
+            step_keyword = parts[cells[first]]
+            if step_keyword.strip() == "TRY":
+                has_try = True
+            elif _canon_keyword(step_keyword) in _ERROR_CATCHING_WRAPPERS:
+                has_catching_wrapper = True
+
+        if first or len(cells) < 4:
+            out_lines.append(line)
+            continue
+
+        keyword_idx, _, operator_idx, state_idx = cells[:4]
+        keyword_cell = parts[keyword_idx]
+        if _canon_keyword(keyword_cell) != "get element states":
+            out_lines.append(line)
+            continue
+
+        operator = re.sub(r"[\s_]+", "", parts[operator_idx].lower())
+        target_state = _VISIBILITY_OPERATORS.get(operator)
+        state_cell = parts[state_idx]
+        if target_state is None or state_cell.strip() != "visible":
+            out_lines.append(line)
+            continue
+
+        extras_ok = True
+        for i in cells[4:]:
+            cell = parts[i].strip()
+            if cell.startswith("#"):
+                break
+            if not cell.startswith("message=") or "{" in cell or "}" in cell:
+                extras_ok = False
+                break
+        if not extras_ok:
+            out_lines.append(line)
+            continue
+
+        name = keyword_cell.strip()
+        prefix = (
+            name.rsplit(".", 1)[0].strip() + "."
+            if "." in name and not name.startswith(".")
+            else ""
+        )
+        parts[keyword_idx] = f"{prefix}Wait For Elements State"
+        parts[state_idx] = state_cell.replace("visible", target_state, 1)
+        # Cells sit at even indices with their separators between them, so the
+        # separator in front of the operator is the part just before it.
+        del parts[operator_idx - 1 : operator_idx + 1]
+        out_lines.append("".join(parts))
+        rewrote += 1
+
+    if not rewrote:
+        return robot_code
+    if has_try or (has_keywords_section and has_catching_wrapper):
+        logger.info(
+            f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
+            "unchanged — the file catches errors (TRY, or its own keywords under an "
+            "error-catching wrapper), where a longer wait could change the outcome"
+        )
+        return robot_code
+    logger.info(
+        f"Visibility check normalizer: rewrote {rewrote} Get Element States "
+        "line(s) to Wait For Elements State"
+    )
+    return "\n".join(out_lines)
 
 
 def normalize_robot_code(robot_code: str) -> str:
