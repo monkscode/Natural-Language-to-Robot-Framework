@@ -588,6 +588,30 @@ class TestExtractAndNormalize:
         assert second == first
         assert second.count("timeout=") == 1
 
+    def test_get_element_states_rewritten_by_the_pipeline(self):
+        """The rewrite is only worth anything if it is actually wired in here.
+
+        Without this test, deleting the rewrite call from the pipeline leaves
+        the whole suite green.
+        """
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    #login\n"
+               "    Get Element States    #heading    contains    visible")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Wait For Condition    Element States    css=#heading    contains    visible" in out
+        assert "Get Element States    css=#heading" not in out
+
+    def test_get_element_states_rewrite_survives_a_repair_round_trip(self):
+        """This function runs on BOTH the generation path and the dryrun repair
+        path; a repair pass re-running cleanup on its own output must not
+        double-rewrite or corrupt an already-rewritten line."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Get Element States    ${h}    contains    visible")
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert second == first
+        assert first.count("Wait For Condition") == 1
+
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
