@@ -321,6 +321,8 @@ _VISIBILITY_OPERATORS = {"contains": "visible", "*=": "visible", "notcontains": 
 # inside one of the file's own keywords can be reached through them, and there a
 # 30s wait instead of a ~1s check changes the outcome (a probe that used to
 # return False quickly now waits, or flips to True when the element is late).
+# `Run Keyword And Continue On Failure` is left out on purpose: the failure still
+# fails the test, so a longer wait there only removes false failures.
 _ERROR_CATCHING_WRAPPERS = frozenset({
     "run keyword and return status",
     "run keyword and ignore error",

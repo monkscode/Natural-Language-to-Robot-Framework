@@ -636,6 +636,14 @@ _SUITE = "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
                   "    Get Element States    id=x    contains    visible\n",
          _SUITE + "    Check Dash\n\n*** Keywords ***\nCheck Dash\n"
                   f"    {_WFES}    id=x    visible\n"),
+        ("own keyword under Run Keyword And Continue On Failure is rewritten: "
+         "that wrapper does not swallow the failure",
+         _SUITE + "    Run Keyword And Continue On Failure    Check Dash\n\n"
+                  "*** Keywords ***\nCheck Dash\n"
+                  "    Get Element States    id=x    contains    visible\n",
+         _SUITE + "    Run Keyword And Continue On Failure    Check Dash\n\n"
+                  "*** Keywords ***\nCheck Dash\n"
+                  f"    {_WFES}    id=x    visible\n"),
         ("a direct wrapper without own keywords does not block other checks",
          _SUITE + "    ${ok}=    Run Keyword And Return Status    Get Element States    id=p    contains    visible\n"
                   "    Get Element States    id=x    contains    visible\n",
