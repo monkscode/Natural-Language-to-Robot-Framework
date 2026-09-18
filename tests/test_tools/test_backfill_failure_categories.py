@@ -8,6 +8,8 @@ Depends on: pytest, unittest.mock
 """
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tools.backfill_failure_categories import (
     main,
     plan_backfill,
@@ -95,19 +97,29 @@ ANTI_PATTERN_ROWS = [
 ]
 
 
-def _fake_connection():
+def _fake_connection(update_rowcount: int = 1):
+    """A psycopg-shaped double: SELECTs return rows, writes report a rowcount."""
     conn = MagicMock()
 
     def execute(sql, params=None):
         cursor = MagicMock()
+        cursor.rowcount = 1
         if sql.startswith("SELECT") and "FROM execution_records" in sql:
             cursor.fetchall.return_value = EXECUTION_ROWS
         elif sql.startswith("SELECT") and "FROM anti_patterns" in sql:
             cursor.fetchall.return_value = ANTI_PATTERN_ROWS
+        elif sql.startswith("UPDATE"):
+            cursor.rowcount = update_rowcount
         return cursor
 
     conn.execute.side_effect = execute
     return conn
+
+
+def _params(conn, prefix: str) -> list:
+    """The bound parameters of every statement starting with prefix, in order."""
+    return [call.args[1] for call in conn.execute.call_args_list
+            if call.args[0].startswith(prefix)]
 
 
 def _run(argv, conn):
@@ -151,5 +163,51 @@ def test_apply_snapshots_everything_before_its_first_write():
     deletes = [s for s in statements if s.startswith("DELETE")]
     assert any("FROM learning_anchors" in s for s in deletes)
     assert any("FROM anti_patterns" in s for s in deletes)
-    assert len([s for s in statements if s.startswith("UPDATE")]) == 2
+    assert len([s for s in statements if s.startswith("UPDATE execution_records")]) == 1
+    assert len([s for s in statements if s.startswith("UPDATE anti_patterns")]) == 1
+    assert len([s for s in statements if s.startswith("UPDATE execution_embeddings")]) == 1
     conn.commit.assert_called_once()
+
+
+def test_apply_binds_the_new_label_and_the_row_id():
+    conn = _fake_connection()
+
+    _run(["--apply"], conn)
+
+    assert _params(conn, "UPDATE execution_records") == [("C1", "wf-1")]
+    assert _params(conn, "UPDATE anti_patterns") == [("C1", "7")]
+    assert _params(conn, "DELETE FROM learning_anchors") == [([10],)]
+    assert _params(conn, "DELETE FROM anti_patterns") == [([10],)]
+
+
+def test_apply_mirrors_each_relabelled_run_onto_its_embedding_row():
+    conn = _fake_connection()
+
+    _run(["--apply"], conn)
+
+    assert _params(conn, "UPDATE execution_embeddings") == [("C1", "wf-1")]
+    snapshot_mirrors = [call.args[1] for call in conn.execute.call_args_list
+                        if call.args[0].startswith("INSERT INTO e5b_backfill_")
+                        and "FROM execution_embeddings" in call.args[0]]
+    assert snapshot_mirrors == [("C1", "wf-1")]
+
+
+def test_a_relabel_that_matches_no_row_rolls_the_run_back():
+    conn = _fake_connection(update_rowcount=0)
+
+    with pytest.raises(RuntimeError, match="expected 1 row relabelled"):
+        _run(["--apply"], conn)
+
+    conn.commit.assert_not_called()
+
+
+def test_apply_with_nothing_to_change_takes_no_snapshot(capsys):
+    conn = _fake_connection()
+    conn.execute.side_effect = lambda sql, params=None: MagicMock(
+        **{"fetchall.return_value": [], "rowcount": 0})
+
+    _run(["--apply"], conn)
+
+    assert [s for s in _statements(conn) if not s.startswith("SELECT")] == []
+    conn.commit.assert_not_called()
+    assert "Nothing to apply" in capsys.readouterr().out
