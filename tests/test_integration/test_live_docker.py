@@ -150,7 +150,9 @@ class TestRunMountIsolation:
             client.images.get(IMAGE_TAG)
         except docker.errors.ImageNotFound:
             pytest.skip(f"Image '{IMAGE_TAG}' not built — run build_image first")
-        except docker.errors.DockerException as e:
+        # get_docker_client re-raises a failed connection as the builtin
+        # ConnectionError, which is not a DockerException subclass.
+        except (ConnectionError, docker.errors.DockerException) as e:
             pytest.skip(f"Docker unavailable: {e}")
         return client
 
