@@ -95,6 +95,7 @@ class ExecutionRecord:
 
     # Failure Details
     failure_category: Optional[str] = None    # From taxonomy (A1, B2, C1, etc.)
+    failure_specific_type: str | None = None  # E5b: precise cause; in-memory only, never stored
     failed_keyword: Optional[str] = None
     error_message: Optional[str] = None
 

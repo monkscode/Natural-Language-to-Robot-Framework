@@ -105,7 +105,7 @@ class MockFailureAnalyzer:
 class MockFailureAnalysis:
     """Mimics FailureAnalysis return shape."""
     category: str = "A1"
-    failure_type: str = "missing_keyword"
+    specific_type: str = "missing_keyword"  # FailureAnalysis.specific_type
     failed_keyword: str = "FOR"
     error_message: str = "No keyword with name 'FOR' found."
     confidence: float = 0.9

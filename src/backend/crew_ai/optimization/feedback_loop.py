@@ -1006,6 +1006,9 @@ class FeedbackLoop:
                 failure_category=(
                     failure_analysis.category if failure_analysis else None
                 ),
+                failure_specific_type=(
+                    failure_analysis.specific_type if failure_analysis else None
+                ),
                 failed_keyword=(
                     failure_analysis.failed_keyword
                     if failure_analysis else None

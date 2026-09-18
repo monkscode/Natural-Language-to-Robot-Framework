@@ -72,7 +72,7 @@ class MockFailureAnalyzer:
 @dataclass
 class MockFailureAnalysis:
     category: str = "A1"
-    failure_type: str = "missing_keyword"
+    specific_type: str = "missing_keyword"  # FailureAnalysis.specific_type
     failed_keyword: str = "FOR"
     error_message: str = "Missing FOR loop"
     confidence: float = 0.9
@@ -558,6 +558,18 @@ class TestFeedbackLoop:
         assert record.failure_category == "A1"
         assert record.failed_keyword == "FOR"
         assert len(fa.analyze_calls) == 1
+
+    def test_fl_process_execution_carries_specific_type(self, in_memory_db):
+        """E5b: the engines see the precise type; the store never persists it."""
+        fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
+        fa._result = MockFailureAnalysis()
+        fl.process_execution(
+            workflow_id="wf-f3", user_query="verify rows",
+            url="https://demoqa.com", robot_code="*** Test Cases ***",
+            test_status="failed", output_xml_path="/fake/output.xml",
+        )
+        assert ae.learn_calls[0].failure_specific_type == "missing_keyword"
+        assert em.get("wf-f3").failure_specific_type is None
 
     def test_fl_process_execution_failed_no_xml(self, in_memory_db):
         fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
