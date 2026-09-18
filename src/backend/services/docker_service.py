@@ -629,6 +629,25 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         raise RuntimeError(f"Docker container execution failed: {e}")
 
 
+def _join_failure_header(message: str) -> str:
+    """Put a Robot Framework failure header and the real message on one line.
+
+    Robot Framework 7 starts some test failure messages with a header line and
+    puts the actual error on the next non-empty line: "Setup failed:",
+    "Teardown failed:", "Several failures occurred:". The SPA shows only the
+    first line of the Error: entry, so without this it would show just the
+    header. Anything else is returned unchanged.
+    """
+    lines = message.split("\n")
+    first = lines[0].strip()
+    if not (first.endswith("failed:") or first == "Several failures occurred:"):
+        return message
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip():
+            return "\n".join([f"{first} {line.strip()}", *lines[index + 1:]])
+    return message
+
+
 def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit_code: int) -> str:
     """
     Extract logs from Robot Framework output files instead of Docker container logs.
@@ -677,7 +696,11 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
                     f"🧪 LOG EXTRACTOR: Found {len(tests)} test(s) in suite")
                 for test in tests:
                     test_name = test.get('name', 'Unknown Test')
-                    test_status = test.find('.//status')
+                    # Direct child, not './/status': a <test>'s own <status> is its
+                    # LAST child, after every <kw>, so './/' matched the first nested
+                    # keyword's status and reported failing tests as PASS — which also
+                    # skipped the Error: branch below, so the message never reached the UI.
+                    test_status = test.find('status')
                     if test_status is not None:
                         status = test_status.get('status', 'UNKNOWN')
                         start_time = test_status.get('starttime', '')
@@ -692,7 +715,8 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
                         if status == 'FAIL':
                             message = test_status.text
                             if message:
-                                logs.append(f"    Error: {message.strip()}")
+                                logs.append(
+                                    f"    Error: {_join_failure_header(message.strip())}")
 
                             # Extract keyword failures for more detail
                             keywords = test.findall('.//kw')
