@@ -331,6 +331,27 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 "This usually means the test file was not written correctly before Docker execution."
             )
 
+        # The run's OWN directory is the mount source — never the staging root.
+        # A generated test is arbitrary Robot code from an authenticated user,
+        # and Robot Framework ships OperatingSystem/Evaluate, so whatever is
+        # mounted here is readable and writable by it. Mounting the root handed
+        # every run every other run's log.html (which records typed passwords)
+        # and test.robot, across orgs, defeating the per-owner /reports gate
+        # that exists for exactly those files. File modes cannot separate the
+        # runs: run dirs are 0777 (artifact_store.SHARED_DIR_MODE) and every
+        # runner container is the same uid.
+        #
+        # os.path.join, matching host_test_file below: on Windows the path is
+        # still a drive path, and inside the Linux FastAPI container
+        # normalize_docker_mount_source has already rewritten it to a
+        # forward-slash /run/desktop/mnt/host/... path. The separator the
+        # running OS picks is the right one in both cases.
+        #
+        # The directory always exists by now — the caller wrote test.robot into
+        # it via the artifact store, and the container_test_file check above
+        # has just confirmed it — so Docker never auto-creates it as root.
+        host_run_dir = os.path.join(normalized_host_robot_tests_dir, run_id)
+
         host_test_file = os.path.join(normalized_host_robot_tests_dir, run_id, test_filename)
         if not os.path.exists(host_test_file):
             if normalized_host_robot_tests_dir.startswith('/run/desktop/mnt/host/'):
@@ -349,7 +370,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         container_config = {
             "image": IMAGE_TAG,
             "command": robot_command,
-            "volumes": {normalized_host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
+            "volumes": {host_run_dir: {'bind': f'/app/robot_tests/{run_id}', 'mode': 'rw'}},
             "working_dir": "/app",
             "detach": True,  # Run detached to manage container lifecycle
             "auto_remove": False,  # Don't auto-remove so we can get logs properly
@@ -372,7 +393,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             container_config["read_only"] = True
             container_config["tmpfs"] = {"/tmp": "size=512m,exec"}
         logging.info(
-            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {normalized_host_robot_tests_dir}:/app/robot_tests")
+            f"🐳 DOCKER SERVICE: Container config created for robot-test-{run_id} with volume {host_run_dir}:/app/robot_tests/{run_id}")
 
         # Clean up any existing container with the same name
         container_name = f"robot-test-{run_id}"

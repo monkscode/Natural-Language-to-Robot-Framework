@@ -17,6 +17,8 @@ Tests:
   - get_docker_status returns image info
 """
 
+import os
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -150,3 +152,39 @@ def test_run_test_in_container_applies_hardening(tmp_path):
     assert captured.get("network_mode") != "none"
     # read_only gated off by default
     assert captured.get("read_only", False) is False
+
+
+def test_run_test_in_container_mounts_only_the_runs_own_directory(tmp_path):
+    """The bind mount IS the tenant boundary. A Robot test can read files
+    (OperatingSystem, Evaluate), every runner container is the same uid, and
+    run directories are 0777 — so mounting the whole staging root handed every
+    run every other run's log.html (which records typed passwords) and
+    test.robot, read-write. Only the run's own directory may be mounted, at
+    the same in-container path the robot command already uses."""
+    captured = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        raise _Captured()
+
+    client = MagicMock()
+    client.containers.run.side_effect = _capture
+    client.containers.get.side_effect = docker_service.docker.errors.NotFound("none")
+
+    with patch.object(docker_service, "ROBOT_TESTS_DIR", str(tmp_path)), \
+         patch.object(docker_service, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(docker_service, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch("os.path.exists", return_value=True):
+        try:
+            docker_service.run_test_in_container(client, "r1", "test.robot")
+        except RuntimeError:
+            pass
+
+    assert captured["volumes"] == {
+        os.path.join(str(tmp_path), "r1"): {"bind": "/app/robot_tests/r1", "mode": "rw"},
+    }
+    # The command keeps addressing the run through the per-run path, so
+    # narrowing the mount changes nothing the container sees.
+    assert captured["command"] == [
+        "robot", "--outputdir", "/app/robot_tests/r1", "/app/robot_tests/r1/test.robot",
+    ]

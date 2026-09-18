@@ -692,3 +692,42 @@ def test_validate_and_repair_passes_via_client(monkeypatch):
             "gemini", "gemini-2.5-flash", progress_queue=None)
     assert out["dryrun_status"] == "passed"
     rc.dryrun.assert_called_once()
+
+
+def test_dryrun_container_mounts_only_the_runs_dryrun_directory(tmp_path):
+    """Same tenant boundary as run_test_in_container: the gate container gets
+    the run's dryrun/ directory and nothing else, at the in-container path the
+    robot --dryrun command already uses."""
+    captured = {}
+    client = MagicMock()
+
+    def _capture(**kw):
+        captured.update(kw)
+        raise _Captured()
+    client.containers.run.side_effect = _capture
+
+    store = MagicMock()
+    store.run_dir.return_value = tmp_path / "r1"
+
+    with patch.object(ds, "get_artifact_store", return_value=store), \
+         patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch.object(ds, "_force_remove_stale_container"):
+        try:
+            ds.run_dryrun_in_container(client, "r1", "*** Test Cases ***\n")
+        except _Captured:
+            pass
+
+    assert captured["volumes"] == {
+        os.path.join(str(tmp_path), "r1", "dryrun"): {
+            "bind": "/app/robot_tests/r1/dryrun", "mode": "rw"},
+    }
+    assert captured["command"] == [
+        "robot", "--dryrun",
+        "--outputdir", "/app/robot_tests/r1/dryrun",
+        "/app/robot_tests/r1/dryrun/dryrun.robot",
+    ]
+    # The mount is only correct if the file the command names is inside it.
+    # Asserting the config dict alone passes even when the two paths disagree.
+    mount_source = next(iter(captured["volumes"]))
+    assert os.path.exists(os.path.join(mount_source, "dryrun.robot"))

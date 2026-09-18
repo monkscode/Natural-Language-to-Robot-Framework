@@ -342,11 +342,19 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
     ]
     host_robot_tests_dir = resolve_host_robot_tests_dir(client)
     normalized_host_robot_tests_dir = normalize_docker_mount_source(host_robot_tests_dir)
+    # This run's dryrun/ directory ONLY — same tenant boundary as
+    # docker_service.run_test_in_container, and for the same reason: the code
+    # under test is arbitrary user-supplied Robot, so the mount is the limit of
+    # what it can read and write. Narrower than the real run's mount because
+    # the gate writes nothing outside dryrun/ (that isolation is what keeps it
+    # from clobbering the run's own output.xml). make_shared_dir above has
+    # already created it, so Docker never auto-creates it as root.
+    host_dryrun_dir = os.path.join(normalized_host_robot_tests_dir, run_id, "dryrun")
 
     container_config = {
         "image": IMAGE_TAG,
         "command": robot_command,
-        "volumes": {normalized_host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
+        "volumes": {host_dryrun_dir: {'bind': f'/app/robot_tests/{run_id}/dryrun', 'mode': 'rw'}},
         "working_dir": "/app",
         "detach": True,
         "auto_remove": False,
