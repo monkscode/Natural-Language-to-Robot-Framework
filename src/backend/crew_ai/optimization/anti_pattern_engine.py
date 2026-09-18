@@ -112,6 +112,12 @@ class AntiPatternEngine(LearningEngine):
         if not record.failure_category or record.failure_category == "unknown":
             return
 
+        # E5b: a placeholder locator means discovery never found the element. The
+        # generated snippet is not a pattern to avoid, and placeholders are the
+        # largest failure class — storing them would dominate the table with noise.
+        if getattr(record, "failure_specific_type", None) == "placeholder_never_resolved":
+            return
+
         if not record.error_message:
             return
 

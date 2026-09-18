@@ -16,9 +16,15 @@ Design doc reference: Section 7 (Component 2)
 Failure taxonomy: the full taxonomy defines 28 codes (A1-A8, B1-B6, C1-C6,
                   D1-D4, E1-E4) in the learning-system task docs, which are
                   archived and never shipped with the repo. Layer 1 implements
-                  15 of them:
+                  15 of them, plus one E5b code:
 
-                      A1 A2 A5 A7  B1 B3 B4 B6  C1 C2 C3  D1 D3 D4  E1
+                      A1 A2 A5 A7  B1 B3 B4 B6  C1 C2 C3 C7  D1 D3 D4  E1
+
+                  C7 (wrong element kind) is an E5b addition, 2026-09-18: the
+                  locator resolved, but the element cannot accept the keyword's
+                  action (Playwright: "Element is not an <input>...",
+                  "<iframe> was expected"). No archived code covered it; C4/C5/C6
+                  mean iframe / Shadow DOM / dynamic element and are unused.
 
                   The other 13 are not a gap in Layer 1 - they were always
                   scoped to Layers 2 and 3, both still placeholders above. Do
@@ -336,6 +342,181 @@ class FailureClassifier:
         },
     }
 
+    # E5b: every Browser-library (Playwright) failure starts with the name of
+    # its JavaScript error class. Only messages that start this way reach the
+    # Playwright rules, so a generated variable or keyword name, or page text
+    # quoted in an assertion, can never be read as a Playwright error.
+    PLAYWRIGHT_PREFIXES = ("Error: ", "TimeoutError: ")
+
+    # BuiltIn `Wait Until Keyword Succeeds` wraps the last attempt's error
+    # (Robot Framework 7.4.2 wording).
+    RETRY_WRAPPER = "The last error was: "
+
+    # Call-log markers for a locator wait that timed out after the locator
+    # resolved (Playwright 1.62 wording). Playwright logs the element's state on
+    # every retry, so the marker that appears LAST is the state the element was
+    # in when time ran out. Matched by position, not by list order, and only in
+    # the log after "locator resolved to": the selector quoted before it is
+    # page-derived text and may contain any of these words.
+    WAIT_TAIL_MARKERS = (
+        ("intercepts pointer events", "D4", "click_intercepted"),
+        ("element is not enabled", "D3", "element_disabled"),
+        ("option being selected is not enabled", "D3", "element_disabled"),
+        ("element is not editable", "D3", "element_not_editable"),
+        ("element is not stable", "D3", "element_resolved_but_not_actionable"),
+        ("element is not visible", "C1", "element_not_visible"),
+        ("resolved to hidden", "C1", "element_not_visible"),
+        ("outside of the viewport", "C1", "element_not_visible"),
+        ("detached from the dom", "C3", "stale_element"),
+        ("did not find some options", "B3", "option_not_found"),
+    )
+
+    @staticmethod
+    def _rule_result(category: str, specific_type: str, error_message: str) -> FailureAnalysis:
+        """Build a Layer-1 result for a message matched by an E5b rule."""
+        return FailureAnalysis(
+            category=category,
+            specific_type=specific_type,
+            confidence=0.95,
+            source="regex",
+            error_message=error_message,
+        )
+
+    @classmethod
+    def _unwrap_retry(cls, message: str) -> str:
+        """The last attempt's error inside a Wait Until Keyword Succeeds wrapper."""
+        if cls.RETRY_WRAPPER in message:
+            return message.split(cls.RETRY_WRAPPER, 1)[1]
+        return message
+
+    def _classify_playwright(self, error_message: str) -> FailureAnalysis | None:
+        """Classify Browser-library (Playwright) runtime errors.
+
+        Runs BEFORE SEED_PATTERNS so the generic "Timeout ... exceeded" rule can no
+        longer swallow placeholder, locator, overlay and disabled-element failures.
+        Returns None for anything that is not a Playwright error, leaving the seed
+        patterns untouched.
+
+        Order follows the E5b evaluation: placeholder -> navigation -> strict mode ->
+        wrong element kind -> invalid selector -> locator wait (call-log tail).
+        Substring checks only. Playwright states the failure on the FIRST line
+        ("TimeoutError: locator.click: Timeout 10000ms exceeded."); the call log
+        under it quotes selectors, URLs and element HTML — page-derived text — so
+        the structural checks read the first line only.
+        """
+        message = self._unwrap_retry(error_message)
+        if not message.startswith(self.PLAYWRIGHT_PREFIXES):
+            return None
+        low = message.lower()
+        first_line = low.partition("\n")[0]
+
+        def result(category: str, specific_type: str) -> FailureAnalysis:
+            return self._rule_result(category, specific_type, error_message)
+
+        # 1. Placeholder: generation shipped a locator discovery never resolved.
+        #    Our own token, carried in the call log's selector.
+        if "PLACEHOLDER_FOR" in message:
+            return result("C1", "placeholder_never_resolved")
+
+        # 2. Navigation.
+        if "net::err" in first_line:
+            return result("D1", "navigation_network_error")
+        if "page.goto" in first_line:
+            if "timeout" in first_line:
+                return result("D1", "page_load_timeout")
+            return result("D1", "navigation_failed")
+
+        # 3. Strict mode.
+        if "strict mode violation" in first_line:
+            return result("C2", "multiple_elements_found")
+
+        # 4. Wrong element kind: it resolved, but the keyword cannot use it.
+        #    "> was expected" (not "was expected"): Playwright writes
+        #    "<iframe> was expected".
+        #    "undefined is not iterable" is V8's TypeError, not a Playwright
+        #    template, so it only means a wrong element kind when the JavaScript
+        #    ran against a RESOLVED ELEMENT: Browser's select getters do
+        #    Array.from(element.selectedOptions), which is undefined on anything
+        #    that is not a <select>. A page- or frame-level evaluate resolved no
+        #    element, so it can never be this. "locator.evaluate" also covers
+        #    "locator.evaluateAll".
+        if ("is not an <input>" in first_line
+                or "is not a <select>" in first_line
+                or "not a checkbox or radio button" in first_line
+                or "> was expected" in first_line
+                or (("elementhandle.evaluate" in first_line
+                     or "locator.evaluate" in first_line)
+                    and "undefined is not iterable" in first_line)):
+            return result("C7", "wrong_element_kind")
+
+        # 5. Invalid selector syntax — a malformed locator argument.
+        if ("while parsing css selector" in first_line
+                or "while parsing selector" in first_line
+                or "invalidselectorerror" in first_line
+                or "unknown engine" in first_line
+                or "is not a valid selector" in first_line):
+            return result("B3", "invalid_selector_syntax")
+
+        # 6. Locator wait timeout. Page-level waits (page.waitForURL,
+        #    page.waitForLoadState) have no "locator." on the first line and stay
+        #    with the seed D1 rule.
+        if "timeout" in first_line and "locator." in first_line:
+            # Waiting for the element to go away: it was found and stayed.
+            if ") to be hidden" in low or ") to be detached" in low:
+                return result("E1", "element_still_present")
+            resolved_at = low.find("locator resolved to")
+            if resolved_at < 0:
+                return result("C1", "element_never_resolved")
+            call_log_tail = low[resolved_at:]
+            position, category, specific_type = max(
+                (
+                    (call_log_tail.rfind(marker), category, specific_type)
+                    for marker, category, specific_type in self.WAIT_TAIL_MARKERS
+                ),
+                # Position alone decides; on a tie max keeps the first-listed
+                # marker, so a longer variant of one cannot win by alphabet.
+                key=lambda found: found[0],
+            )
+            if position >= 0:
+                return result(category, specific_type)
+            return result("D3", "element_resolved_but_not_actionable")
+
+        return None
+
+    def _classify_after_seed(self, error_message: str) -> FailureAnalysis | None:
+        """Robot Framework / Python messages no seed pattern recognises.
+
+        Runs AFTER SEED_PATTERNS, so it can only label what used to be unknown. It
+        can never take a message from an existing rule, even when a variable name
+        or quoted page text happens to contain one of these words.
+        """
+        message = self._unwrap_retry(error_message)
+        low = message.lower()
+
+        def result(category: str, specific_type: str) -> FailureAnalysis:
+            return self._rule_result(category, specific_type, error_message)
+
+        # Assertion where the read produced nothing — a read failure in disguise.
+        if message.startswith("'' ") and ("does not contain" in low or "should" in low):
+            return result("E1", "assertion_empty_actual")
+
+        # Robot-level data errors.
+        if ("cannot be converted to" in low
+                or "used with invalid index" in low
+                or "evaluating expression" in low):
+            return result("B3", "robot_data_error")
+
+        # Browser's Get Attribute: "Attribute 'title' not found!".
+        if "attribute '" in low and "' not found" in low:
+            return result("B3", "attribute_missing")
+
+        # Robot Framework 7 writes "expected N arguments, got M" in lower case;
+        # the seed B4 pattern expects "Expected" and never matches it.
+        if " expected " in low and ("arguments, got" in low or "argument, got" in low):
+            return result("B4", "wrong_argument_count")
+
+        return None
+
     def classify(
         self,
         error_message: str,
@@ -353,8 +534,20 @@ class FailureClassifier:
                 source="none",
             )
 
+        # Layer 1a: Playwright runtime errors (E5b). Must precede SEED_PATTERNS:
+        # the generic timeout rule there matches almost every Browser-library
+        # failure and used to label all of them D1 page_load_timeout.
+        result = self._classify_playwright(error_message)
+        if result:
+            return result
+
         # Layer 1: Regex patterns
         result = self._check_regex_patterns(error_message)
+        if result:
+            return result
+
+        # Layer 1b: Robot Framework / Python messages the seed patterns miss (E5b).
+        result = self._classify_after_seed(error_message)
         if result:
             return result
 

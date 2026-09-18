@@ -385,7 +385,9 @@ class TestFailureClassifier:
         ("strict mode violation: locator resolved to 3 elements", "C2", "multiple_elements_found", "strict_mode"),
         ("Element is not attached to the DOM", "C3", "stale_element", "not_attached"),
         ("Element is not visible in the page", "C1", "element_not_visible", "not_visible"),
-        ("TimeoutError: locator.elementHandle: Timeout 10000ms exceeded.", "D1", "page_load_timeout", "timeout"),
+        # E5b: a LOCATOR timeout is an element failure, not a page-load one.
+        # "Navigation timeout exceeded" (next row) is still D1 — it is a page load.
+        ("TimeoutError: locator.elementHandle: Timeout 10000ms exceeded.", "C1", "element_never_resolved", "timeout"),
         ("Navigation timeout exceeded", "D1", "page_load_timeout", "page_load_timeout"),
         ("Element click intercepted by another element", "D4", "popup_overlay_blocking", "click_intercepted"),
         ("Element is not interactable at this point", "D3", "animation_or_disabled", "not_interactable"),
@@ -547,14 +549,14 @@ class TestFailureAnalyzer:
             "Analyzer: passing XML -> confidence=1.0"
         )
 
-    def test_timeout_failure_category_d1(self, tmp_dir):
-        """Verify FailureAnalyzer classifies timeout failure correctly."""
+    def test_locator_timeout_category_c1(self, tmp_dir):
+        """A locator that never resolved is C1, not a page-load timeout (E5b)."""
         analyzer = FailureAnalyzer()
         xml_path = _write_xml(tmp_dir, FAILING_XML_TIMEOUT, "analyzer_timeout.xml")
 
         result = analyzer.analyze(xml_path, user_query="get text of element")
-        assert result.category == "D1", (
-            f"Analyzer: timeout failure -> D1: got {result.category}"
+        assert result.category == "C1", (
+            f"Analyzer: locator timeout -> C1: got {result.category}"
         )
 
     def test_timeout_failure_source_regex(self, tmp_dir):
