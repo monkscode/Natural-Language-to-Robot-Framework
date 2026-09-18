@@ -460,8 +460,13 @@ class FailureClassifier:
                 return result("C1", "element_never_resolved")
             call_log_tail = low[resolved_at:]
             position, category, specific_type = max(
-                (call_log_tail.rfind(marker), category, specific_type)
-                for marker, category, specific_type in self.WAIT_TAIL_MARKERS
+                (
+                    (call_log_tail.rfind(marker), category, specific_type)
+                    for marker, category, specific_type in self.WAIT_TAIL_MARKERS
+                ),
+                # Position alone decides; on a tie max keeps the first-listed
+                # marker, so a longer variant of one cannot win by alphabet.
+                key=lambda found: found[0],
             )
             if position >= 0:
                 return result(category, specific_type)

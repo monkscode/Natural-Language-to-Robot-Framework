@@ -9,6 +9,8 @@ The messages come from three places:
 Referenced by: crew_ai/optimization/failure_analyzer.py
 Depends on: pytest
 """
+from unittest.mock import patch
+
 import pytest
 
 from src.backend.crew_ai.optimization.failure_analyzer import FailureClassifier
@@ -339,3 +341,22 @@ def test_last_logged_state_and_page_text(message, category, specific_type):
 ])
 def test_lookalikes_stay_unknown(message):
     assert FailureClassifier().classify(message).category == "unknown"
+
+
+def test_a_tie_on_position_keeps_the_first_listed_marker():
+    """A longer variant of a marker lands at the same index; list order decides."""
+    message = (
+        "TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
+        "Call log:\n  - locator resolved to <button>Save</button>\n"
+        "  - element is not stable, retrying"
+    )
+    markers = (
+        ("element is not stable", "D3", "element_resolved_but_not_actionable"),
+        ("element is not stable, retrying", "Z9", "would_win_on_alphabet"),
+    )
+
+    with patch.object(FailureClassifier, "WAIT_TAIL_MARKERS", markers):
+        result = FailureClassifier().classify(message)
+
+    assert (result.category, result.specific_type) == (
+        "D3", "element_resolved_but_not_actionable")

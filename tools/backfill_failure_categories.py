@@ -38,6 +38,8 @@ To undo an apply, using the snapshot tables printed on success:
     INSERT INTO anti_patterns SELECT * FROM e5b_backfill_<stamp>_anti_patterns;
     INSERT INTO learning_anchors SELECT * FROM e5b_backfill_<stamp>_anchors;
 
+Once the new labels look right, the three snapshot tables can be dropped.
+
 Run it after the E5b classifier is deployed, so no process is still writing
 old labels while it runs.
 
@@ -107,13 +109,19 @@ def plan_backfill(rows: list[dict]) -> list[dict]:
 
 
 def plan_placeholder_deletions(rows: list[dict]) -> list[str]:
-    """Return the ids of anti-patterns whose own message is a placeholder failure. Pure."""
+    """Return the ids of anti-patterns whose own message is a placeholder failure. Pure.
+
+    A composite row is skipped here for the same reason plan_backfill skips it:
+    its stored message is a sentence the detector wrote about the query, so no
+    message-derived conclusion may act on it.
+    """
     classifier = FailureClassifier()
     return [
         row["id"]
         for row in rows
         if row["table"] == "anti_patterns"
         and row.get("error_message")
+        and row.get("failure_category") not in COMPOSITE_ONLY_CATEGORIES
         and classifier.classify(row["error_message"]).specific_type == PLACEHOLDER_TYPE
     ]
 

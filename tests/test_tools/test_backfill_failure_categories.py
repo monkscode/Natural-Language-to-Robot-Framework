@@ -97,7 +97,7 @@ ANTI_PATTERN_ROWS = [
 ]
 
 
-def _fake_connection(update_rowcount: int = 1):
+def _fake_connection(update_rowcount: int = 1, delete_rowcount: int = 1):
     """A psycopg-shaped double: SELECTs return rows, writes report a rowcount."""
     conn = MagicMock()
 
@@ -110,6 +110,8 @@ def _fake_connection(update_rowcount: int = 1):
             cursor.fetchall.return_value = ANTI_PATTERN_ROWS
         elif sql.startswith("UPDATE"):
             cursor.rowcount = update_rowcount
+        elif sql.startswith("DELETE FROM anti_patterns"):
+            cursor.rowcount = delete_rowcount
         return cursor
 
     conn.execute.side_effect = execute
@@ -211,3 +213,20 @@ def test_apply_with_nothing_to_change_takes_no_snapshot(capsys):
     assert [s for s in _statements(conn) if not s.startswith("SELECT")] == []
     conn.commit.assert_not_called()
     assert "Nothing to apply" in capsys.readouterr().out
+
+
+def test_an_anti_pattern_delete_that_misses_a_row_rolls_the_run_back():
+    conn = _fake_connection(delete_rowcount=0)
+
+    with pytest.raises(RuntimeError, match="expected 1 anti-pattern"):
+        _run(["--apply"], conn)
+
+    conn.commit.assert_not_called()
+
+
+def test_a_composite_anti_pattern_is_never_deleted_from_its_message():
+    """A composite row's message is a sentence about the query, not an error."""
+    rows = [{"table": "anti_patterns", "id": "11",
+             "failure_category": "A1", "error_message": PLACEHOLDER_MSG}]
+
+    assert plan_placeholder_deletions(rows) == []
