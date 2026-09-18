@@ -721,7 +721,10 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
                             # Extract keyword failures for more detail
                             keywords = test.findall('.//kw')
                             for kw in keywords:
-                                kw_status = kw.find('.//status')
+                                # Direct child for the same reason as the test status
+                                # above: a parent keyword's own <status> follows its
+                                # nested <kw> children.
+                                kw_status = kw.find('status')
                                 if kw_status is not None and kw_status.get('status') == 'FAIL':
                                     kw_name = kw.get('name', 'Unknown Keyword')
                                     kw_message = kw_status.text

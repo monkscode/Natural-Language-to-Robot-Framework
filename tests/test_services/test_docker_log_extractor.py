@@ -149,3 +149,41 @@ def test_join_failure_header(message, expected):
     from src.backend.services.docker_service import _join_failure_header
 
     assert _join_failure_header(message) == expected
+
+
+NESTED_FAILING_XML = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <robot generator="Robot 7.4.1" generated="2026-02-18T17:00:00" rpa="false" schemaversion="5">
+    <suite id="s1" name="Test" source="/app/test.robot">
+    <test id="s1-t1" name="Generated Test" line="12">
+    <kw name="Login Keyword" owner="Resource">
+        <kw name="Fill Text" owner="Browser">
+            <status status="PASS" start="2026-02-18T17:00:01" elapsed="0.200"/>
+        </kw>
+        <kw name="Click" owner="Browser">
+            <status status="FAIL" start="2026-02-18T17:00:02" elapsed="10.100">TimeoutError: locator.click: Timeout 10000ms exceeded.</status>
+        </kw>
+        <status status="FAIL" start="2026-02-18T17:00:01" elapsed="10.300">TimeoutError: locator.click: Timeout 10000ms exceeded.</status>
+    </kw>
+    <status status="FAIL" start="2026-02-18T17:00:01" elapsed="10.500">TimeoutError: locator.click: Timeout 10000ms exceeded.</status>
+    </test>
+    <status status="FAIL" start="2026-02-18T17:00:00" elapsed="11.000"/>
+    </suite>
+    <statistics><total><stat pass="0" fail="1" skip="0">All Tests</stat></total></statistics>
+    <errors/>
+    </robot>
+""")
+
+
+def test_failed_keyword_lines_name_only_failing_keywords(tmp_path):
+    """A parent keyword reads its OWN status, not its first child's.
+
+    'Login Keyword' and 'Click' both failed; 'Fill Text' passed and must not
+    appear as a failed keyword.
+    """
+    out = _extract_robot_framework_logs(
+        _write(tmp_path, NESTED_FAILING_XML), str(tmp_path / "log.html"), 1)
+
+    assert "Failed Keyword: Login Keyword" in out, out
+    assert "Failed Keyword: Click" in out, out
+    assert "Failed Keyword: Fill Text" not in out, out
