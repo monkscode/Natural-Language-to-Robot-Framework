@@ -28,7 +28,11 @@ WORKDIR /app
 # published image runs (a local build shadows it and does not — verified
 # 2026-08-19 on both images). Bumped 1.0.32 -> 1.0.35 on 2026-08-19; PyPI
 # declares byte-identical runtime dependencies for both, so that moved
-# browser-service's own code and nothing else. After merging a browser-service
+# browser-service's own code and nothing else. Bumped 1.0.35 -> 1.0.37 on
+# 2026-09-16 for the action-fit and read-target locator rules (on by default;
+# ENABLE_ACTION_FIT=false restores the previous cascade); PyPI again declares
+# identical runtime dependencies, and 1.0.36 only changed a .gitignore line.
+# After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
 # Two mutable surfaces remain, deliberately, and this is NOT a fully reproducible
@@ -60,7 +64,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.35 && \
+    browser-service==1.0.37 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 

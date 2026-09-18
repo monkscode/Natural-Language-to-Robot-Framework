@@ -47,6 +47,7 @@ from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     normalize_robot_code,
+    rewrite_visibility_checks_to_wait,
     strip_redundant_css_prefix,
 )
 from src.backend.core.artifact_store import get_artifact_store, make_shared_dir
@@ -83,8 +84,9 @@ def extract_and_normalize_robot_code(task_output) -> str:
       Strategy 1 — output.pydantic.code (AssemblyOutput)
       Strategy 2 — output.json_dict['code']
       Strategy 3 — raw JSON {"code": "..."} → code, else raw output as-is
-      then: escaped-newline/tab fix → normalize_robot_code → Settings-block trim →
-            trailing-empty-line strip → trailing-JSON-artifact strip.
+      then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
+            Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
+            rewrite_visibility_checks_to_wait → ensure_browser_timeout.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -172,6 +174,13 @@ def extract_and_normalize_robot_code(task_output) -> str:
         if robot_code.endswith(pattern):
             robot_code = robot_code[:-len(pattern)].strip()
             logger.info(f"✅ Stripped trailing JSON artifact: {pattern}")
+
+    # Rewrite `Get Element States … contains visible` to Wait For Elements State:
+    # Get Element States waits only 250ms + a 1s assertion retry, the Browser
+    # import's timeout never applies to it (see robot_code_normalizer). Runs
+    # after the trailing-JSON strip so a last-line check is not hidden behind a
+    # leaked `"}`.
+    robot_code = rewrite_visibility_checks_to_wait(robot_code)
 
     # Step 4: Raise the Browser Library timeout ceiling off its 10s import default.
     # Runs here, after the Settings block is resolved, so BOTH the generation path
