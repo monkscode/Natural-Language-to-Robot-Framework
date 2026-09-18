@@ -124,6 +124,15 @@ NOT_A_CHECKBOX = (
     "Error: locator.check: Error: Not a checkbox or radio button\n"
     "Call log:\n  - waiting for locator('#terms')"
 )
+EVALUATE_WRONG_KIND = (
+    "Error: elementHandle.evaluate: TypeError: undefined is not iterable "
+    "(cannot read property Symbol(Symbol.iterator))\n"
+    "    at Array.from (<anonymous>)"
+)
+LOCATOR_EVALUATE_WRONG_KIND = (
+    "Error: locator.evaluateAll: TypeError: undefined is not iterable "
+    "(cannot read property Symbol(Symbol.iterator))"
+)
 SELECTOR_PARSE = (
     "Error: locator.click: Error while parsing selector `text=` - selector cannot be empty"
 )
@@ -202,6 +211,8 @@ SELECTOR_TEXT_SAYS_WAS_EXPECTED = (
     (STILL_ATTACHED, "E1", "element_still_present"),
     (NOT_A_SELECT, "C7", "wrong_element_kind"),
     (NOT_A_CHECKBOX, "C7", "wrong_element_kind"),
+    (EVALUATE_WRONG_KIND, "C7", "wrong_element_kind"),
+    (LOCATOR_EVALUATE_WRONG_KIND, "C7", "wrong_element_kind"),
     (SELECTOR_PARSE, "B3", "invalid_selector_syntax"),
     (OPTION_DISABLED, "D3", "element_disabled"),
     (NOT_STABLE, "D3", "element_resolved_but_not_actionable"),
@@ -338,9 +349,24 @@ def test_last_logged_state_and_page_text(message, category, specific_type):
     "Call log:\n  - waiting for locator('id=session-timeout-ok')",
     # Only Browser's own "Attribute 'x' not found" is an attribute read.
     "Element with attribute data-row not found in cache",
+    # A JavaScript error inside a PAGE-level evaluate resolved no element at all,
+    # so it cannot be a wrong element kind.
+    "Error: page.evaluate: TypeError: undefined is not iterable "
+    "(cannot read property Symbol(Symbol.iterator))",
+    # Same for a frame-level evaluate.
+    "Error: frame.evaluate: TypeError: undefined is not iterable",
+    # Element-scoped, but a different JavaScript error: not an element-kind signal.
+    "Error: elementHandle.evaluate: TypeError: x.foo is not a function",
 ])
 def test_lookalikes_stay_unknown(message):
     assert FailureClassifier().classify(message).category == "unknown"
+
+
+def test_retry_wrapper_still_reaches_the_evaluate_rule():
+    """Wait Until Keyword Succeeds wraps the last error; it is unwrapped first."""
+    message = "Keyword failed. The last error was: " + EVALUATE_WRONG_KIND
+    result = FailureClassifier().classify(message)
+    assert (result.category, result.specific_type) == ("C7", "wrong_element_kind")
 
 
 def test_a_tie_on_position_keeps_the_first_listed_marker():

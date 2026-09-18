@@ -433,11 +433,20 @@ class FailureClassifier:
         # 4. Wrong element kind: it resolved, but the keyword cannot use it.
         #    "> was expected" (not "was expected"): Playwright writes
         #    "<iframe> was expected".
+        #    "undefined is not iterable" is V8's TypeError, not a Playwright
+        #    template, so it only means a wrong element kind when the JavaScript
+        #    ran against a RESOLVED ELEMENT: Browser's select getters do
+        #    Array.from(element.selectedOptions), which is undefined on anything
+        #    that is not a <select>. A page- or frame-level evaluate resolved no
+        #    element, so it can never be this. "locator.evaluate" also covers
+        #    "locator.evaluateAll".
         if ("is not an <input>" in first_line
                 or "is not a <select>" in first_line
                 or "not a checkbox or radio button" in first_line
                 or "> was expected" in first_line
-                or "undefined is not iterable" in first_line):
+                or (("elementhandle.evaluate" in first_line
+                     or "locator.evaluate" in first_line)
+                    and "undefined is not iterable" in first_line)):
             return result("C7", "wrong_element_kind")
 
         # 5. Invalid selector syntax — a malformed locator argument.
