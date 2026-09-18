@@ -525,17 +525,6 @@ _WFES = "Wait For Elements State"
         ("a comment-eaten locator still reaches dryrun as a broken call",
          "    Get Element States    #1abc    contains    visible",
          f"    {_WFES}    #1abc    visible"),
-        # --- left unchanged ---
-        ("assigned result: WFES returns nothing",
-         "    ${s}=    Get Element States    ${h}    contains    visible", None),
-        ("no operator, assigned",
-         "    ${s}=    Get Element States    ${h}", None),
-        ("no operator",
-         "    Get Element States    ${h}", None),
-        ("then does not assert",
-         "    Get Element States    ${h}    then    bool(value & visible)", None),
-        ("evaluate",
-         "    Get Element States    ${h}    evaluate    'visible' in value", None),
         ("validate value & visible is Browser's documented idiom for the same check",
          "    Get Element States    ${h}    validate    value & visible",
          f"    {_WFES}    ${{h}}    visible"),
@@ -554,6 +543,17 @@ _WFES = "Wait For Elements State"
         ("validate value & visible keeps a trailing comment",
          "    Get Element States    ${h}    validate    value & visible    # why",
          f"    {_WFES}    ${{h}}    visible    # why"),
+        # --- left unchanged ---
+        ("assigned result: WFES returns nothing",
+         "    ${s}=    Get Element States    ${h}    contains    visible", None),
+        ("no operator, assigned",
+         "    ${s}=    Get Element States    ${h}", None),
+        ("no operator",
+         "    Get Element States    ${h}", None),
+        ("then does not assert",
+         "    Get Element States    ${h}    then    bool(value & visible)", None),
+        ("evaluate",
+         "    Get Element States    ${h}    evaluate    'visible' in value", None),
         ("validate with extra spaces splits into cells and is left alone",
          "    Get Element States    ${h}    validate    value  &  visible", None),
         ("validate value & visible & enabled is more than one state",
@@ -662,6 +662,21 @@ def test_rewrite_visibility_checks_validate_respects_the_file_guard():
               "        Log    ${e}\n"
               "    END\n")
     assert rewrite_visibility_checks_to_wait(source) == source
+
+
+def test_rewrite_visibility_checks_validate_converts_without_the_file_guard():
+    """Control for the TRY test above: same file, no TRY, so the line must convert.
+
+    Without this, the guard test passes even when the validate branch never fires.
+    """
+    source = ("*** Settings ***\nLibrary    Browser\n\n"
+              "*** Test Cases ***\nT\n"
+              "    Get Element States    ${h}    validate    value & visible\n")
+    assert rewrite_visibility_checks_to_wait(source) == (
+        "*** Settings ***\nLibrary    Browser\n\n"
+        "*** Test Cases ***\nT\n"
+        "    Wait For Elements State    ${h}    visible\n"
+    )
 
 
 def test_rewrite_visibility_checks_validate_matches_the_live_u07_line():
