@@ -271,3 +271,71 @@ def test_non_empty_assertion_wording_stays_unknown():
     result = FailureClassifier().classify("'Welcome back' does not contain 'Dashboard'")
 
     assert result.category == "unknown"
+
+
+# --- Task 3 review, fix round 1: states Playwright 1.62 also logs, and page text
+# --- in selectors / URLs that must not decide the label ------------------------
+NOT_VISIBLE_THEN_NOT_STABLE = (
+    "TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
+    "Call log:\n  - waiting for locator('#menu')\n"
+    "  - locator resolved to <a id=\"menu\">…</a>\n"
+    "  - attempting click action\n"
+    "    - element is not visible\n"
+    "  - retrying click action\n"
+    "    12 × element is not stable"
+)
+INTERCEPTED_THEN_DETACHED = (
+    "TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
+    "Call log:\n  - waiting for locator('#menu')\n"
+    "  - locator resolved to <a id=\"menu\">…</a>\n"
+    "  - <div class=\"overlay\">…</div> intercepts pointer events\n"
+    "  - element was detached from the DOM, retrying"
+)
+OPTION_NOT_FOUND = (
+    "TimeoutError: locator.selectOption: Timeout 10000ms exceeded.\n"
+    "Call log:\n  - waiting for locator('#size')\n"
+    "  - locator resolved to <select id=\"size\">…</select>\n"
+    "  - did not find some options\n"
+    "  - retrying select option action"
+)
+SELECTOR_TEXT_SAYS_NOT_ENABLED = (
+    "TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
+    "Call log:\n  - waiting for locator('text=\"Two-factor login is not enabled\"')"
+)
+WAIT_FOR_URL_WITH_LOCATOR_IN_URL = (
+    "TimeoutError: page.waitForURL: Timeout 10000ms exceeded.\n"
+    "=========================== logs ===========================\n"
+    "waiting for navigation to \"**/store-locator\" until \"load\""
+)
+RETRY_WRAPPED_EMPTY_ASSERTION = (
+    "Keyword 'Should Contain' failed after retrying for 30 seconds. "
+    "The last error was: '' does not contain 'buy milk'"
+)
+
+
+@pytest.mark.parametrize("message,category,specific_type", [
+    (NOT_VISIBLE_THEN_NOT_STABLE, "D3", "element_resolved_but_not_actionable"),
+    (INTERCEPTED_THEN_DETACHED, "C3", "stale_element"),
+    (OPTION_NOT_FOUND, "B3", "option_not_found"),
+    (SELECTOR_TEXT_SAYS_NOT_ENABLED, "C1", "element_never_resolved"),
+    (WAIT_FOR_URL_WITH_LOCATOR_IN_URL, "D1", "page_load_timeout"),
+    (RETRY_WRAPPED_EMPTY_ASSERTION, "E1", "assertion_empty_actual"),
+])
+def test_last_logged_state_and_page_text(message, category, specific_type):
+    result = FailureClassifier().classify(message)
+
+    assert (result.category, result.specific_type) == (category, specific_type), (
+        f"{message[:60]!r} -> {result.category}/{result.specific_type}, "
+        f"expected {category}/{specific_type}"
+    )
+
+
+@pytest.mark.parametrize("message", [
+    # A closed browser is not a locator timeout, even when the selector says "timeout".
+    "Error: locator.click: Target page, context or browser has been closed\n"
+    "Call log:\n  - waiting for locator('id=session-timeout-ok')",
+    # Only Browser's own "Attribute 'x' not found" is an attribute read.
+    "Element with attribute data-row not found in cache",
+])
+def test_lookalikes_stay_unknown(message):
+    assert FailureClassifier().classify(message).category == "unknown"
