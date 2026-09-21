@@ -461,6 +461,13 @@ def test_a_bad_stamp_is_refused_before_any_connection():
     connect.assert_not_called()
 
 
+def test_an_empty_stamp_is_refused_before_any_connection():
+    connect = MagicMock()
+    with patch("psycopg.connect", connect), pytest.raises(SystemExit):
+        main(["--restore", "", "--apply"])
+    connect.assert_not_called()
+
+
 def test_a_restore_update_that_misses_a_row_rolls_back():
     conn = _fake_restore_connection(update_rowcount=0)
 

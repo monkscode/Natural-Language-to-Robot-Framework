@@ -370,7 +370,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     applied_at = None
-    if args.restore:
+    if args.restore is not None:
         try:
             applied_at = parse_stamp(args.restore)
         except ValueError as exc:
@@ -384,7 +384,7 @@ def main(argv: list[str] | None = None) -> None:
     with psycopg.connect(settings.DATABASE_URL, row_factory=dict_row) as conn:
         # A dry run cannot write, even by mistake.
         conn.read_only = not args.apply
-        if args.restore:
+        if args.restore is not None:
             _restore(conn, args.restore, applied_at, args.apply)
             return
         rows = _load(conn, "execution_records") + _load(conn, "anti_patterns")
