@@ -1442,8 +1442,10 @@ class RunRegistry:
         verbatim). rerun_of links a re-run to its ORIGINAL run (root-flattened
         by the caller) — the run whose learning record user feedback should
         update, since re-run executions skip learning. error_message follows the
-        same newest-non-NULL-wins rule as robot_code: a run that fails, is
-        retried and succeeds keeps the reason it failed the first time.
+        same newest-non-NULL-wins rule as robot_code here -- but set_status,
+        not record_start, sets the FINAL value on a failed or errored run:
+        while a reused row is running, it still carries the old message,
+        and set_status's own exact-write clears it on the next pass.
 
         org_id is used verbatim when the caller supplies one; when it is
         absent and a user_id is present, _lookup_org_id derives it before the
@@ -1592,14 +1594,23 @@ class RunRegistry:
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] record_start failed for {run_id}: {e}")
 
-    def set_status(self, run_id: str, status: str) -> None:
-        """Advance a run's status (no-op if the row was never recorded)."""
+    def set_status(
+        self, run_id: str, status: str, error_message: str | None = None
+    ) -> None:
+        """Advance a run's status (no-op if the row was never recorded).
+
+        error_message is written EXACTLY as given -- not COALESCEd like
+        record_start's -- so a message must be passed on every failing call
+        and None on every other one. That is deliberate: the Generate page
+        reuses one run id across Run clicks, and a fail-then-pass on the
+        same row must end with NULL, not the stale reason from the first
+        failure."""
         try:
             with self._pool.connection() as conn:
                 conn.execute(
-                    "UPDATE test_runs SET status = %s, updated_at = now() "
-                    "WHERE run_id = %s",
-                    (status, run_id),
+                    "UPDATE test_runs SET status = %s, updated_at = now(), "
+                    "error_message = %s WHERE run_id = %s",
+                    (status, error_message, run_id),
                 )
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
