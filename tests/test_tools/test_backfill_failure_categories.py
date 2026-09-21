@@ -357,7 +357,8 @@ def test_parse_stamp_reads_the_utc_second_of_the_apply():
 
 
 @pytest.mark.parametrize("stamp", ["", "2026", "2026091819100", "202609181910045",
-                                   "20260918191004; DROP TABLE x", "20261318191004", None])
+                                   "20260918191004; DROP TABLE x", "20261318191004", None,
+                                   "２０２６０９１８１９１００４"])
 def test_parse_stamp_refuses_anything_that_is_not_a_real_14_digit_instant(stamp):
     """The stamp becomes part of an SQL identifier: nothing but 14 digits may pass."""
     with pytest.raises(ValueError):
@@ -485,14 +486,17 @@ def test_restore_dry_run_writes_nothing(capsys):
     assert [s for s in _statements(conn) if s.startswith(("UPDATE", "INSERT", "DELETE"))] == []
     assert not any("FOR UPDATE" in s for s in _statements(conn))
     conn.commit.assert_not_called()
-    assert "Dry run: nothing was written" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Dry run: nothing was written" in out
+    assert "restoring into" not in out
 
 
-def test_restore_apply_locks_then_writes_every_label_and_row_back():
+def test_restore_apply_locks_then_writes_every_label_and_row_back(capsys):
     conn = _fake_restore_connection()
 
     _run(["--restore", STAMP, "--apply"], conn)
 
+    assert "restoring into" in capsys.readouterr().out
     statements = _statements(conn)
     current_selects = [s for s in statements
                        if s.startswith(("SELECT workflow_id AS row_id", "SELECT id::text AS row_id"))]

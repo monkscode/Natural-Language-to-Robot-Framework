@@ -26,12 +26,13 @@ What --apply changes:
   with no label never overwrites a hint. Each synced hint gets its own
   hint_audit row, so its visible history says what changed, when and why.
 
-Every write is counted from the cursor's rowcount, not from the plan: relabels
-and anti-pattern deletes must touch exactly one row (or every id, for the
-delete), and each hint's compare-and-set update must touch exactly one row too
-— a hint edited since it was read touches none and rolls the whole run back.
-Mirrored execution_embeddings writes are reported, not required: a row with no
-mirror is not an error.
+Every label write is counted from the cursor's rowcount, not from the plan: a
+relabel or a hint's compare-and-set must touch exactly one row — a hint edited
+since it was read touches none — and an anti-pattern delete must touch every
+id. Any miss rolls the whole transaction back. A restore checks the same way,
+plus its anti-pattern and learning_anchors re-inserts, checked against the
+snapshot's own counts. Mirrored execution_embeddings writes are reported, not
+required: a row with no mirror is not an error.
 
 To undo an apply, name its stamp — printed on success, and in the snapshot table
 names (e5b_backfill_<stamp>_labels):
@@ -177,7 +178,8 @@ def _snapshot(conn, stamp: str, plan: list[dict], deletions: list[str]) -> list[
 HINT_ROWS_SELECT = (
     "SELECT c.id, c.original_failure_category, c.source_workflow_id, "
     "e.failure_category AS run_category FROM nl_feedback_corrections c "
-    "JOIN execution_records e ON e.workflow_id = c.source_workflow_id")
+    "JOIN execution_records e ON e.workflow_id = c.source_workflow_id "
+    "ORDER BY c.id")
 # Compare-and-set: a hint edited since it was read touches no row, and the
 # rowcount guard then rolls the whole run back.
 HINT_SYNC_UPDATE = (
@@ -214,7 +216,7 @@ def plan_hint_sync(hint_rows: list[dict], record_plan: list[dict]) -> list[dict]
 # A stamp is the UTC second an --apply ran, embedded in its snapshot table names.
 # It is the only operator input that reaches an SQL identifier, so it is checked
 # against this before any SQL is built: 14 digits cannot carry an injection.
-STAMP_RE = re.compile(r"\d{14}")
+STAMP_RE = re.compile(r"[0-9]{14}")
 
 # Where each snapshotted label lives now, keyed as the snapshot's source_table.
 # _load_current appends FOR UPDATE when applying, so a concurrent learning write
@@ -392,6 +394,7 @@ def _restore(conn, stamp: str, applied_at: datetime, apply: bool) -> None:
         print("Dry run: nothing was written. Re-run with --apply to restore.")
         return
 
+    print(f"\nrestoring into {conn.info.dbname} on {conn.info.host}")
     now = datetime.now(timezone.utc).isoformat()
     for label in labels:
         is_hint = label["source_table"] == "nl_feedback_corrections"

@@ -109,6 +109,32 @@ def test_apply_then_restore_returns_exactly_the_pre_apply_state(test_db):
                         "WHERE action = 'change_category'").fetchone()["n"] == 2   # append-only
 
 
+def test_a_hint_only_apply_then_restore_returns_exactly_the_pre_apply_state(test_db):
+    """No relabel, no deletion — only the hint sync exercises _snapshot with empty ids."""
+    conn, dsn = test_db
+    conn.execute("INSERT INTO execution_records (workflow_id, timestamp, user_query, test_status, "
+                 "failure_category, error_message) VALUES ('wf-2', '2026-09-18 10:00:00', 'q', "
+                 "'failed', 'C1', %s)", (PLACEHOLDER_MSG,))
+    conn.execute("INSERT INTO nl_feedback_corrections (feedback_text, created_at, last_seen, "
+                 "original_failure_category, source_workflow_id) VALUES ('use the id', "
+                 "'2026-09-18T10:00:00+00:00', '2026-09-18T10:00:00+00:00', 'D1', 'wf-2')")
+    before = _state(conn)
+
+    _main(dsn, ["--apply"])
+    after_apply = _state(conn)
+    assert after_apply["records"] == before["records"]           # no relabel happened
+    assert [h["original_failure_category"] for h in after_apply["hints"]] == ["C1"]
+    assert conn.execute("SELECT count(*) AS n FROM hint_audit "
+                        "WHERE action = 'change_category'").fetchone()["n"] == 1
+    assert _stamp(conn)                     # exactly one labels table (asserted inside _stamp)
+
+    _main(dsn, ["--restore", _stamp(conn), "--apply"])
+
+    assert _state(conn) == before
+    assert conn.execute("SELECT count(*) AS n FROM hint_audit "
+                        "WHERE action = 'change_category'").fetchone()["n"] == 2   # append-only
+
+
 def test_restore_refuses_on_drift_and_writes_nothing(test_db):
     conn, dsn = test_db
     _seed(conn)
