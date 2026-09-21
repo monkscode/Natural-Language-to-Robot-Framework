@@ -345,6 +345,31 @@ _ERROR_CATCHING_WRAPPERS = frozenset({
 _KEYWORDS_SECTION_RE = re.compile(r"^\*++[ \t]*+keywords?[ \t]*+\*", re.IGNORECASE)
 
 
+def _names_get_element_states(line: str, first_part: str) -> bool:
+    """True when a non-indented line's name is (or could resolve to) `Get Element States`.
+
+    Robot picks the separator format per line, so a pipe-separated definition
+    (`| Get Element States | ... |`) can mix legally with space-separated steps
+    elsewhere in the same file; there the name is the first pipe cell, not the
+    whole line. Robot also matches an embedded-argument name (`Get ${what}
+    States`) against the literal call, so `${...}` segments are treated as a
+    wildcard — greedily, so a custom embedded regex containing `}` can only
+    over-match, never under-match.
+    """
+    if line[:1] == "|" and line[1:2] in ("", " ", "\t"):
+        cell = line.split("|")[1].strip()
+        if not cell:
+            return False
+        name = cell
+    else:
+        name = first_part
+    if not name:
+        return False
+    canon = re.sub(r"[\s_]", "", name.lower())
+    pattern = ".*".join(re.escape(piece) for piece in re.split(r"\$\{.*\}", canon))
+    return re.fullmatch(pattern, "getelementstates") is not None
+
+
 def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     """Rewrite `Get Element States    <loc>    contains    visible` and
     `Get Element States    <loc>    validate    value & visible` to
@@ -370,7 +395,10 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     The whole file is left unchanged when it catches errors around code the
     line cannot see: a `TRY` block, or its own keywords together with an
     error-catching wrapper. There a longer wait can turn a caught failure into
-    a pass/fail flip or a 30s stall. Idempotent.
+    a pass/fail flip or a 30s stall. It is also left unchanged when the file
+    defines its own keyword named `Get Element States` — Robot resolves that
+    name to the file's own keyword before the Browser library, so rewriting the
+    call would swap in a different keyword. Idempotent.
 
     Args:
         robot_code: The Robot Framework source as a string.
@@ -403,10 +431,12 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
         # A non-indented line names a test or a keyword. Robot resolves a keyword name
         # to the file's own keyword before any library, ignoring case, spaces and
-        # underscores, so a file defining `Get Element States` calls its own — rewriting
-        # that call would swap in a different keyword. Any section counts: a test of that
-        # name only over-matches, which leaves the file unchanged.
-        if parts[0] and re.sub(r"[\s_]", "", parts[0].lower()) == "getelementstates":
+        # underscores, and also matching an embedded-argument name or a pipe-separated
+        # definition, so a file defining `Get Element States` (in any of those forms)
+        # calls its own — rewriting that call would swap in a different keyword. Any
+        # section counts: a test of that name only over-matches, which leaves the file
+        # unchanged.
+        if _names_get_element_states(line, parts[0]):
             defines_own_keyword = True
         # parts[0] is empty only for an indented line; anything else is a
         # section header or a test/keyword name, never a step.
