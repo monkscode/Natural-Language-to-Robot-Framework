@@ -3,7 +3,8 @@
 Dry run by default: a READ-ONLY transaction that prints what would change and
 writes nothing. --apply does everything in ONE transaction: it first copies
 every row it is about to change into timestamped snapshot tables, then
-relabels and deletes. Any error rolls the whole run back, snapshot included.
+relabels, deletes and syncs hints. Any error rolls the whole run back,
+snapshot included.
 
 What --apply changes:
 - execution_records (failed runs) and anti_patterns: failure_category is
@@ -19,11 +20,18 @@ What --apply changes:
 - anti_patterns whose own message is a placeholder failure are DELETED, with
   their learning_anchors row. E5b stops storing placeholder failures as
   anti-patterns; a stored one would keep being injected into prompts.
+- nl_feedback_corrections.original_failure_category — a hint's own copy of its
+  source run's label — is synced to that run's label as this apply leaves it
+  (a run relabelled in the same apply hands its hints the new label). A run
+  with no label never overwrites a hint. Each synced hint gets its own
+  hint_audit row, so its visible history says what changed, when and why.
 
-Every write is counted from the cursor's rowcount, not from the plan. A
-relabel that does not touch exactly one row, or an anti-pattern delete that
-does not touch every id, raises — which rolls the whole transaction back,
-snapshot included.
+Every write is counted from the cursor's rowcount, not from the plan: relabels
+and anti-pattern deletes must touch exactly one row (or every id, for the
+delete), and each hint's compare-and-set update must touch exactly one row too
+— a hint edited since it was read touches none and rolls the whole run back.
+Mirrored execution_embeddings writes are reported, not required: a row with no
+mirror is not an error.
 
 To undo an apply, name its stamp — printed on success, and in the snapshot table
 names (e5b_backfill_<stamp>_labels):
@@ -35,7 +43,8 @@ reinforced), when a deleted anti-pattern or its anchor exists again, or when a n
 apply is still in place — restores run newest first. anti_patterns.last_seen is TEXT
 in UTC; a value that does not parse as a timestamp refuses rather than guessing.
 Do not hand-write restore SQL: bare statements under psql autocommit half-apply, and
-nothing in them checks drift.
+nothing in them checks drift. A restored hint also gets its own hint_audit row —
+audit rows are append-only, so a restore never deletes the apply's.
 
 The snapshot tables are the only undo record: keep them until the owner accepts the new labels.
 
