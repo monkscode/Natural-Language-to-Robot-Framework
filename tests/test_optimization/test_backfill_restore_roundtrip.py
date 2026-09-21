@@ -54,6 +54,9 @@ def _seed(conn):
                  (PLACEHOLDER_MSG,))
     conn.execute("INSERT INTO learning_anchors (anchor_key, kind, record_id, anchor_query, embedding) "
                  "VALUES ('anti:10', 'anti', 10, 'q', %s::vector)", (VECTOR,))
+    conn.execute("INSERT INTO nl_feedback_corrections (feedback_text, created_at, last_seen, "
+                 "original_failure_category, source_workflow_id) VALUES ('use the id', "
+                 "'2026-09-18T10:00:00+00:00', '2026-09-18T10:00:00+00:00', 'D1', 'wf-1')")
 
 
 def _state(conn) -> dict:
@@ -67,6 +70,8 @@ def _state(conn) -> dict:
         "anchors": conn.execute("SELECT anchor_key, kind, record_id, anchor_query, "
                                 "embedding::text AS e, org_id FROM learning_anchors "
                                 "ORDER BY 1").fetchall(),
+        "hints": conn.execute("SELECT id, original_failure_category FROM "
+                              "nl_feedback_corrections ORDER BY id").fetchall(),
     }
 
 
@@ -92,10 +97,16 @@ def test_apply_then_restore_returns_exactly_the_pre_apply_state(test_db):
     assert after_apply != before                           # the apply really changed something
     assert [r["failure_category"] for r in after_apply["records"]] == ["C1"]
     assert [a["id"] for a in after_apply["anti"]] == [7]   # placeholder anti-pattern 10 deleted
+    # after --apply (the run was relabelled D1 -> C1 in the same apply, so its hint follows):
+    assert [h["original_failure_category"] for h in after_apply["hints"]] == ["C1"]
+    assert conn.execute("SELECT count(*) AS n FROM hint_audit "
+                        "WHERE action = 'change_category'").fetchone()["n"] == 1
 
     _main(dsn, ["--restore", _stamp(conn), "--apply"])
 
     assert _state(conn) == before
+    assert conn.execute("SELECT count(*) AS n FROM hint_audit "
+                        "WHERE action = 'change_category'").fetchone()["n"] == 2   # append-only
 
 
 def test_restore_refuses_on_drift_and_writes_nothing(test_db):

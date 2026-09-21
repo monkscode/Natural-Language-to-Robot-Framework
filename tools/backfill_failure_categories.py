@@ -50,6 +50,7 @@ Referenced by: nothing (operator tool).
 Depends on: crew_ai/optimization/failure_analyzer.py, core/config.py, psycopg.
 """
 import argparse
+import json
 import re
 from datetime import datetime, timezone
 
@@ -159,6 +160,46 @@ def _snapshot(conn, stamp: str, plan: list[dict], deletions: list[str]) -> list[
     return [labels, anti, anchors]
 
 
+# nl_feedback_corrections.original_failure_category is a third copy of the run's
+# label, taken when the hint is created (nl_feedback_engine.py) and never refreshed.
+# Owner decision 2026-09-21: it means "the run's label", so a relabelled run carries
+# its hints with it. Each changed hint gets a hint_audit row, as an admin edit would,
+# so its visible history says what changed and why.
+HINT_ROWS_SELECT = (
+    "SELECT c.id, c.original_failure_category, c.source_workflow_id, "
+    "e.failure_category AS run_category FROM nl_feedback_corrections c "
+    "JOIN execution_records e ON e.workflow_id = c.source_workflow_id")
+# Compare-and-set: a hint edited since it was read touches no row, and the
+# rowcount guard then rolls the whole run back.
+HINT_SYNC_UPDATE = (
+    "UPDATE nl_feedback_corrections SET original_failure_category = %s "
+    "WHERE id = %s::bigint AND original_failure_category IS NOT DISTINCT FROM %s")
+# 'change_category' is already labelled "changed category" in HintDrawer's
+# ACTION_LABELS and no other writer uses it; 'system' matches auto_disable.
+HINT_AUDIT_INSERT = (
+    "INSERT INTO hint_audit (hint_id, action, actor, reason, before_value, after_value, "
+    "created_at) VALUES (%s::integer, 'change_category', 'system', %s, %s, %s, %s)")
+
+
+def plan_hint_sync(hint_rows: list[dict], record_plan: list[dict]) -> list[dict]:
+    """One entry per hint whose copy of its run's label disagrees with the run. Pure.
+
+    The run's label is taken as this apply will leave it: a run relabelled by
+    record_plan hands its hints the new label, so a dry run shows what --apply writes.
+    A run with no label never overwrites a hint.
+    """
+    relabelled = {entry["id"]: entry["new"] for entry in record_plan
+                  if entry["table"] == "execution_records"}
+    plan: list[dict] = []
+    for row in hint_rows:
+        run_label = relabelled.get(row["source_workflow_id"], row["run_category"])
+        if run_label and row["original_failure_category"] != run_label:
+            plan.append({"table": "nl_feedback_corrections", "id": str(row["id"]),
+                         "old": row["original_failure_category"], "new": run_label,
+                         "source_workflow_id": row["source_workflow_id"]})
+    return plan
+
+
 # --- restore -------------------------------------------------------------------
 
 # A stamp is the UTC second an --apply ran, embedded in its snapshot table names.
@@ -179,6 +220,9 @@ CURRENT_SELECTS = {
     "anti_patterns": (
         "SELECT id::text AS row_id, failure_category, last_seen "
         "FROM anti_patterns WHERE id::text = ANY(%s)"),
+    "nl_feedback_corrections": (
+        "SELECT id::text AS row_id, original_failure_category AS failure_category, "
+        "NULL::text AS last_seen FROM nl_feedback_corrections WHERE id::text = ANY(%s)"),
 }
 # The restore writes old_category back through the statements the apply used, so
 # the two cannot address different rows.
@@ -339,12 +383,23 @@ def _restore(conn, stamp: str, applied_at: datetime, apply: bool) -> None:
         print("Dry run: nothing was written. Re-run with --apply to restore.")
         return
 
+    now = datetime.now(timezone.utc).isoformat()
     for label in labels:
-        cursor = conn.execute(RESTORE_UPDATES[label["source_table"]],
-                              (label["old_category"], label["row_id"]))
+        is_hint = label["source_table"] == "nl_feedback_corrections"
+        if is_hint:
+            cursor = conn.execute(HINT_SYNC_UPDATE, (label["old_category"], label["row_id"],
+                                                     label["new_category"]))
+        else:
+            cursor = conn.execute(RESTORE_UPDATES[label["source_table"]],
+                                  (label["old_category"], label["row_id"]))
         if cursor.rowcount != 1:
             raise RuntimeError(f"{label['source_table']} {label['row_id']}: expected 1 row "
                                f"restored, got {cursor.rowcount} — rolling back")
+        if is_hint:
+            conn.execute(HINT_AUDIT_INSERT, (
+                label["row_id"], f"E5b back-fill restore (snapshot {stamp})",
+                json.dumps({"original_failure_category": label["new_category"]}),
+                json.dumps({"original_failure_category": label["old_category"]}), now))
     restored_anti = conn.execute(
         f"INSERT INTO anti_patterns ({ANTI_PATTERN_COLUMNS}) OVERRIDING SYSTEM VALUE "
         f"SELECT {ANTI_PATTERN_COLUMNS} FROM {anti_t}").rowcount
@@ -390,14 +445,21 @@ def main(argv: list[str] | None = None) -> None:
         rows = _load(conn, "execution_records") + _load(conn, "anti_patterns")
         plan = plan_backfill(rows)
         deletions = plan_placeholder_deletions(rows)
+        hint_rows = conn.execute(
+            HINT_ROWS_SELECT + (" FOR UPDATE OF c" if args.apply else "")).fetchall()
+        hint_plan = plan_hint_sync(hint_rows, plan)
 
         print(f"{len(rows)} rows read: {len(plan)} would be relabelled, "
-              f"{len(deletions)} placeholder anti-pattern(s) would be deleted")
+              f"{len(deletions)} placeholder anti-pattern(s) would be deleted, "
+              f"{len(hint_plan)} hint(s) would take their run's label")
         for entry in plan:
             print(f"  relabel {entry['table']:18} {entry['id']:40} "
                   f"{entry['old']} -> {entry['new']} ({entry['specific_type']})")
         for anti_id in deletions:
             print(f"  delete  anti_patterns      {anti_id:40} placeholder failure, with its anchor")
+        for entry in hint_plan:
+            print(f"  sync    nl_feedback_corrections {entry['id']:24} "
+                  f"{entry['old']} -> {entry['new']} (from run {entry['source_workflow_id']})")
 
         if not args.apply:
             print("\nDry run: nothing was written. Re-run with --apply to snapshot and write. "
@@ -405,13 +467,13 @@ def main(argv: list[str] | None = None) -> None:
                   "execution_embeddings row.")
             return
 
-        if not plan and not deletions:
+        if not plan and not deletions and not hint_plan:
             print("\nNothing to apply: no stored label changes. No snapshot taken.")
             return
 
         print(f"\napplying to {conn.info.dbname} on {conn.info.host}")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        snapshots = _snapshot(conn, stamp, plan, deletions)
+        snapshots = _snapshot(conn, stamp, plan + hint_plan, deletions)
 
         relabelled = mirrored = deleted = anchors = 0
         for entry in plan:
@@ -438,10 +500,26 @@ def main(argv: list[str] | None = None) -> None:
                     f"expected {len(ids)} anti-pattern(s) deleted, got "
                     f"{removed.rowcount} — rolling back")
             deleted = removed.rowcount
+        synced = 0
+        for entry in hint_plan:
+            cursor = conn.execute(HINT_SYNC_UPDATE, (entry["new"], entry["id"], entry["old"]))
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"hint {entry['id']}: expected 1 row synced, got {cursor.rowcount} "
+                    "(edited since it was read?) — rolling back")
+            conn.execute(HINT_AUDIT_INSERT, (
+                entry["id"],
+                f"E5b back-fill: synced from source run {entry['source_workflow_id']} "
+                f"(snapshot {stamp})",
+                json.dumps({"original_failure_category": entry["old"]}),
+                json.dumps({"original_failure_category": entry["new"]}),
+                datetime.now(timezone.utc).isoformat()))
+            synced += 1
         conn.commit()
         print(f"applied: {relabelled} relabelled, {mirrored} mirrored onto "
               f"execution_embeddings, {deleted} anti-pattern(s) deleted with "
-              f"{anchors} anchor(s); snapshot tables: {', '.join(snapshots)}")
+              f"{anchors} anchor(s), {synced} hint(s) synced and audited; "
+              f"snapshot tables: {', '.join(snapshots)}")
 
 
 if __name__ == "__main__":

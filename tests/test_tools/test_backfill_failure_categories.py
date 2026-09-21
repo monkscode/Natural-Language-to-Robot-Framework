@@ -15,6 +15,7 @@ from tools.backfill_failure_categories import (
     parse_last_seen,
     parse_stamp,
     plan_backfill,
+    plan_hint_sync,
     plan_placeholder_deletions,
     plan_restore_refusals,
 )
@@ -100,14 +101,19 @@ ANTI_PATTERN_ROWS = [
 ]
 
 
-def _fake_connection(update_rowcount: int = 1, delete_rowcount: int = 1):
+def _fake_connection(update_rowcount: int = 1, delete_rowcount: int = 1,
+                     hint_update_rowcount: int = 1):
     """A psycopg-shaped double: SELECTs return rows, writes report a rowcount."""
     conn = MagicMock()
 
     def execute(sql, params=None):
         cursor = MagicMock()
         cursor.rowcount = 1
-        if sql.startswith("SELECT") and "FROM execution_records" in sql:
+        if sql.startswith("SELECT c.id"):
+            cursor.fetchall.return_value = HINT_ROWS
+        elif sql.startswith("UPDATE nl_feedback_corrections"):
+            cursor.rowcount = hint_update_rowcount
+        elif sql.startswith("SELECT") and "FROM execution_records" in sql:
             cursor.fetchall.return_value = EXECUTION_ROWS
         elif sql.startswith("SELECT") and "FROM anti_patterns" in sql:
             cursor.fetchall.return_value = ANTI_PATTERN_ROWS
@@ -235,6 +241,97 @@ def test_a_composite_anti_pattern_is_never_deleted_from_its_message():
     assert plan_placeholder_deletions(rows) == []
 
 
+# --- hint-copy sync -------------------------------------------------------------
+
+def _hint(hid, stored, run_label, wf="wf-9"):
+    return {"id": hid, "original_failure_category": stored,
+            "source_workflow_id": wf, "run_category": run_label}
+
+
+def test_a_hint_that_disagrees_with_its_run_takes_the_run_label():
+    assert plan_hint_sync([_hint(28, "D1", "C2")], []) == [{
+        "table": "nl_feedback_corrections", "id": "28", "old": "D1", "new": "C2",
+        "source_workflow_id": "wf-9"}]
+
+
+def test_a_hint_that_already_agrees_is_left_alone():
+    assert plan_hint_sync([_hint(5, "C1", "C1")], []) == []
+
+
+def test_an_unknown_copy_takes_the_run_label():
+    assert [e["new"] for e in plan_hint_sync([_hint(9, "unknown", "B3")], [])] == ["B3"]
+
+
+@pytest.mark.parametrize("run_label", [None, ""])
+def test_a_run_with_no_label_never_overwrites_a_hint(run_label):
+    assert plan_hint_sync([_hint(3, "D1", run_label)], []) == []
+
+
+def test_a_hint_follows_its_run_through_the_same_apply():
+    """The run is relabelled D1 -> C1 in this apply; its hint must take C1, not D1."""
+    record_plan = [{"table": "execution_records", "id": "wf-9", "old": "D1", "new": "C1",
+                    "specific_type": "placeholder_never_resolved"}]
+    assert [e["new"] for e in plan_hint_sync([_hint(17, "D1", "D1")], record_plan)] == ["C1"]
+
+
+def test_an_anti_pattern_relabel_does_not_move_a_hint():
+    record_plan = [{"table": "anti_patterns", "id": "wf-9", "old": "D1", "new": "C1",
+                    "specific_type": "x"}]
+    assert plan_hint_sync([_hint(17, "D1", "D1")], record_plan) == []
+
+
+HINT_ROWS = [{"id": 28, "original_failure_category": "D1",
+              "source_workflow_id": "wf-9", "run_category": "C2"}]
+
+
+def test_dry_run_reports_the_hint_sync(capsys):
+    conn = _fake_connection()
+
+    _run([], conn)
+
+    out = capsys.readouterr().out
+    assert "1 hint(s) would take their run's label" in out
+    assert "sync    nl_feedback_corrections 28" in out
+
+
+def test_apply_snapshots_syncs_and_audits_each_hint():
+    conn = _fake_connection()
+
+    _run(["--apply"], conn)
+
+    assert _params(conn, "UPDATE nl_feedback_corrections") == [("C2", "28", "D1")]
+    audit = _params(conn, "INSERT INTO hint_audit")
+    assert len(audit) == 1
+    hint_id, reason, before, after, created_at = audit[0]
+    assert hint_id == "28"
+    assert "wf-9" in reason and "snapshot" in reason
+    assert before == '{"original_failure_category": "D1"}'
+    assert after == '{"original_failure_category": "C2"}'
+    snapshot_rows = [call.args[1] for call in conn.execute.call_args_list
+                     if call.args[0].startswith("INSERT INTO e5b_backfill_")
+                     and call.args[0].endswith("VALUES (%s, %s, %s, %s)")]
+    assert ("nl_feedback_corrections", "28", "D1", "C2") in snapshot_rows
+
+
+def test_the_hint_select_is_locked_when_applying():
+    conn = _fake_connection()
+
+    _run(["--apply"], conn)
+
+    assert any(s.startswith("SELECT c.id") and s.endswith("FOR UPDATE OF c")
+               for s in _statements(conn))
+
+
+def test_a_hint_edited_meanwhile_rolls_the_run_back():
+    """Only the hint's compare-and-set misses; every other write succeeds."""
+    conn = _fake_connection(hint_update_rowcount=0)
+
+    with pytest.raises(RuntimeError, match="hint 28"):
+        _run(["--apply"], conn)
+
+    conn.commit.assert_not_called()
+
+
 # --- restore: pure planners ---------------------------------------------------
 
 from datetime import datetime, timezone
@@ -332,7 +429,8 @@ def test_collisions_are_refusals_too():
 # --- restore: the CLI shell, against a mocked connection -----------------------
 
 STAMP = "20260918191004"
-CURRENT_TABLE_ORDER = ("execution_records", "execution_embeddings", "anti_patterns")
+CURRENT_TABLE_ORDER = ("execution_records", "execution_embeddings", "anti_patterns",
+                       "nl_feedback_corrections")
 
 
 def _fake_restore_connection(labels=LABELS, live=None, collisions=(), snapshots=(STAMP,),
@@ -484,3 +582,18 @@ def test_a_restore_insert_count_mismatch_rolls_back():
         _run(["--restore", STAMP, "--apply"], conn)
 
     conn.commit.assert_not_called()
+
+
+HINT_LABEL = {"source_table": "nl_feedback_corrections", "row_id": "28",
+              "old_category": "D1", "new_category": "C2"}
+
+
+def test_restore_puts_a_hint_back_through_compare_and_set_and_audits_it():
+    conn = _fake_restore_connection(labels=LABELS + [HINT_LABEL])
+
+    _run(["--restore", STAMP, "--apply"], conn)
+
+    assert _params(conn, "UPDATE nl_feedback_corrections") == [("D1", "28", "C2")]
+    audit = _params(conn, "INSERT INTO hint_audit")
+    assert len(audit) == 1 and "restore" in audit[0][1]
+    conn.commit.assert_called_once()
