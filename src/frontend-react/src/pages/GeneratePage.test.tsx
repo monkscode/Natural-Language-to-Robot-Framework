@@ -533,6 +533,98 @@ describe('GeneratePage — a completed execution', () => {
     expect(await screen.findByText('Test execution failed')).toBeInTheDocument()
   })
 
+  // Task 3 (committed) adds `failure_sentence` as a top-level key on the
+  // execution SSE event, sibling to `result`/`test_status` — not nested
+  // inside `result`. Real shape: bench/private/e5b/live-2026-09-18/fail_run.sse.
+  it('shows the server’s failure sentence instead of the static subtitle when the event carries one', async () => {
+    allowFeedbackMount()
+    const logs = [
+      'Test: Navigate And Click Sign Up - FAIL',
+      'Error: TimeoutError: locator.click: Timeout 30000ms exceeded.',
+      'Results: 0 passed, 1 failed',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({
+          status: 'complete',
+          result: { report_html: '/reports/RUN-7/log.html', logs },
+          test_status: 'failed',
+          failure_sentence: 'The click on the sign-up button timed out after 30 seconds.',
+        })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText('The click on the sign-up button timed out after 30 seconds.')).toBeInTheDocument()
+    expect(screen.queryByText('Open the detailed log to see exactly which step went wrong.')).toBeNull()
+  })
+
+  it('keeps the static failure subtitle when the event carries no failure sentence', async () => {
+    allowFeedbackMount()
+    const logs = [
+      'Test: Checkout flow - FAIL',
+      'Error: Element not found: #submit',
+      'Results: 0 passed, 1 failed',
+    ].join('\n')
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else if (path === '/execute-test') {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-8/log.html', logs }, test_status: 'failed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    expect(await screen.findByText('Open the detailed log to see exactly which step went wrong.')).toBeInTheDocument()
+  })
+
+  it('clears a failed run’s sentence once a later run on the same page passes', async () => {
+    allowFeedbackMount()
+    const failLogs = [
+      'Test: Checkout flow - FAIL',
+      'Error: Element not found: #submit',
+      'Results: 0 passed, 1 failed',
+    ].join('\n')
+    const passLogs = ['Test: Checkout flow - PASS', 'Results: 1 passed, 0 failed'].join('\n')
+    let execCalls = 0
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') { onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' }); return }
+      execCalls += 1
+      if (execCalls === 1) {
+        onEvent({
+          status: 'complete',
+          result: { report_html: '/reports/RUN-9/log.html', logs: failLogs },
+          test_status: 'failed',
+          failure_sentence: 'The submit button could not be found on the page.',
+        })
+      } else {
+        onEvent({ status: 'complete', result: { report_html: '/reports/RUN-9/log.html', logs: passLogs }, test_status: 'passed' })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+    expect(await screen.findByText('The submit button could not be found on the page.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+    await screen.findByText('Test passed! 🎉')
+
+    expect(screen.queryByText('The submit button could not be found on the page.')).toBeNull()
+  })
+
   it('shows the SSE error message and no result card on status: error', async () => {
     mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
       if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
