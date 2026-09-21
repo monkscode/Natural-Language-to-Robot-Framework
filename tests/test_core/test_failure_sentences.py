@@ -24,6 +24,7 @@ import pytest
 
 from src.backend.core.failure_sentences import (
     _strip_rf_header,
+    failure_category,
     failure_sentence,
     first_failure_message,
 )
@@ -214,6 +215,41 @@ def test_none_input_returns_none():
 
 def test_empty_string_returns_none():
     assert failure_sentence("") is None
+
+
+# --- failure_category: the classifier's category code, verbatim (Ruling R4) --
+
+def test_failure_category_returns_the_classifiers_category_verbatim():
+    """The same taxonomy code execution_records.failure_category stores --
+    proven against the classifier's own answer, not against a hardcoded
+    literal, so this cannot pass while quietly reading the wrong field."""
+    from src.backend.crew_ai.optimization.failure_analyzer import FailureClassifier
+
+    analysis = FailureClassifier().classify(STRICT)
+    assert analysis.category == "C2"
+    assert failure_category(STRICT) == analysis.category
+
+
+def test_failure_category_includes_unknown():
+    """Unlike failure_sentence, failure_category does not hide "unknown" --
+    it is part of the vocabulary and callers may want it (Ruling R4)."""
+    message = "something nobody has ever seen"
+    assert failure_category(message) == "unknown"
+
+
+def test_failure_category_none_input_returns_none():
+    assert failure_category(None) is None
+
+
+def test_failure_category_empty_string_returns_none():
+    assert failure_category("") is None
+
+
+def test_failure_category_whitespace_only_returns_none():
+    """Whitespace-only text is falsy to a human but truthy to Python, so this
+    is the one case failure_sentence's own `if not error_message` guard would
+    not catch either -- checked separately so a regression there is caught."""
+    assert failure_category("   \n\t  ") is None
 
 
 # --- first_failure_message: real RF 7.4.2 output.xml files -----------------

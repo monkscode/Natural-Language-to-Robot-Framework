@@ -3012,10 +3012,17 @@ class RunRegistry:
         never ran, which is exactly what case 15 forbids.
 
         `failure_class` and `failure_locator` are on every result and are
-        ALWAYS None. They are P3 columns (section 8): `test_runs` has no
-        such columns yet and no analyzer writes them. The keys exist so the
-        drawer can build its seam against a stable shape; the values are
-        placeholders, and no caller should read anything into a null one.
+        ALWAYS None IN THIS METHOD'S OWN RETURN VALUE -- this registry method
+        classifies nothing itself. `failure_locator` stays that way
+        everywhere: it is a P3 column (section 8), `test_runs` has no such
+        column yet and no analyzer writes one. `failure_class` does NOT stay
+        None end to end: tests_endpoints.test_detail computes it (and a
+        sibling `failure_sentence` key) one layer up, from the
+        `error_message` this method now also returns, for `failed`/`error`
+        results only (Task 7, 2026-09-21) -- kept out of this module so
+        core/run_registry.py stays free of a classifier import.
+        `error_message` itself never reaches the wire: the route pops it off
+        every result, whatever its status, before returning.
 
         `has_report` is NOT set here. The API layer derives it from `status`
         with history_endpoints' own _REPORT_STATUSES, so the two detail
@@ -3142,7 +3149,8 @@ class RunRegistry:
                 # version survives the join with n NULL rather than being
                 # dropped from its own test's timeline.
                 results = conn.execute(
-                    "SELECT t.run_id, t.status, t.created_at, v.n "
+                    "SELECT t.run_id, t.status, t.created_at, v.n, "
+                    "       t.error_message "
                     f"FROM test_runs t {run_join} "
                     "LEFT JOIN test_versions v"
                     "  ON v.version_id = t.test_version_id "
@@ -3204,9 +3212,15 @@ class RunRegistry:
                 "status": x["status"],
                 "n": x["n"],
                 "created_at": x["created_at"].isoformat(),
-                # P3 columns (section 8); see the docstring above.
+                # failure_locator is a P3 column (section 8) and stays None
+                # everywhere. failure_class is None HERE -- tests_endpoints
+                # computes the real value from error_message below, for
+                # failed/error results (Task 7). error_message is read only
+                # for that computation: the route pops it before the payload
+                # goes out, on every result regardless of status.
                 "failure_class": None,
                 "failure_locator": None,
+                "error_message": x["error_message"],
             } for x in results],
             "results_total": total,
         }

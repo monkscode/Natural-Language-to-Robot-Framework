@@ -21,7 +21,8 @@ parser is the learning path's input, and it reads the first <test> only,
 stores a caught failure as the error, and returns parser error text as a
 message — none of which may reach a stored reason.
 
-Referenced by: services/workflow_service.py (_failure_reason).
+Referenced by: services/workflow_service.py (_failure_reason),
+api/tests_endpoints.py (test_detail, Task 7).
 Depends on: crew_ai/optimization/failure_analyzer.py (FailureClassifier),
 xml.etree.ElementTree.
 """
@@ -214,6 +215,21 @@ def failure_sentence(error_message: str | None) -> str | None:
     if build is None:
         return None
     return build()
+
+
+def failure_category(error_message: str | None) -> str | None:
+    """The classifier's category code (e.g. "C1"), verbatim -- "unknown"
+    included. This is the same vocabulary execution_records.failure_category
+    already stores (feedback_loop.py:1006-1008), so a Tests-page result and a
+    learning row use one code for the same failure.
+
+    None for None, "", or whitespace-only text: there is nothing to
+    classify, and "unknown" would misrepresent an absent message as one the
+    classifier actually looked at (Ruling R4, Task 7).
+    """
+    if not error_message or not error_message.strip():
+        return None
+    return _classifier.classify(error_message).category
 
 
 # The header line Robot Framework 7.4.2 puts above a test's failure text when

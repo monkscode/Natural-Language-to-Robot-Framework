@@ -104,7 +104,10 @@ interface DetailPayload {
   }>
   results: Array<{
     run_id: string; status: string; n: number | null; created_at: string
-    has_report: boolean; failure_class: string | null; failure_locator: string | null
+    has_report: boolean; failure_class: string | null
+    // Required, not optional: computed on read for every result (Task 7),
+    // so a fixture without it is a payload the route cannot produce.
+    failure_sentence: string | null; failure_locator: string | null
   }>
   results_total: number
 }
@@ -126,10 +129,10 @@ const DETAIL: DetailPayload = {
     { n: 1, user_query: 'search flipkart', robot_code: CODE_V1, created_by_email: 'a@b.com', creator_is_platform_admin: false, reason: null, created_at: hoursAgo(50) },
   ],
   results: [
-    { run_id: '11111111-1111-4111-8111-111111111111', status: 'passed', n: 2, created_at: hoursAgo(2), has_report: true, failure_class: null, failure_locator: null },
-    { run_id: '22222222-2222-4222-8222-222222222222', status: 'failed', n: 2, created_at: hoursAgo(3), has_report: true, failure_class: null, failure_locator: null },
-    { run_id: '33333333-3333-4333-8333-333333333333', status: 'error', n: null, created_at: hoursAgo(4), has_report: false, failure_class: null, failure_locator: null },
-    { run_id: '44444444-4444-4444-8444-444444444444', status: 'passed', n: 1, created_at: hoursAgo(5), has_report: true, failure_class: null, failure_locator: null },
+    { run_id: '11111111-1111-4111-8111-111111111111', status: 'passed', n: 2, created_at: hoursAgo(2), has_report: true, failure_class: null, failure_sentence: null, failure_locator: null },
+    { run_id: '22222222-2222-4222-8222-222222222222', status: 'failed', n: 2, created_at: hoursAgo(3), has_report: true, failure_class: null, failure_sentence: null, failure_locator: null },
+    { run_id: '33333333-3333-4333-8333-333333333333', status: 'error', n: null, created_at: hoursAgo(4), has_report: false, failure_class: null, failure_sentence: null, failure_locator: null },
+    { run_id: '44444444-4444-4444-8444-444444444444', status: 'passed', n: 1, created_at: hoursAgo(5), has_report: true, failure_class: null, failure_sentence: null, failure_locator: null },
   ],
   results_total: 4,
 }
@@ -152,7 +155,7 @@ const detailOf = (r: Row) => ({
   }],
   results: r.last_run_id && r.last_run_at ? [{
     run_id: r.last_run_id, status: r.last_status!, n: r.current_version,
-    created_at: r.last_run_at, has_report: true, failure_class: null, failure_locator: null,
+    created_at: r.last_run_at, has_report: true, failure_class: null, failure_sentence: null, failure_locator: null,
   }] : [],
   results_total: r.result_count,
 })
@@ -750,7 +753,7 @@ describe('TestsPage — paging the drawer’s timeline', () => {
     ...DETAIL,
     results: [{
       run_id: '55555555-5555-4555-8555-555555555555', status: 'passed', n: 1,
-      created_at: hoursAgo(9), has_report: false, failure_class: null, failure_locator: null,
+      created_at: hoursAgo(9), has_report: false, failure_class: null, failure_sentence: null, failure_locator: null,
     }],
     results_total: 5,
   }
@@ -997,6 +1000,32 @@ describe('TestsPage — the Update dialog', () => {
     // update, and it is the route's own floor (it clamps to [1, 200]).
     await waitFor(() => expect(detailCalls()).toContain('/api/tests/t-pass?limit=1&offset=0'))
     await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+  })
+
+  it('shows the newest result’s failure sentence when it carries one', async () => {
+    setup({ detail: { ...DETAIL, results: [
+      { ...DETAIL.results[1], failure_sentence: 'The locator for this element never matched anything on the page.' },
+    ] } })
+    renderPage()
+
+    const dialog = await openUpdate()
+
+    expect(await within(dialog).findByText(
+      'The locator for this element never matched anything on the page.',
+    )).toBeInTheDocument()
+  })
+
+  it('renders nothing when the newest result carries no failure sentence', async () => {
+    setup({ detail: { ...DETAIL, results: [
+      { ...DETAIL.results[1], failure_sentence: null },
+    ] } })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+
+    // The reserved slot renders nothing at all -- not an empty box.
+    expect(dialog.querySelector('.border-destructive\\/30')).not.toBeInTheDocument()
   })
 
   it('shows the current version’s code for reference and lets nobody edit it', async () => {
