@@ -14,7 +14,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from tools.backfill_failure_categories import main
+from tools.backfill_failure_categories import WRITE_LOCK_KEY, main
 
 PLACEHOLDER_MSG = (
     "TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
@@ -133,6 +133,27 @@ def test_a_hint_only_apply_then_restore_returns_exactly_the_pre_apply_state(test
     assert _state(conn) == before
     assert conn.execute("SELECT count(*) AS n FROM hint_audit "
                         "WHERE action = 'change_category'").fetchone()["n"] == 2   # append-only
+
+
+def test_a_write_run_refuses_while_another_holds_the_write_lock(test_db):
+    conn, dsn = test_db
+    _seed(conn)
+    before = _state(conn)
+
+    holder = psycopg.connect(dsn, row_factory=dict_row)
+    try:
+        holder.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (WRITE_LOCK_KEY,))
+
+        with pytest.raises(SystemExit, match="another --apply"):
+            _main(dsn, ["--apply"])
+
+        assert _state(conn) == before
+    finally:
+        holder.rollback()
+        holder.close()
+
+    _main(dsn, ["--apply"])
+    assert [r["failure_category"] for r in _state(conn)["records"]] == ["C1"]
 
 
 def test_restore_refuses_on_drift_and_writes_nothing(test_db):

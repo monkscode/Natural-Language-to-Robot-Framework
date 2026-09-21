@@ -4,7 +4,9 @@ Dry run by default: a READ-ONLY transaction that prints what would change and
 writes nothing. --apply does everything in ONE transaction: it first copies
 every row it is about to change into timestamped snapshot tables, then
 relabels, deletes and syncs hints. Any error rolls the whole run back,
-snapshot included.
+snapshot included. A write run (--apply, or --restore ... --apply) takes a
+database-wide advisory lock for its whole transaction; a second concurrent
+write run refuses immediately, writing nothing.
 
 What --apply changes:
 - execution_records (failed runs) and anti_patterns: failure_category is
@@ -169,6 +171,13 @@ def _snapshot(conn, stamp: str, plan: list[dict], deletions: list[str]) -> list[
                  "WHERE kind = 'anti' AND record_id = ANY(%s)", (ids,))
     return [labels, anti, anchors]
 
+
+# One write run at a time: an --apply and a --restore --apply running together
+# could each plan from rows the other is about to change and snapshot stale
+# values. Transaction-scoped — released at commit or rollback. A try-lock, so a
+# second write run refuses instead of waiting.
+WRITE_LOCK_KEY = "tools/backfill_failure_categories"
+WRITE_LOCK = "SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS locked"
 
 # nl_feedback_corrections.original_failure_category is a third copy of the run's
 # label, taken when the hint is created (nl_feedback_engine.py) and never refreshed.
@@ -451,6 +460,9 @@ def main(argv: list[str] | None = None) -> None:
     with psycopg.connect(settings.DATABASE_URL, row_factory=dict_row) as conn:
         # A dry run cannot write, even by mistake.
         conn.read_only = not args.apply
+        if args.apply and not conn.execute(WRITE_LOCK, (WRITE_LOCK_KEY,)).fetchone()["locked"]:
+            raise SystemExit("another --apply or --restore --apply is running against "
+                             "this database; nothing was written")
         if args.restore is not None:
             _restore(conn, args.restore, applied_at, args.apply)
             return
@@ -458,7 +470,7 @@ def main(argv: list[str] | None = None) -> None:
         plan = plan_backfill(rows)
         deletions = plan_placeholder_deletions(rows)
         hint_rows = conn.execute(
-            HINT_ROWS_SELECT + (" FOR UPDATE OF c" if args.apply else "")).fetchall()
+            HINT_ROWS_SELECT + (" FOR UPDATE OF c, e" if args.apply else "")).fetchall()
         hint_plan = plan_hint_sync(hint_rows, plan)
 
         print(f"{len(rows)} rows read: {len(plan)} would be relabelled, "

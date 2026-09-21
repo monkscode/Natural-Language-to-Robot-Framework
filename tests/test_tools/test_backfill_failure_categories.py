@@ -102,14 +102,16 @@ ANTI_PATTERN_ROWS = [
 
 
 def _fake_connection(update_rowcount: int = 1, delete_rowcount: int = 1,
-                     hint_update_rowcount: int = 1):
+                     hint_update_rowcount: int = 1, lock_free: bool = True):
     """A psycopg-shaped double: SELECTs return rows, writes report a rowcount."""
     conn = MagicMock()
 
     def execute(sql, params=None):
         cursor = MagicMock()
         cursor.rowcount = 1
-        if sql.startswith("SELECT c.id"):
+        if sql.startswith("SELECT pg_try_advisory_xact_lock"):
+            cursor.fetchone.return_value = {"locked": lock_free}
+        elif sql.startswith("SELECT c.id"):
             cursor.fetchall.return_value = HINT_ROWS
         elif sql.startswith("UPDATE nl_feedback_corrections"):
             cursor.rowcount = hint_update_rowcount
@@ -318,7 +320,7 @@ def test_the_hint_select_is_locked_when_applying():
 
     _run(["--apply"], conn)
 
-    assert any(s.startswith("SELECT c.id") and s.endswith("FOR UPDATE OF c")
+    assert any(s.startswith("SELECT c.id") and s.endswith("FOR UPDATE OF c, e")
                for s in _statements(conn))
 
 
@@ -329,6 +331,37 @@ def test_a_hint_edited_meanwhile_rolls_the_run_back():
     with pytest.raises(RuntimeError, match="hint 28"):
         _run(["--apply"], conn)
 
+    conn.commit.assert_not_called()
+
+
+# --- write-lock: forward apply ---------------------------------------------------
+
+def test_apply_takes_the_write_lock_first():
+    conn = _fake_connection()
+
+    _run(["--apply"], conn)
+
+    statements = _statements(conn)
+    assert statements[0].startswith("SELECT pg_try_advisory_xact_lock")
+    assert _params(conn, "SELECT pg_try_advisory_xact_lock") == [
+        ("tools/backfill_failure_categories",)]
+
+
+def test_dry_run_takes_no_write_lock():
+    conn = _fake_connection()
+
+    _run([], conn)
+
+    assert not any(s.startswith("SELECT pg_try_advisory_xact_lock") for s in _statements(conn))
+
+
+def test_apply_refuses_when_another_write_run_holds_the_lock():
+    conn = _fake_connection(lock_free=False)
+
+    with pytest.raises(SystemExit, match="another --apply"):
+        _run(["--apply"], conn)
+
+    assert len(_statements(conn)) == 1
     conn.commit.assert_not_called()
 
 
@@ -435,7 +468,8 @@ CURRENT_TABLE_ORDER = ("execution_records", "execution_embeddings", "anti_patter
 
 
 def _fake_restore_connection(labels=LABELS, live=None, collisions=(), snapshots=(STAMP,),
-                             missing=None, update_rowcount=1, inserted=(1, 1), counts=(1, 1)):
+                             missing=None, update_rowcount=1, inserted=(1, 1), counts=(1, 1),
+                             lock_free: bool = True):
     """A psycopg-shaped double for --restore. Nothing here touches a database.
 
     Every snapshot the double lists returns the same `labels`; `live` (default: the
@@ -448,7 +482,9 @@ def _fake_restore_connection(labels=LABELS, live=None, collisions=(), snapshots=
     def execute(sql, params=None):
         cursor = MagicMock()
         cursor.rowcount = 1
-        if sql.startswith("SELECT to_regclass"):
+        if sql.startswith("SELECT pg_try_advisory_xact_lock"):
+            cursor.fetchone.return_value = {"locked": lock_free}
+        elif sql.startswith("SELECT to_regclass"):
             cursor.fetchone.return_value = {"t": None if params[0] == missing else params[0]}
         elif sql.startswith("SELECT tablename FROM pg_tables"):
             cursor.fetchall.return_value = [
@@ -601,3 +637,34 @@ def test_restore_puts_a_hint_back_through_compare_and_set_and_audits_it():
     audit = _params(conn, "INSERT INTO hint_audit")
     assert len(audit) == 1 and "restore" in audit[0][1]
     conn.commit.assert_called_once()
+
+
+# --- write-lock: restore ---------------------------------------------------------
+
+def test_restore_apply_takes_the_write_lock_first():
+    conn = _fake_restore_connection()
+
+    _run(["--restore", STAMP, "--apply"], conn)
+
+    statements = _statements(conn)
+    assert statements[0].startswith("SELECT pg_try_advisory_xact_lock")
+    assert _params(conn, "SELECT pg_try_advisory_xact_lock") == [
+        ("tools/backfill_failure_categories",)]
+
+
+def test_restore_dry_run_takes_no_write_lock():
+    conn = _fake_restore_connection()
+
+    _run(["--restore", STAMP], conn)
+
+    assert not any(s.startswith("SELECT pg_try_advisory_xact_lock") for s in _statements(conn))
+
+
+def test_restore_apply_refuses_when_another_write_run_holds_the_lock():
+    conn = _fake_restore_connection(lock_free=False)
+
+    with pytest.raises(SystemExit, match="another --apply"):
+        _run(["--restore", STAMP, "--apply"], conn)
+
+    assert len(_statements(conn)) == 1
+    conn.commit.assert_not_called()
