@@ -838,6 +838,100 @@ class TestRunDetailEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/history/{run_id} — failure reason (error_message + failure_sentence)
+# ---------------------------------------------------------------------------
+
+_RID_FAILED = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"    # user1's, classifiable
+_RID_ERRORED = "f1111111-1111-4111-8111-111111111111"   # user1's, status "error"
+_RID_UNCLASSIFIABLE = "f2222222-2222-4222-8222-222222222222"  # user1's, failed
+_RID_PASSED_STALE_MSG = "f3333333-3333-4333-8333-333333333333"  # passed, stale msg
+_RID_FOREIGN_FAILED = "f4444444-4444-4444-8444-444444444444"    # user2's, failed
+
+
+@pytest.fixture
+def failure_seeded(registry):
+    registry.record_start(_RID_FAILED, _USER1, "q", "generated")
+    registry.set_status(
+        _RID_FAILED, "failed",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    registry.record_start(_RID_ERRORED, _USER1, "q", "generated")
+    registry.set_status(
+        _RID_ERRORED, "error",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    registry.record_start(_RID_UNCLASSIFIABLE, _USER1, "q", "generated")
+    registry.set_status(
+        _RID_UNCLASSIFIABLE, "failed",
+        error_message="Something entirely unclassifiable happened here.",
+    )
+    # Seed a message on the row via record_start's newest-non-NULL-wins, then
+    # advance to "passed" via set_status with no message — set_status writes
+    # EXACTLY what it is given, so the brief's "passed with a message still on
+    # the row" case is seeded through record_start instead (its own
+    # newest-non-NULL-wins rule), matching the controller note verbatim.
+    registry.record_start(
+        _RID_PASSED_STALE_MSG, _USER1, "q", "passed",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    registry.record_start(_RID_FOREIGN_FAILED, _USER2, "q", "generated")
+    registry.set_status(
+        _RID_FOREIGN_FAILED, "failed",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    return registry
+
+
+class TestRunDetailFailureReason:
+    def test_failed_run_returns_both_fields(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_FAILED}").json()
+        finally:
+            _close(client)
+        assert body["error_message"] == "No keyword with name 'Clikc Button' found."
+        assert body["failure_sentence"] == (
+            "The test calls a keyword that Robot Framework does not recognize — "
+            "check the keyword name for a typo or a missing library import."
+        )
+
+    def test_errored_run_returns_both_fields(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_ERRORED}").json()
+        finally:
+            _close(client)
+        assert body["error_message"] == "No keyword with name 'Clikc Button' found."
+        assert body["failure_sentence"] is not None
+
+    def test_passed_run_with_stale_message_returns_neither_key(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_PASSED_STALE_MSG}").json()
+        finally:
+            _close(client)
+        assert "error_message" not in body
+        assert "failure_sentence" not in body
+
+    def test_unclassifiable_message_is_raw_text_with_null_sentence(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_UNCLASSIFIABLE}").json()
+        finally:
+            _close(client)
+        assert body["error_message"] == "Something entirely unclassifiable happened here."
+        assert body["failure_sentence"] is None
+
+    def test_caller_who_cannot_see_the_run_is_refused(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            resp = client.get(f"/api/history/{_RID_FOREIGN_FAILED}")
+        finally:
+            _close(client)
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # POST /execute-test {rerun_of} — re-execute stored code, learning skipped
 # ---------------------------------------------------------------------------
 

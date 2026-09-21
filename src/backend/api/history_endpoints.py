@@ -58,6 +58,7 @@ from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import RunOwnership, get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.failure_sentences import failure_sentence
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,12 @@ router = APIRouter()
 
 # Statuses with Robot artifacts on disk — only these runs have a log.html.
 _REPORT_STATUSES = ("passed", "failed")
+
+# Statuses for which the detail payload carries a failure reason (Ruling R7).
+# A reused run id (Task 1) can hold a stale message while "running" or after
+# a later "passed" — every other status pops error_message and adds no
+# failure_sentence, so a stale reason never renders against the wrong outcome.
+_FAILURE_STATUSES = ("failed", "error")
 
 
 def _can_open(scope: HistoryScope, user: dict | None, run: dict) -> bool:
@@ -395,6 +402,14 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
 
     run["robot_code"] = resolve_robot_code(run)
     run["has_report"] = run["status"] in _REPORT_STATUSES
+    # R7: only a failed/errored run carries a reason. Every other status pops
+    # the column the SELECT put on the dict and adds no sentence — a reused
+    # run id (Task 1) can still hold a stale message while running or after a
+    # later pass, and it must not render against that outcome.
+    if run["status"] in _FAILURE_STATUSES:
+        run["failure_sentence"] = failure_sentence(run["error_message"])
+    else:
+        run.pop("error_message", None)
     # At most ONE extra lookup, and only for a row that IS a re-run — the
     # drawer header offers the same link the row pill does, so it needs the
     # same answer. Same helper, so the two cannot disagree. The feedback flag

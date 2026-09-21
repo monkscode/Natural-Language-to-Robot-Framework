@@ -4158,6 +4158,7 @@ class RunRegistry:
                 row = conn.execute(
                     "SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
                     "       t.robot_code, t.rerun_of, t.status, t.org_id, "
+                    "       t.error_message, "
                     "       t.created_at, t.updated_at, "
                     "       t.test_id, t.ran_as_platform_admin, "
                     "       te.name AS test_name, "
