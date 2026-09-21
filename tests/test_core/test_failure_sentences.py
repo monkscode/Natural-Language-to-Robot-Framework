@@ -83,6 +83,20 @@ ROBOT_DATA = (
     "ValueError: Argument 'dictionary' got value 'Option 2' that cannot be "
     "converted to Mapping: Invalid expression."
 )
+# lines 81-84 — the "used with invalid index" shape of robot_data_error
+INVALID_INDEX = (
+    "String '${selected_options}[0]' used with invalid index 'label'. To use "
+    "'[label]' as a literal value, it needs to be escaped like '\\[label]'."
+)
+# the "evaluating expression" shape of robot_data_error — no committed test
+# shape exists for it (Ruling R5 source (1) checked first, then (2)); copied
+# from bench/private/e5b/e5b_replay_rows.json, host books.toscrape.com (a
+# public demo book-catalogue site, on the R5 allow-list) — a book title, not
+# a URL or host, so nothing needed replacing with example.com.
+EVAL_EXPRESSION = (
+    "Evaluating expression 'len(A Light in the Attic) == 20' failed: "
+    "SyntaxError: invalid syntax. Perhaps you forgot a comma? (<string>, line 1)"
+)
 # lines 87-91
 WAITFOR_HIDDEN = (
     "TimeoutError: locator.waitFor: Timeout 5000ms exceeded.\n"
@@ -129,7 +143,9 @@ A1_COMPOSITE = "Query implies iteration ('verify all rows show status') but code
     (STRICT, "more than one", "multiple_elements_found"),
     (ASSERTION_TRUTH_FAILED, "true", "assertion_truth_failed"),
     (BAD_SELECTOR, "selector", "invalid_selector_syntax"),
-    (ROBOT_DATA, "convert", "robot_data_error"),
+    (ROBOT_DATA, "arguments", "robot_data_error"),
+    (INVALID_INDEX, "arguments", "robot_data_error"),
+    (EVAL_EXPRESSION, "arguments", "robot_data_error"),
     (NET_ERR, "network", "navigation_network_error"),
     (ATTR_MISSING, "attribute", "attribute_missing"),
     (ANIMATION_OR_DISABLED, "disabled", "animation_or_disabled"),

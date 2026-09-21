@@ -47,7 +47,7 @@ def _element_never_resolved() -> str:
     return (
         "The locator for this element never matched anything on the page. The "
         "element may not exist, or the page may have changed since the test was "
-        "generated."
+        "written."
     )
 
 
@@ -80,16 +80,16 @@ def _assertion_truth_failed() -> str:
 
 def _invalid_selector_syntax() -> str:
     return (
-        "The locator generated for this step is not valid selector syntax, so it "
-        "could not run. This is a test-generation problem, not something wrong "
-        "with the page."
+        "The locator used in this step is not valid selector syntax, so it could "
+        "not run. Fix the selector's syntax before rerunning."
     )
 
 
 def _robot_data_error() -> str:
     return (
-        "Robot Framework could not convert a value to the type this step needed — "
-        "a mismatch between what the step expected and what it actually received."
+        "A value in this step could not be used as written — wrong type, an "
+        "index that does not exist, or an expression that could not be "
+        "evaluated. Check the step's arguments."
     )
 
 
@@ -152,15 +152,15 @@ def _option_not_found() -> str:
 
 def _wrong_keyword_name() -> str:
     return (
-        "The generated test used a keyword that does not exist in the Browser "
-        "library. This is a test-generation problem."
+        "The test calls a keyword that Robot Framework does not recognize — "
+        "check the keyword name for a typo or a missing library import."
     )
 
 
 def _wrong_argument_count() -> str:
     return (
-        "A keyword in the generated test was called with the wrong number of "
-        "arguments. This is a test-generation problem."
+        "A keyword in the test was called with the wrong number of arguments. "
+        "Check that step's arguments against the keyword's definition."
     )
 
 
