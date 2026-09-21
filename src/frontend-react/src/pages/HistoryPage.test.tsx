@@ -474,6 +474,62 @@ describe('HistoryPage drawer — the test, the version and who ran it', () => {
   })
 })
 
+describe('HistoryPage drawer — why a run failed', () => {
+  // GET /api/history/{run_id} sends error_message and failure_sentence ONLY
+  // for status failed/error (Task 4, backend). The drawer renders the
+  // sentence prominent and the raw message below it, muted — the shape
+  // learning/RunDrawer.tsx already uses for its own failed_keyword/error_message
+  // pair — and renders nothing at all when neither key is present or both
+  // are null, even on a failed run: no empty box.
+  it('shows both the sentence and the raw message for a failed run', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, {
+      status: 'failed',
+      failure_sentence: 'The locator for the search box could not be found.',
+      error_message: 'ElementNotFound: css=input[name="q"]',
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByText('The locator for the search box could not be found.')).toBeInTheDocument()
+    expect(screen.getByText('ElementNotFound: css=input[name="q"]')).toBeInTheDocument()
+  })
+
+  it('shows the message alone for an error run with no sentence', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, {
+      status: 'error',
+      failure_sentence: null,
+      error_message: 'Docker container exited with code 137',
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByText('Docker container exited with code 137')).toBeInTheDocument()
+  })
+
+  it('shows nothing for a passed run (keys absent)', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { status: 'passed' })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText(/ElementNotFound/)).toBeNull()
+    expect(screen.queryByText(/exited with code/)).toBeNull()
+  })
+
+  it('shows nothing for a failed run with both fields null', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, {
+      status: 'failed',
+      failure_sentence: null,
+      error_message: null,
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText(/ElementNotFound/)).toBeNull()
+  })
+})
+
 describe('HistoryPage drawer — the re-run-of id', () => {
   // The owner's standing rule is unconditional: a run/workflow id shown in
   // any UI is full AND click-to-copy. The accessible branch already satisfies
