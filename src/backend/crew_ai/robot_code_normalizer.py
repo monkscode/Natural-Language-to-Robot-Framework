@@ -317,6 +317,17 @@ def strip_redundant_css_prefix(robot_code: str) -> str:
 # `Wait For Elements State    hidden` passes for it.
 _VISIBILITY_OPERATORS = {"contains": "visible", "*=": "visible", "notcontains": "hidden"}
 
+# The `validate` operator takes a Python expression over the states list. Browser's own
+# libdoc gives `Get Element States    h1    validate    value & visible` as the way to fail
+# on an invisible element (data/libdocs/browser.json), so the assembler emits it — and it is
+# the same check as `contains visible`. Only this exact expression converts: every other one
+# either returns a value, names another state, or says something a single
+# Wait For Elements State cannot. At most one ordinary space may sit either side of `&`
+# (`value&visible` is the same Python expression); a space inside a word, a non-breaking space
+# or a form feed is not the idiom and stays unchanged. Case is kept — `VISIBLE` is not a state
+# Get Element States itself accepts.
+_VALIDATE_VISIBLE_RE = re.compile(r"value ?& ?visible")
+
 # Keywords that run another keyword and swallow or retry its failure. A check
 # inside one of the file's own keywords can be reached through them, and there a
 # 30s wait instead of a ~1s check changes the outcome (a probe that used to
@@ -335,7 +346,8 @@ _KEYWORDS_SECTION_RE = re.compile(r"^\*++[ \t]*+keywords?[ \t]*+\*", re.IGNORECA
 
 
 def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
-    """Rewrite `Get Element States    <loc>    contains    visible` to
+    """Rewrite `Get Element States    <loc>    contains    visible` and
+    `Get Element States    <loc>    validate    value & visible` to
     `Wait For Elements State    <loc>    visible` (`not contains` -> `hidden`).
 
     `Get Element States` looks for the element for only 250ms and retries its
@@ -348,10 +360,12 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
     Only an indented step that is exactly that check is rewritten; anything
     whose meaning could change is left alone: an assigned result (WFES returns
-    nothing), any state other than lowercase `visible`, any other operator, any
-    extra cell except a `message=` without `{}` placeholders (WFES formats the
-    message with only selector/function/timeout) and a trailing comment,
-    wrapped calls, settings, comments and continuation lines.
+    nothing), any state other than lowercase `visible`, any operator other than
+    `contains`/`not contains` (except `validate` with exactly `value & visible`,
+    which converts), any extra cell except a `message=` without `{}`
+    placeholders (WFES formats the message with only selector/function/timeout)
+    and a trailing comment, wrapped calls, settings, comments and continuation
+    lines. Every other `validate` expression is left alone.
 
     The whole file is left unchanged when it catches errors around code the
     line cannot see: a `TRY` block, or its own keywords together with an
@@ -413,9 +427,16 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
             continue
 
         operator = re.sub(r"[\s_]+", "", parts[operator_idx].lower())
-        target_state = _VISIBILITY_OPERATORS.get(operator)
         state_cell = parts[state_idx]
-        if target_state is None or state_cell.strip() != "visible":
+        if operator == "validate":
+            target_state = (
+                "visible" if _VALIDATE_VISIBLE_RE.fullmatch(state_cell.strip()) else None
+            )
+        else:
+            target_state = _VISIBILITY_OPERATORS.get(operator)
+            if state_cell.strip() != "visible":
+                target_state = None
+        if target_state is None:
             out_lines.append(line)
             continue
 
@@ -438,7 +459,10 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
             else ""
         )
         parts[keyword_idx] = f"{prefix}Wait For Elements State"
-        parts[state_idx] = state_cell.replace("visible", target_state, 1)
+        # The whole cell becomes the state: for `contains`/`not contains` the cell is already
+        # `visible`, but a `validate` cell is the expression `value & visible`. Replacing the
+        # stripped content keeps any whitespace the cell carries.
+        parts[state_idx] = state_cell.replace(state_cell.strip(), target_state, 1)
         # Cells sit at even indices with their separators between them, so the
         # separator in front of the operator is the part just before it.
         del parts[operator_idx - 1 : operator_idx + 1]

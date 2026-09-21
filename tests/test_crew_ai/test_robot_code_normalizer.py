@@ -525,6 +525,24 @@ _WFES = "Wait For Elements State"
         ("a comment-eaten locator still reaches dryrun as a broken call",
          "    Get Element States    #1abc    contains    visible",
          f"    {_WFES}    #1abc    visible"),
+        ("validate value & visible is Browser's documented idiom for the same check",
+         "    Get Element States    ${h}    validate    value & visible",
+         f"    {_WFES}    ${{h}}    visible"),
+        ("validate value&visible without spaces",
+         "    Get Element States    ${h}    validate    value&visible",
+         f"    {_WFES}    ${{h}}    visible"),
+        ("validate operator case is ignored, as Robot ignores it",
+         "    Get Element States    ${h}    VALIDATE    value & visible",
+         f"    {_WFES}    ${{h}}    visible"),
+        ("validate value & visible with a library prefix keeps the prefix",
+         "    Browser.Get Element States    ${h}    validate    value & visible",
+         f"    Browser.{_WFES}    ${{h}}    visible"),
+        ("validate value & visible with a safe message= is still rewritten",
+         "    Get Element States    ${h}    validate    value & visible    message=nope",
+         f"    {_WFES}    ${{h}}    visible    message=nope"),
+        ("validate value & visible keeps a trailing comment",
+         "    Get Element States    ${h}    validate    value & visible    # why",
+         f"    {_WFES}    ${{h}}    visible    # why"),
         # --- left unchanged ---
         ("assigned result: WFES returns nothing",
          "    ${s}=    Get Element States    ${h}    contains    visible", None),
@@ -536,8 +554,35 @@ _WFES = "Wait For Elements State"
          "    Get Element States    ${h}    then    bool(value & visible)", None),
         ("evaluate",
          "    Get Element States    ${h}    evaluate    'visible' in value", None),
-        ("validate",
-         "    Get Element States    ${h}    validate    value & visible", None),
+        ("validate with extra spaces splits into cells and is left alone",
+         "    Get Element States    ${h}    validate    value  &  visible", None),
+        ("validate value & visible & enabled is more than one state",
+         "    Get Element States    ${h}    validate    value & visible & enabled", None),
+        ("validate not value & visible is the opposite check",
+         "    Get Element States    ${h}    validate    not value & visible", None),
+        ("validate value & hidden is deliberately out of scope",
+         "    Get Element States    ${h}    validate    value & hidden", None),
+        ("validate value & VISIBLE is not the lowercase state",
+         "    Get Element States    ${h}    validate    value & VISIBLE", None),
+        ("an assigned validate result would lose its value",
+         "    ${s}=    Get Element States    ${h}    validate    value & visible", None),
+        ("then returns a value, not a check",
+         "    Get Element States    ${h}    then    value & visible", None),
+        ("evaluate returns a value, not a check",
+         "    Get Element States    ${h}    evaluate    value & visible", None),
+        ("== means the states list equals exactly this",
+         "    Get Element States    ${h}    ==    value & visible", None),
+        ("validate on its own is not the visible expression",
+         "    Get Element States    ${h}    validate    value", None),
+        ("validate value & vis ible: a space inside a word is not the idiom",
+         "    Get Element States    ${h}    validate    value & vis ible", None),
+        ("validate with non-breaking spaces around & is a SyntaxError, not the idiom",
+         "    Get Element States    ${h}    validate    value\xa0&\xa0visible", None),
+        ("validate with a form feed before visible is a Robot line break, not the idiom",
+         "    Get Element States    ${h}    validate    value &\x0cvisible", None),
+        ("guard: Robot strips non-breaking-space padding from a cell, so it still converts",
+         "    Get Element States    ${h}    validate    \xa0value & visible\xa0",
+         f"    {_WFES}    ${{h}}    \xa0visible\xa0"),
         ("== is an exact list compare",
          "    Get Element States    ${h}    ==    visible", None),
         ("contains hidden differs from WFES hidden for a missing element",
@@ -608,6 +653,47 @@ def test_rewrite_visibility_checks_is_idempotent():
     once = rewrite_visibility_checks_to_wait(source)
     assert once != source
     assert rewrite_visibility_checks_to_wait(once) == once
+
+
+def test_rewrite_visibility_checks_validate_is_idempotent():
+    source = "    Get Element States    ${h}    validate    value & visible"
+    once = rewrite_visibility_checks_to_wait(source)
+    assert once != source
+    assert rewrite_visibility_checks_to_wait(once) == once
+
+
+def test_rewrite_visibility_checks_validate_respects_the_file_guard():
+    source = ("*** Settings ***\nLibrary    Browser\n\n"
+              "*** Test Cases ***\nT\n"
+              "    TRY\n"
+              "        Get Element States    ${h}    validate    value & visible\n"
+              "    EXCEPT    AS    ${e}\n"
+              "        Log    ${e}\n"
+              "    END\n")
+    assert rewrite_visibility_checks_to_wait(source) == source
+
+
+def test_rewrite_visibility_checks_validate_converts_without_the_file_guard():
+    """Control for the TRY test above: same file, no TRY, so the line must convert.
+
+    Without this, the guard test passes even when the validate branch never fires.
+    """
+    source = ("*** Settings ***\nLibrary    Browser\n\n"
+              "*** Test Cases ***\nT\n"
+              "    Get Element States    ${h}    validate    value & visible\n")
+    assert rewrite_visibility_checks_to_wait(source) == (
+        "*** Settings ***\nLibrary    Browser\n\n"
+        "*** Test Cases ***\nT\n"
+        "    Wait For Elements State    ${h}    visible\n"
+    )
+
+
+def test_rewrite_visibility_checks_validate_matches_the_live_u07_line():
+    """The exact line two live u07 runs generated on 2026-09-18, which failed in ~1.4s."""
+    source = "    Get Element States    ${dashboard_heading}    validate    value & visible"
+    assert rewrite_visibility_checks_to_wait(source) == (
+        "    Wait For Elements State    ${dashboard_heading}    visible"
+    )
 
 
 _SUITE = "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
