@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:44:23.367868" rpa="false" schemaversion="5">
+<suite id="s1" name="Silenced Var Then Teardown Failure" source="/w/silenced_var_then_teardown_failure.robot">
+<test id="s1-t1" name="Silenced Var Then Teardown" line="2">
+<kw name="Set Log Level" owner="BuiltIn">
+<arg>NONE</arg>
+<doc>Sets the log threshold to the specified level.</doc>
+<status status="PASS" start="2026-09-21T18:44:23.408956" elapsed="0.000258"/>
+</kw>
+<variable name="${x}">
+<var>${undefined_variable}</var>
+<status status="FAIL" start="2026-09-21T18:44:23.409273" elapsed="0.000267">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.</status>
+</variable>
+<kw name="Fail" owner="BuiltIn" type="TEARDOWN">
+<arg>Error: teardown message</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:44:23.409679" elapsed="0.000198">Error: teardown message</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:44:23.408585" elapsed="0.001351">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.
+
+Also teardown failed:
+Error: teardown message</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:44:23.368740" elapsed="0.041387"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Silenced Var Then Teardown Failure" id="s1" pass="0" fail="1" skip="0">Silenced Var Then Teardown Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

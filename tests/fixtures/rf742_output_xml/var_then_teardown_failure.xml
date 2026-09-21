@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:43:32.587908" rpa="false" schemaversion="5">
+<suite id="s1" name="Var Then Teardown Failure" source="/w/var_then_teardown_failure.robot">
+<test id="s1-t1" name="Var Then Teardown" line="2">
+<variable name="${x}">
+<msg time="2026-09-21T18:43:32.626404" level="FAIL">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.</msg>
+<var>${undefined_variable}</var>
+<status status="FAIL" start="2026-09-21T18:43:32.626175" elapsed="0.000263">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.</status>
+</variable>
+<kw name="Fail" owner="BuiltIn" type="TEARDOWN">
+<msg time="2026-09-21T18:43:32.626973" level="FAIL">Error: teardown message</msg>
+<arg>Error: teardown message</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:32.626748" elapsed="0.000289">Error: teardown message</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:32.626030" elapsed="0.001041">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.
+
+Also teardown failed:
+Error: teardown message</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:43:32.588712" elapsed="0.038557"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Var Then Teardown Failure" id="s1" pass="0" fail="1" skip="0">Var Then Teardown Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

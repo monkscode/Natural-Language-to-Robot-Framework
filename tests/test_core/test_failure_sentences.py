@@ -283,10 +283,74 @@ def test_a_skipped_test_is_not_a_failure():
     assert first_failure_message(_xml("skip_then_fail")) == "Error: the real one"
 
 
-def test_a_failure_outside_any_keyword_falls_back_to_the_test_status():
-    """A VAR statement is not a <kw>: the test's own status text is the reason."""
-    assert first_failure_message(_xml("var_failure")) == (
-        "Setting variable '${x}' failed: Variable '${undefined_variable}' not found.")
+_VAR_FAILURE = "Setting variable '${x}' failed: Variable '${undefined_variable}' not found."
+
+
+def test_a_failed_var_statement_returns_its_own_message():
+    """A VAR statement is a <variable>, not a <kw>, and carries its own FAIL msg."""
+    assert first_failure_message(_xml("var_failure")) == _VAR_FAILURE
+
+
+# --- the first uncaught failure is THE failure (Ruling R15) ---
+
+def test_a_later_teardown_failure_never_replaces_the_first_failure():
+    """VAR fails, then [Teardown] fails: the VAR failure is the reason."""
+    assert first_failure_message(_xml("var_then_teardown_failure")) == _VAR_FAILURE
+
+
+@pytest.mark.parametrize("fixture,expected", [
+    # Set Log Level NONE: the failed <variable> carries no <msg> at all
+    ("silenced_var_then_teardown_failure", _VAR_FAILURE),
+    # Set Log Level NONE: <if> > <branch> > <kw>, none with a <msg>
+    ("silenced_if_then_teardown_failure", _timeout("click", "#silenced")),
+])
+def test_a_first_failure_without_a_message_falls_back_to_the_test_status_cut_before_the_teardown_tail(
+        fixture, expected):
+    """The test's status reads '<reason>\\n\\nAlso teardown failed:\\n<teardown msg>'."""
+    root = ElementTree.parse(_xml(fixture)).getroot()
+    assert "\n\nAlso teardown failed:\nError: teardown message" in root.find(".//test/status").text
+
+    assert first_failure_message(_xml(fixture)) == expected
+
+
+# --- a caught TRY failure is skipped even when its handler fails (Ruling R2a) ---
+
+def test_a_failing_except_handler_is_the_reason_not_the_caught_try_failure():
+    assert first_failure_message(_xml("try_handler_fails")) == "Could not click the button"
+
+
+def test_a_failing_finally_after_a_caught_try_failure_is_the_reason():
+    assert first_failure_message(_xml("try_caught_then_finally_fails")) == (
+        "Error: cleanup in finally failed")
+
+
+def test_an_uncaught_try_failure_is_still_the_reason():
+    """Every EXCEPT branch NOT RUN: nothing caught it."""
+    assert first_failure_message(_xml("try_uncaught")) == _timeout("click", "#uncaught")
+
+
+# --- a keyword without its own FAIL msg yields its failure's full text (Ruling R16) ---
+
+def test_a_user_keyword_yields_the_full_message_not_its_shortened_status():
+    """RF cut the user keyword's <status> text to 3,045 chars with a marker in
+    the middle; the inner Fail's <msg level="FAIL"> holds all 4,605."""
+    message = first_failure_message(_xml("user_keyword_long_failure"))
+
+    assert message.startswith(_timeout("click", "#wrapped"))
+    assert len(message) == 4605
+    assert "Message content over the limit has been removed" not in message
+
+
+def test_wait_until_keyword_succeeds_keeps_its_own_message():
+    assert first_failure_message(_xml("retry_all_attempts_fail")) == (
+        "Keyword 'Fail' failed after retrying 2 times. The last error was: "
+        + _timeout("click", "#retry"))
+
+
+def test_run_keyword_and_expect_error_keeps_its_own_mismatch_message():
+    assert first_failure_message(_xml("expect_error_mismatch")) == (
+        "Expected error 'Nothing like this*' but got '"
+        + _timeout("click", "#mismatch") + "'.")
 
 
 def test_a_suite_setup_failure_is_stored_without_its_header():
@@ -310,11 +374,15 @@ def test_a_parent_suite_teardown_header_is_stripped():
         "click", "#suite-teardown")
 
 
-def test_raw_output_of_a_suite_teardown_failure_has_no_failing_test():
+def test_a_suite_teardown_failure_is_the_reason_when_no_test_failed():
     """RF 7.4.2 leaves every test PASS in the raw output.xml when only the
-    suite teardown fails (statistics still count it failed). Pinned so the
-    gap stays visible: there is no failing test to read a reason from."""
-    assert first_failure_message(_xml("suite_teardown_failure")) is None
+    suite teardown fails (statistics still count it failed), so the reason is
+    read off the failed suite-level teardown keyword (Ruling R14)."""
+    root = ElementTree.parse(_xml("suite_teardown_failure")).getroot()
+    assert all(t.find("status").get("status") == "PASS" for t in root.iter("test"))
+
+    assert first_failure_message(_xml("suite_teardown_failure")) == _timeout(
+        "click", "#suite-teardown")
 
 
 @pytest.mark.parametrize("fixture,header", [

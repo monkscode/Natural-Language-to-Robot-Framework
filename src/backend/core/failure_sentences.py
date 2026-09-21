@@ -239,60 +239,113 @@ def _strip_rf_header(text: str) -> str:
     return text
 
 
+# RF appends a failed test teardown's text to the test's own status text.
+# Spelling read off a real run (var_then_teardown_failure.xml).
+_TEARDOWN_TAIL = "\n\nAlso teardown failed:"
+
+
 def _status(element: ElementTree.Element) -> str | None:
     status = element.find("status")
     return status.get("status") if status is not None else None
 
 
-def _keyword_message(keyword: ElementTree.Element) -> str:
-    """<msg level="FAIL"> text, else <status> text — the learning parser's
-    precedence (failure_analyzer.py:176-183). The msg is also the full text:
-    RF cuts the middle out of a long <status> text, never out of the msg."""
-    fail_msg = keyword.find("msg[@level='FAIL']")
-    if fail_msg is not None and fail_msg.text and fail_msg.text.strip():
-        return fail_msg.text.strip()
-    status = keyword.find("status")
+def _status_text(element: ElementTree.Element) -> str:
+    status = element.find("status")
     return (status.text or "").strip() if status is not None else ""
 
 
-def _first_uncaught_failure(test: ElementTree.Element) -> str | None:
-    """The message of the first FAIL <kw>, in document order, whose every
-    ancestor inside the test also FAILED.
+def _own_fail_message(element: ElementTree.Element) -> str:
+    """The element's own <msg level="FAIL"> text, or "". The msg is the full
+    text: RF cuts the middle out of a long <status> text, never out of it."""
+    fail_msg = element.find("msg[@level='FAIL']")
+    if fail_msg is not None and fail_msg.text and fail_msg.text.strip():
+        return fail_msg.text.strip()
+    return ""
 
-    A FAIL keyword under a PASS ancestor was CAUGHT — Run Keyword And Ignore
-    Error / Return Status / Expect Error, a retried Wait Until Keyword
-    Succeeds attempt, a TRY branch an EXCEPT handled — and is not why the test
-    failed (Ruling R2). So only FAIL elements are descended into. Iterative,
-    so a deeply nested file cannot hit Python's recursion limit.
+
+def _is_caught_try_branch(branch: ElementTree.Element, parent: ElementTree.Element) -> bool:
+    """A failed TRY branch is CAUGHT when an EXCEPT beside it ran (Ruling R2a).
+
+    When that handler — or a FINALLY — fails too, RF marks the <try> AND the
+    TRY branch FAIL, so the branch's own status cannot tell. An EXCEPT that did
+    not match is NOT RUN; one that ran is PASS or FAIL.
     """
-    stack = [iter(test)]
-    while stack:
-        child = next(stack[-1], None)
-        if child is None:
-            stack.pop()
-            continue
-        if _status(child) != "FAIL":
-            continue
-        if child.tag == "kw":
-            message = _keyword_message(child)
-            if message:
-                return message
-        stack.append(iter(child))
+    if branch.tag != "branch" or branch.get("type") != "TRY":
+        return False
+    return any(sibling.get("type") == "EXCEPT" and _status(sibling) != "NOT RUN"
+               for sibling in parent.findall("branch"))
+
+
+def _first_uncaught_failure(parent: ElementTree.Element) -> ElementTree.Element | None:
+    """The first child of `parent`, in document order, that FAILED uncaught.
+
+    Only FAIL children count, so anything under a PASS element — Run Keyword
+    And Ignore Error / Return Status / Expect Error, a Wait Until Keyword
+    Succeeds that got there in the end, a TRY an EXCEPT handled — is never
+    reached (Ruling R2), and a caught TRY branch is skipped (Ruling R2a).
+    """
+    for child in parent:
+        if _status(child) == "FAIL" and not _is_caught_try_branch(child, parent):
+            return child
     return None
 
 
+def _failure_text(element: ElementTree.Element) -> str:
+    """The full failure text a failed element stands for, or "".
+
+    Its own <msg level="FAIL">; else, for an element without one (a user
+    keyword, Run Keyword, IF, FOR, a TRY branch), the same for its first
+    uncaught failed child, all the way down — never a later sibling (Ruling
+    R15). Library wrappers that write their own FAIL msg (Wait Until Keyword
+    Succeeds after its last retry, a Run Keyword And Expect Error mismatch)
+    keep it. A <kw> whose chain holds no msg falls back to its own <status>
+    text (Ruling R16); any other element to "" — the caller then reads the
+    test's status. Iterative: deep nesting cannot hit the recursion limit.
+    """
+    current: ElementTree.Element | None = element
+    while current is not None:
+        message = _own_fail_message(current)
+        if message:
+            return message
+        current = _first_uncaught_failure(current)
+    return _status_text(element) if element.tag == "kw" else ""
+
+
+def _test_status_reason(test: ElementTree.Element) -> str:
+    """The test's own status text: RF's header line stripped, and cut before
+    the "Also teardown failed:" tail — a teardown that failed LATER is not the
+    reason (Ruling R15)."""
+    text = _strip_rf_header(_status_text(test))
+    return text.partition(_TEARDOWN_TAIL)[0].strip()
+
+
+def _suite_teardowns(suite: ElementTree.Element):
+    """Every suite-level <kw type="TEARDOWN">, in document order (a child
+    suite's teardown is written before its parent's)."""
+    for child in suite:
+        if child.tag == "suite":
+            yield from _suite_teardowns(child)
+        elif child.tag == "kw" and child.get("type") == "TEARDOWN":
+            yield child
+
+
 def first_failure_message(output_xml_path: str | None) -> str | None:
-    """The first failing test's failure text from output.xml, or None.
+    """Why the run failed, read from output.xml, or None.
 
     The FIRST FAILING <test>, not the first <test>: multi-test files exist.
-    Its first uncaught failed keyword's full message (every line — the
-    placeholder token lives in the call log, never on line 1); when no keyword
-    carries one, the test's own status text with RF's header line removed.
+    In it, the first uncaught failed element in document order IS the
+    failure; its full text comes from _failure_text (every line — the
+    placeholder token lives in the call log, never on line 1). When that
+    yields nothing — or the test holds no failed element, as under a failed
+    suite setup — the test's own status text, header-stripped and cut before
+    the teardown tail.
 
-    None when there is no path, the file cannot be read or parsed, or no test
+    When NO test failed but the run did: RF writes a suite-TEARDOWN failure
+    onto no test in the raw file (every test stays PASS), so the first failed
+    suite-level teardown keyword's text is the reason (Ruling R14).
+
+    None when there is no path, the file cannot be read or parsed, or nothing
     failed. Never a parser error string: that would be stored as the reason.
-    Note that RF writes a suite-TEARDOWN failure onto no test in the raw file
-    (every test stays PASS), so that run has no failing test here.
     """
     if not output_xml_path:
         return None
@@ -301,12 +354,13 @@ def first_failure_message(output_xml_path: str | None) -> str | None:
     except (OSError, ElementTree.ParseError) as e:
         logger.warning("Could not read output.xml for a failure reason: %s", e)
         return None
-    for test in root.iter("test"):
-        if _status(test) != "FAIL":
-            continue
-        message = _first_uncaught_failure(test)
-        if message:
-            return message
-        status = test.find("status")
-        return _strip_rf_header(status.text or "") or None
+    failed_test = next((t for t in root.iter("test") if _status(t) == "FAIL"), None)
+    if failed_test is not None:
+        first = _first_uncaught_failure(failed_test)
+        message = _failure_text(first) if first is not None else ""
+        return message or _test_status_reason(failed_test) or None
+    for suite in root.findall("suite"):
+        for teardown in _suite_teardowns(suite):
+            if _status(teardown) == "FAIL":
+                return _failure_text(teardown) or None
     return None

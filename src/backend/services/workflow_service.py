@@ -1232,8 +1232,9 @@ def _failure_reason(output_xml_path: str | None) -> tuple[str | None, str | None
     try:
         message = _stored_reason(first_failure_message(output_xml_path))
         return message, failure_sentence(message)
-    except Exception as e:
-        logging.error("[RUN_REGISTRY] could not derive the failure reason: %s", e)
+    except Exception:
+        logging.exception(
+            "[RUN_REGISTRY] could not derive the failure reason from %s", output_xml_path)
         return None, None
 
 

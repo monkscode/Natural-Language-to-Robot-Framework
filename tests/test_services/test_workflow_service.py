@@ -1083,6 +1083,40 @@ class TestFailedVerdictRecordsTheReason:
                                          "failure_sentence": None}
         assert not [e for e in events if e.get("status") == "error"]
 
+    def test_a_swallowed_derivation_error_is_logged_with_its_traceback_and_path(
+            self, tmp_path, caplog):
+        path = _fixture_xml("single_failure")
+
+        with caplog.at_level("ERROR"):
+            _drive_execution(
+                tmp_path, body=_runner_body("failed", path),
+                extra=[patch.object(workflow_service, "first_failure_message",
+                                    side_effect=RuntimeError("derivation blew up"))])
+
+        records = [r for r in caplog.records if "failure reason" in r.getMessage()]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is RuntimeError
+        assert path in records[0].getMessage()
+
+    def test_the_sentence_is_classified_from_exactly_the_stored_string(self, tmp_path):
+        """The raw text (token, 3,184 chars) and the stored one (redacted, 2,000
+        chars) classify the same today, so only the call itself can prove the
+        card and History read ONE text."""
+        seen = []
+
+        def recording(message):
+            seen.append(message)
+            return failure_sentence(message)
+
+        _, calls = _drive_execution(
+            tmp_path, body=_runner_body("failed", _fixture_xml("long_failure_with_token")),
+            extra=[patch.object(workflow_service, "failure_sentence", recording)])
+
+        stored = calls[0].args[2]
+        assert stored is not None
+        assert seen == [stored]
+
     def test_the_derivation_runs_off_the_event_loop(self, tmp_path):
         seen = []
         real = workflow_service.first_failure_message
