@@ -322,9 +322,11 @@ _VISIBILITY_OPERATORS = {"contains": "visible", "*=": "visible", "notcontains": 
 # on an invisible element (data/libdocs/browser.json), so the assembler emits it — and it is
 # the same check as `contains visible`. Only this exact expression converts: every other one
 # either returns a value, names another state, or says something a single
-# Wait For Elements State cannot. Compared with all whitespace removed, so `value&visible`
-# counts, but case is kept — `VISIBLE` is not a state Get Element States itself accepts.
-_VALIDATE_VISIBLE_EXPRESSION = "value&visible"
+# Wait For Elements State cannot. At most one ordinary space may sit either side of `&`
+# (`value&visible` is the same Python expression); a space inside a word, a non-breaking space
+# or a form feed is not the idiom and stays unchanged. Case is kept — `VISIBLE` is not a state
+# Get Element States itself accepts.
+_VALIDATE_VISIBLE_RE = re.compile(r"value ?& ?visible")
 
 # Keywords that run another keyword and swallow or retry its failure. A check
 # inside one of the file's own keywords can be reached through them, and there a
@@ -427,9 +429,8 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         operator = re.sub(r"[\s_]+", "", parts[operator_idx].lower())
         state_cell = parts[state_idx]
         if operator == "validate":
-            expression = re.sub(r"\s+", "", state_cell.strip())
             target_state = (
-                "visible" if expression == _VALIDATE_VISIBLE_EXPRESSION else None
+                "visible" if _VALIDATE_VISIBLE_RE.fullmatch(state_cell.strip()) else None
             )
         else:
             target_state = _VISIBILITY_OPERATORS.get(operator)
