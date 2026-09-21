@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:38.436495" rpa="false" schemaversion="5">
+<suite id="s1" name="Skip Then Fail" source="/w/skip_then_fail.robot">
+<test id="s1-t1" name="Skipped First" line="2">
+<kw name="Skip" owner="BuiltIn">
+<msg time="2026-09-21T18:17:38.475929" level="SKIP">not today</msg>
+<arg>not today</arg>
+<doc>Skips the rest of the current test.</doc>
+<status status="SKIP" start="2026-09-21T18:17:38.475750" elapsed="0.000248">not today</status>
+</kw>
+<status status="SKIP" start="2026-09-21T18:17:38.475424" elapsed="0.000656">not today</status>
+</test>
+<test id="s1-t2" name="Fails Second" line="4">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:38.476411" level="FAIL">Error: the real one</msg>
+<arg>Error: the real one</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:38.476277" elapsed="0.000166">Error: the real one</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:38.476166" elapsed="0.000337">Error: the real one</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:38.437319" elapsed="0.039465"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="1">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Skip Then Fail" id="s1" pass="0" fail="1" skip="1">Skip Then Fail</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

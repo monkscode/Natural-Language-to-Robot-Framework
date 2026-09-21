@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:37.497552" rpa="false" schemaversion="5">
+<suite id="s1" name="Single Failure" source="/w/single_failure.robot">
+<test id="s1-t1" name="Single Failing" line="2">
+<kw name="Log" owner="BuiltIn">
+<msg time="2026-09-21T18:17:37.535430" level="INFO">before</msg>
+<arg>before</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="PASS" start="2026-09-21T18:17:37.535284" elapsed="0.000180"/>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:37.535714" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#submit")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#submit")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:37.535526" elapsed="0.000247">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#submit")</status>
+</kw>
+<kw name="Log" owner="BuiltIn">
+<arg>never</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="NOT RUN" start="2026-09-21T18:17:37.535824" elapsed="0.000009"/>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:37.534974" elapsed="0.000924">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#submit")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:37.498430" elapsed="0.037631"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Single Failure" id="s1" pass="0" fail="1" skip="0">Single Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

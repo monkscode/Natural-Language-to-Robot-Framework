@@ -7,12 +7,26 @@ constant below), so each is a real shape the classifier is already proven to
 route to the specific_type the test claims — never invented, never a live
 corpus row.
 
-Referenced by: none yet (Task 2 of E5b Part B).
+The first_failure_message tests read tests/fixtures/rf742_output_xml/: each
+.xml there is what Robot Framework 7.4.2 really wrote for the .robot file of
+the same name, produced in the runner image with
+``robot --output <name>.xml --log NONE --report NONE <name>.robot``
+(suite_teardown_failure_rebot.xml is ``rebot --output`` over
+suite_teardown_failure.xml). No XML here is hand-written.
+
+Referenced by: none (test module).
 Depends on: src/backend/core/failure_sentences.py, pytest.
 """
+from pathlib import Path
+from xml.etree import ElementTree
+
 import pytest
 
-from src.backend.core.failure_sentences import failure_sentence
+from src.backend.core.failure_sentences import (
+    _strip_rf_header,
+    failure_sentence,
+    first_failure_message,
+)
 
 # --- messages, copied from tests/test_optimization/test_failure_analyzer_playwright.py ---
 
@@ -200,3 +214,161 @@ def test_none_input_returns_none():
 
 def test_empty_string_returns_none():
     assert failure_sentence("") is None
+
+
+# --- first_failure_message: real RF 7.4.2 output.xml files -----------------
+
+_RF_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "rf742_output_xml"
+
+
+def _xml(name: str) -> str:
+    return str(_RF_FIXTURES / f"{name}.xml")
+
+
+def _timeout(action: str, selector: str) -> str:
+    """The Playwright locator-timeout text the fixtures' Fail calls produce."""
+    return (
+        f"TimeoutError: locator.{action}: Timeout 10000ms exceeded.\n"
+        f"Call log:\n  - waiting for locator(\"{selector}\")"
+    )
+
+
+def test_a_single_failing_test_returns_its_full_multi_line_message():
+    """All lines, not the first: the placeholder token lives in the call log."""
+    assert first_failure_message(_xml("single_failure")) == _timeout("click", "#submit")
+
+
+def test_the_first_failing_test_is_read_not_the_first_test():
+    """pass_then_fail: test 1 PASSES, test 2 fails (#second), test 3 fails."""
+    assert first_failure_message(_xml("pass_then_fail")) == _timeout("fill", "#second")
+
+
+def test_a_caught_failure_before_the_real_one_is_skipped():
+    """Ruling R2's exact case: Run Keyword And Ignore Error + Fail(#caught),
+    then Fail(#real). RF writes the caught Fail as a FAIL keyword under a PASS
+    parent, BEFORE the real one."""
+    assert first_failure_message(_xml("caught_then_real")) == _timeout("fill", "#real")
+
+
+@pytest.mark.parametrize("fixture,expected", [
+    # Run Keyword And Return Status + Run Keyword And Expect Error, then a real Fail
+    ("caught_by_status_and_expect_then_real", _timeout("fill", "#real2")),
+    # a failing TRY branch under a PASS <try>, then a real Fail
+    ("try_except_then_real", _timeout("fill", "#after-try")),
+    # Wait Until Keyword Succeeds whose first attempt FAILED, then a real Fail
+    ("retry_succeeds_then_real", _timeout("fill", "#real3")),
+])
+def test_every_catching_idiom_is_skipped(fixture, expected):
+    assert first_failure_message(_xml(fixture)) == expected
+
+
+def test_a_user_keyword_wrapper_yields_the_failure_message():
+    assert first_failure_message(_xml("user_keyword_wrapper")) == _timeout("click", "#inner")
+
+
+def test_a_test_setup_failure_is_stored_without_its_header():
+    assert first_failure_message(_xml("test_setup_failure")) == _timeout("click", "#test-setup")
+
+
+def test_a_test_teardown_failure_is_stored_without_its_header():
+    assert first_failure_message(_xml("test_teardown_failure")) == _timeout(
+        "click", "#test-teardown")
+
+
+def test_several_failures_stores_the_first_one():
+    assert first_failure_message(_xml("several_failures")) == _timeout("click", "#first")
+
+
+def test_a_skipped_test_is_not_a_failure():
+    assert first_failure_message(_xml("skip_then_fail")) == "Error: the real one"
+
+
+def test_a_failure_outside_any_keyword_falls_back_to_the_test_status():
+    """A VAR statement is not a <kw>: the test's own status text is the reason."""
+    assert first_failure_message(_xml("var_failure")) == (
+        "Setting variable '${x}' failed: Variable '${undefined_variable}' not found.")
+
+
+def test_a_suite_setup_failure_is_stored_without_its_header():
+    """The test holds no keywords at all; its status carries the header."""
+    assert first_failure_message(_xml("suite_setup_failure")) == _timeout(
+        "click", "#suite-setup")
+
+
+def test_a_suite_setup_locator_timeout_does_not_classify_as_page_load_timeout():
+    """Part A's defect (S5): with the header on, the Playwright prefix gate
+    misses and a locator timeout reads as a page that never loaded."""
+    message = first_failure_message(_xml("suite_setup_failure"))
+
+    assert failure_sentence(message) == failure_sentence(NEVER_RESOLVED)
+    assert failure_sentence(message) != failure_sentence(GOTO_TIMEOUT)
+
+
+def test_a_parent_suite_teardown_header_is_stripped():
+    """rebot writes this header onto the test; raw robot output never does."""
+    assert first_failure_message(_xml("suite_teardown_failure_rebot")) == _timeout(
+        "click", "#suite-teardown")
+
+
+def test_raw_output_of_a_suite_teardown_failure_has_no_failing_test():
+    """RF 7.4.2 leaves every test PASS in the raw output.xml when only the
+    suite teardown fails (statistics still count it failed). Pinned so the
+    gap stays visible: there is no failing test to read a reason from."""
+    assert first_failure_message(_xml("suite_teardown_failure")) is None
+
+
+@pytest.mark.parametrize("fixture,header", [
+    ("test_setup_failure", "Setup failed:"),
+    ("suite_setup_failure", "Parent suite setup failed:"),
+    ("test_teardown_failure", "Teardown failed:"),
+    ("suite_teardown_failure_rebot", "Parent suite teardown failed:"),
+    ("several_failures", "Several failures occurred:"),
+])
+def test_each_rf_header_is_real_and_is_stripped(fixture, header):
+    """Every header is read off a real failing test's status, not typed in."""
+    root = ElementTree.parse(_xml(fixture)).getroot()
+    test = next(t for t in root.iter("test") if t.find("status").get("status") == "FAIL")
+    status_text = test.find("status").text
+
+    assert status_text.startswith(header + "\n")
+    assert _strip_rf_header(status_text) == status_text[len(header) + 1:].strip()
+
+
+def test_only_one_leading_header_line_is_stripped():
+    assert _strip_rf_header("Setup failed:\nTeardown failed:\nboom") == "Teardown failed:\nboom"
+
+
+def test_a_header_that_is_not_the_first_line_is_kept():
+    text = "boom\n\nAlso teardown failed:\nbang"
+    assert _strip_rf_header(text) == text
+
+
+def test_the_full_message_is_returned_uncapped():
+    """Capping and redaction are the caller's job; this returns the whole text."""
+    message = first_failure_message(_xml("long_failure_with_token"))
+
+    assert message.startswith(
+        "Error: page.goto: net::ERR_ABORTED at https://example.com/app?token=SECRETVALUE123\n")
+    assert len(message) > 3000
+
+
+def test_none_path_returns_none():
+    assert first_failure_message(None) is None
+
+
+def test_a_missing_file_returns_none(tmp_path):
+    assert first_failure_message(str(tmp_path / "output.xml")) is None
+
+
+def test_an_unparseable_file_returns_none_not_a_parser_error(tmp_path):
+    broken = tmp_path / "output.xml"
+    broken.write_text("<robot><suite><test><status status='FAIL'>", encoding="utf-8")
+
+    assert first_failure_message(str(broken)) is None
+
+
+def test_a_file_with_no_test_returns_none(tmp_path):
+    empty = tmp_path / "output.xml"
+    empty.write_text("<robot><suite/></robot>", encoding="utf-8")
+
+    assert first_failure_message(str(empty)) is None

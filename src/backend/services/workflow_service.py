@@ -25,6 +25,7 @@ from src.backend.core.workflow_metrics import (
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
 from src.backend.core.provider_errors import friendly_setup_error
+from src.backend.core.failure_sentences import failure_sentence, first_failure_message
 from src.backend.core.secret_redaction import redact_secrets
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
@@ -1199,12 +1200,41 @@ def _record_generation_failure(result_store: dict, user: dict | None,
                 is_platform_admin=is_platform_admin, test_id=test_id)
 
 
-def _set_run_status(run_id: str, status: str) -> None:
-    """Advance a test_runs row's status — never breaks the run pipeline."""
+def _set_run_status(run_id: str, status: str, error_message: str | None = None) -> None:
+    """Advance a test_runs row's status and record why — never breaks the run pipeline.
+
+    error_message is written EXACTLY (RunRegistry.set_status): None clears a
+    stale reason, which is what a passed re-run of a reused run id needs.
+    """
     try:
-        get_run_registry().set_status(run_id, status)
+        get_run_registry().set_status(run_id, status, error_message)
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — status for {run_id} not recorded: {e}")
+
+
+def _stored_reason(text: str | None) -> str | None:
+    """Failure text as test_runs.error_message holds it: redacted, then capped
+    keeping the head. None when there is no text."""
+    if not text:
+        return None
+    return redact_secrets(text)[:_ERROR_MESSAGE_MAX_CHARS] or None
+
+
+def _failure_reason(output_xml_path: str | None) -> tuple[str | None, str | None]:
+    """(stored reason, plain-English sentence) for a `failed` run — never raises.
+
+    Runs inside the try that spans the verdict write and the result event, on
+    every failing run (bench included), so an exception here would turn a real
+    `failed` into `error` and drop the result event. It returns (None, None)
+    instead. The sentence is classified from the SAME stored string, so the
+    Generate card and History read one text.
+    """
+    try:
+        message = _stored_reason(first_failure_message(output_xml_path))
+        return message, failure_sentence(message)
+    except Exception as e:
+        logging.error("[RUN_REGISTRY] could not derive the failure reason: %s", e)
+        return None, None
 
 
 def _run_owner(run_id: str) -> str | None:
@@ -1351,11 +1381,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
     except Exception as e:
         logging.error(f"Failed to save test code: {e}")
         _safe_evict_hint_metadata(run_id)
-        await asyncio.to_thread(_set_run_status, run_id, "error")
+        # Built once, before the write, so the row and the event say the same.
+        save_error = f"Failed to save test code: {redact_secrets(str(e))}"[
+            :_ERROR_MESSAGE_MAX_CHARS]
+        await asyncio.to_thread(_set_run_status, run_id, "error", save_error)
         # run_id here for the same reason it is on the first event below:
         # this is the only execution event that can arrive BEFORE it, so a
         # client that never sees another one still learns which run failed.
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': f'Failed to save test code: {redact_secrets(str(e))}'})}\n\n"
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': save_error})}\n\n"
         return
 
     try:
@@ -1388,8 +1421,19 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # History row: only passed/failed are real verdicts (from output.xml);
         # anything else means the run errored before producing one.
         _status = result.get("test_status")
-        await asyncio.to_thread(
-            _set_run_status, run_id, _status if _status in ("passed", "failed") else "error")
+        _verdict = _status if _status in ("passed", "failed") else "error"
+        # Why, with the verdict. `result` carries only a generic message, so a
+        # failed run's reason is read from output.xml — off the event loop, and
+        # through _failure_reason, which cannot raise. A passed run stores
+        # None, clearing a reason left by an earlier run of the same id.
+        if _verdict == "failed":
+            _reason, result["failure_sentence"] = await asyncio.to_thread(
+                _failure_reason, result.get("output_xml_path"))
+        elif _verdict == "error":
+            _reason = _stored_reason(str(result.get("message") or ""))
+        else:
+            _reason = None
+        await asyncio.to_thread(_set_run_status, run_id, _verdict, _reason)
 
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
 
@@ -1437,18 +1481,22 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
     except Exception as e:
         logging.error(f"An error occurred during Docker execution: {e}")
         _safe_evict_hint_metadata(run_id)
-        await asyncio.to_thread(_set_run_status, run_id, "error")
+        # Unlike its siblings above, this message has no prefix — so an exception
+        # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
+        # would leave the client with status='error' and nothing to show, and the
+        # log line above as the only record of the cause. Name the type instead.
+        # Built before the write: the row stores it capped (a runner system
+        # error carries up to 400 lines of container stderr), the event keeps
+        # it whole.
+        detail = redact_secrets(str(e)) or type(e).__name__
+        await asyncio.to_thread(
+            _set_run_status, run_id, "error", detail[:_ERROR_MESSAGE_MAX_CHARS])
         # Persist whatever artifacts the run produced before erroring (a partial
         # log.html is still useful). Best-effort: persist_run never raises and
         # no-ops when there is no staging dir. Without this, an errored run's
         # report is served only from the originating replica's local staging and
         # 404s on any other replica in an S3 deployment.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
-        # Unlike its siblings above, this message has no prefix — so an exception
-        # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
-        # would leave the client with status='error' and nothing to show, and the
-        # log line above as the only record of the cause. Name the type instead.
-        detail = redact_secrets(str(e)) or type(e).__name__
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': detail})}\n\n"
 
 

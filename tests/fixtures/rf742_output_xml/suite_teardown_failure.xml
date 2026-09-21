@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:40.280936" rpa="false" schemaversion="5">
+<suite id="s1" name="Suite Teardown Failure" source="/w/suite_teardown_failure.robot">
+<test id="s1-t1" name="Body Passes" line="5">
+<kw name="Log" owner="BuiltIn">
+<msg time="2026-09-21T18:17:40.319466" level="INFO">ok</msg>
+<arg>ok</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="PASS" start="2026-09-21T18:17:40.319319" elapsed="0.000181"/>
+</kw>
+<status status="PASS" start="2026-09-21T18:17:40.319019" elapsed="0.000540"/>
+</test>
+<kw name="Fail" owner="BuiltIn" type="TEARDOWN">
+<msg time="2026-09-21T18:17:40.319974" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-teardown")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#suite-teardown")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:40.319770" elapsed="0.000261">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-teardown")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:40.281754" elapsed="0.038307">Suite teardown failed:
+TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-teardown")</status>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Suite Teardown Failure" id="s1" pass="0" fail="1" skip="0">Suite Teardown Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>
