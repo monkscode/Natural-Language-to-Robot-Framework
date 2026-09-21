@@ -1442,10 +1442,12 @@ class RunRegistry:
         verbatim). rerun_of links a re-run to its ORIGINAL run (root-flattened
         by the caller) — the run whose learning record user feedback should
         update, since re-run executions skip learning. error_message follows the
-        same newest-non-NULL-wins rule as robot_code here -- but set_status,
-        not record_start, sets the FINAL value on a failed or errored run:
-        while a reused row is running, it still carries the old message,
-        and set_status's own exact-write clears it on the next pass.
+        same newest-non-NULL-wins rule as robot_code here. On an executed run
+        set_status writes the final value exactly (a pass clears it), so
+        while a reused row is running it still carries the previous run's
+        message until set_status replaces it. A generation failure's reason
+        is written here, by the 'error' upsert, and never passes through
+        set_status.
 
         org_id is used verbatim when the caller supplies one; when it is
         absent and a user_id is present, _lookup_org_id derives it before the
