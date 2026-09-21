@@ -528,6 +528,51 @@ describe('HistoryPage drawer — why a run failed', () => {
     expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
     expect(screen.queryByText(/ElementNotFound/)).toBeNull()
   })
+
+  it('shows the sentence alone when there is no raw message', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, {
+      status: 'failed',
+      failure_sentence: 'The locator for the search box could not be found.',
+      error_message: null,
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByText('The locator for the search box could not be found.')).toBeInTheDocument()
+  })
+
+  // The gate exists for a stale row: a run that was failed/error once, then
+  // re-run and passed, can still carry the OLD failure_sentence/error_message
+  // in a row the server never re-nulls for other statuses. Both cases below
+  // give a non-failed/error status truthy reason fields — a status-clause
+  // deletion must fail both, or the gate is unproven.
+  it('shows nothing for a passed run even when the row still carries truthy reason fields', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, {
+      status: 'passed',
+      failure_sentence: 'The locator for the search box could not be found.',
+      error_message: 'ElementNotFound: css=input[name="q"]',
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText('The locator for the search box could not be found.')).toBeNull()
+    expect(screen.queryByText('ElementNotFound: css=input[name="q"]')).toBeNull()
+  })
+
+  it('shows nothing for a running run even when the row still carries truthy reason fields', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, {
+      status: 'running',
+      failure_sentence: 'The locator for the search box could not be found.',
+      error_message: 'ElementNotFound: css=input[name="q"]',
+    })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText('The locator for the search box could not be found.')).toBeNull()
+    expect(screen.queryByText('ElementNotFound: css=input[name="q"]')).toBeNull()
+  })
 })
 
 describe('HistoryPage drawer — the re-run-of id', () => {
