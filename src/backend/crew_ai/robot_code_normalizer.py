@@ -388,6 +388,7 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     has_try = False
     has_keywords_section = False
     has_catching_wrapper = False
+    defines_own_keyword = False
     rewrote = 0
     out_lines = []
     for line in robot_code.split("\n"):
@@ -400,6 +401,13 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
         parts = _CELL_SPLIT_RE.split(line)
         cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
+        # A non-indented line names a test or a keyword. Robot resolves a keyword name
+        # to the file's own keyword before any library, ignoring case, spaces and
+        # underscores, so a file defining `Get Element States` calls its own — rewriting
+        # that call would swap in a different keyword. Any section counts: a test of that
+        # name only over-matches, which leaves the file unchanged.
+        if parts[0] and re.sub(r"[\s_]", "", parts[0].lower()) == "getelementstates":
+            defines_own_keyword = True
         # parts[0] is empty only for an indented line; anything else is a
         # section header or a test/keyword name, never a step.
         if not cells or parts[0]:
@@ -470,6 +478,13 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         rewrote += 1
 
     if not rewrote:
+        return robot_code
+    if defines_own_keyword:
+        logger.info(
+            f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
+            "unchanged — the file defines its own keyword of that name, which Robot "
+            "resolves ahead of the Browser library"
+        )
         return robot_code
     if has_try or (has_keywords_section and has_catching_wrapper):
         logger.info(

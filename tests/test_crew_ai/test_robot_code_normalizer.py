@@ -696,6 +696,40 @@ def test_rewrite_visibility_checks_validate_matches_the_live_u07_line():
     )
 
 
+def _own_keyword_file(definition: str, operator: str = "contains", expression: str = "visible",
+                      header: str = "*** Keywords ***") -> str:
+    return ("*** Test Cases ***\nT\n"
+            f"    Get Element States    ${{h}}    {operator}    {expression}\n\n"
+            f"{header}\n{definition}\n"
+            "    [Arguments]    ${a}    ${b}    ${c}\n    Log    own\n")
+
+
+@pytest.mark.parametrize("label, source", [
+    ("TODO row 21: the file's own keyword, contains form",
+     _own_keyword_file("Get Element States")),
+    ("the file's own keyword, validate form",
+     _own_keyword_file("Get Element States", "validate", "value & visible")),
+    ("Robot ignores underscores in a keyword name",
+     _own_keyword_file("get_element_states")),
+    ("Robot ignores spaces in a keyword name — _canon_keyword does not",
+     _own_keyword_file("GetElementStates")),
+    ("a one-star section header is valid Robot and _KEYWORDS_SECTION_RE misses it",
+     _own_keyword_file("Get Element States", header="* Keywords")),
+])
+def test_rewrite_leaves_a_file_alone_when_it_defines_get_element_states(label, source):
+    assert rewrite_visibility_checks_to_wait(source) == source, label
+
+
+@pytest.mark.parametrize("label, source", [
+    ("control: the same file with an unrelated keyword name converts",
+     _own_keyword_file("My Helper")),
+    ("control: a commented-out definition defines nothing",
+     _own_keyword_file("#Get Element States")),
+])
+def test_rewrite_still_converts_when_no_own_keyword_is_defined(label, source):
+    assert "Wait For Elements State" in rewrite_visibility_checks_to_wait(source), label
+
+
 _SUITE = "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
 
 
