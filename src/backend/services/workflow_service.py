@@ -1010,7 +1010,7 @@ def run_workflow_in_thread(
             queue.put(event)
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")
-        queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
+        queue.put({"status": "error", "message": f"Workflow thread failed: {redact_secrets(str(e))}"})
     finally:
         if releaser is not None:
             releaser.done()

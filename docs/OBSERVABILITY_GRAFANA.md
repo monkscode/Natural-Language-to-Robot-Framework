@@ -293,8 +293,8 @@ dryrun gate, which a failed run never reaches. They are recorded in `test_runs` 
 at `'error'` (the test file failed to save, or the runner/container itself errored), and
 `error_message` now carries that text too. The two are told apart by `robot_code` — a
 generation failure's row never gets one (nothing was ever generated to store), while an
-execution reaches `test_runs` only after code was generated and so always carries a
-non-null `robot_code`. Restrict to generation failures with:
+execution row is opened with the code it is about to run — generated, edited or pasted —
+so it always carries a non-null `robot_code`. Restrict to generation failures with:
 
 ```sql
 SELECT
@@ -401,8 +401,8 @@ FROM test_runs WHERE run_id = '<id>';
 ```
 
 `status = 'error'` means either generation never produced code (`robot_code` NULL) or
-execution itself errored out after code was generated (`robot_code` NOT NULL) —
-`error_message` is the reason either way. `status = 'failed'` means the test ran and a
+the execution itself errored (`robot_code` NOT NULL — the code it ran, generated or
+pasted) — `error_message` is the reason either way. `status = 'failed'` means the test ran and a
 check failed; `error_message` there is the first uncaught failure from `output.xml`. A row
 still at `'running'` long after `created_at` means the run died without reaching a
 terminal path.

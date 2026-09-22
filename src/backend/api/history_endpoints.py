@@ -69,11 +69,13 @@ _REPORT_STATUSES = ("passed", "failed")
 
 # Statuses for which the detail payload carries a failure reason (Ruling R7).
 # A reused run id (Task 1) can hold a stale message only while "running" —
-# set_status writes error_message EXACTLY on every terminal write, so a pass
-# clears it; "running" is the sole status where record_start's COALESCE lets
-# the previous run's message survive. Restricting this tuple to failed/error
-# is defence in depth for any other status, not the mechanism that clears a
-# stale reason on a pass.
+# every EXECUTION terminal write goes through set_status, which writes
+# error_message EXACTLY (a pass clears it); generation mints a fresh run id
+# per attempt, so its record_start writes have no earlier message to keep.
+# That leaves "running" as the sole status where record_start's COALESCE can
+# still be showing the previous run's message. Restricting this tuple to
+# failed/error is defence in depth for any other status, not the mechanism
+# that clears a stale reason on a pass.
 _FAILURE_STATUSES = ("failed", "error")
 
 
