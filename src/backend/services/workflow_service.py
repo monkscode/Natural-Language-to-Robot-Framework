@@ -1435,6 +1435,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
                 _failure_reason, result.get("output_xml_path"))
         elif _verdict == "error":
             _reason = _stored_reason(str(result.get("message") or ""))
+            # The row gets the capped, redacted text (Ruling R6); the SSE
+            # event below streams `result` as-is, so without this the raw
+            # message — a malformed or version-skewed runner body — reaches
+            # the browser unredacted. Redact only, don't cap: the other
+            # execution-error site in this function deliberately streams the
+            # full redacted text and stores the capped copy.
+            if result.get("message"):
+                result["message"] = redact_secrets(str(result["message"]))
         else:
             _reason = None
         await asyncio.to_thread(_set_run_status, run_id, _verdict, _reason)

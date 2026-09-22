@@ -200,7 +200,7 @@ _SENTENCES = (
     ("wrong_argument_count", _wrong_argument_count),
 )
 
-_SENTENCE_BY_TYPE = {specific_type: build for specific_type, build in _SENTENCES}
+_SENTENCE_BY_TYPE = dict(_SENTENCES)
 
 
 def failure_sentence(error_message: str | None) -> str | None:

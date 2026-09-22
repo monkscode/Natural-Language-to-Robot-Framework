@@ -1091,7 +1091,8 @@ class TestFailedVerdictRecordsTheReason:
         assert calls == [call(_RUN_ID, "failed", None)]
         event = _result_event(events)
         assert event["test_status"] == "failed"
-        assert "failure_sentence" in event and event["failure_sentence"] is None
+        assert "failure_sentence" in event
+        assert event["failure_sentence"] is None
         assert not [e for e in events if e.get("status") == "error"]
 
     def test_a_missing_output_xml_path_stores_none(self, tmp_path):
@@ -1194,6 +1195,23 @@ class TestOtherVerdictsAtTheResultSite:
         assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
         assert _KEY not in stored
         assert not any("failure_sentence" in e for e in events)
+
+    def test_a_malformed_runner_bodys_streamed_message_is_redacted_not_capped(
+            self, tmp_path):
+        """The row gets the capped/redacted text; the SSE event must too —
+        never the raw message (CodeRabbit security finding, PR #112)."""
+        body = _runner_body(None, None)
+        body["message"] = f"runner said something odd at /x?key={_KEY} " + "y" * 3000
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls[0].args[:2] == (_RUN_ID, "error")
+        streamed = next(e for e in events
+                        if e.get("stage") == "execution" and "exit_code" in e)
+        assert _KEY not in streamed["message"]
+        assert streamed["message"] == redact_secrets(
+            f"runner said something odd at /x?key={_KEY} " + "y" * 3000)
+        assert len(streamed["message"]) > workflow_service._ERROR_MESSAGE_MAX_CHARS
 
     def test_a_malformed_runner_body_with_no_message_stores_none(self, tmp_path):
         body = _runner_body("weird", None)
