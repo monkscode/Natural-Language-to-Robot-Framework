@@ -93,6 +93,7 @@ from src.backend.api.history_endpoints import _REPORT_STATUSES
 from src.backend.api.history_scope import history_scope, may_move_test
 from src.backend.auth.jwt_utils import require_user
 from src.backend.core.config import settings
+from src.backend.core.failure_sentences import failure_category, failure_sentence
 from src.backend.core.run_registry import get_run_registry
 from src.backend.services.workflow_service import stream_generate_only
 
@@ -337,6 +338,22 @@ def test_detail(
         # both detail routes must answer "is there a log.html" identically,
         # and a second copy of the tuple is a second rule that can drift.
         r["has_report"] = r["status"] in _REPORT_STATUSES
+        # Computed on read, every request -- nothing is stored (Task 7,
+        # 2026-09-21; supersedes split spec section 8's stored-column plan).
+        # Classified HERE rather than in run_registry, so
+        # core/run_registry.py stays free of a classifier import. The raw
+        # message is popped off EVERY result, whatever its status, before
+        # this payload goes out -- the results list follows the rule set for
+        # lists (the History list): the sentence or the class, never the raw
+        # text; the raw text is one click away in the History drawer of that
+        # same run, under the same access rule. failure_locator stays None: it
+        # is a P3 column (section 8) and no analyzer writes one yet.
+        msg = r.pop("error_message", None)
+        if r["status"] in ("failed", "error"):
+            r["failure_class"] = failure_category(msg)
+            r["failure_sentence"] = failure_sentence(msg)
+        else:
+            r["failure_sentence"] = None
     detail["test"].pop("org_id", None)
     # D7, per row: the test carries its AUTHOR's address, each version its
     # own CREATOR's, and since Task 7 those can be different people -- so the

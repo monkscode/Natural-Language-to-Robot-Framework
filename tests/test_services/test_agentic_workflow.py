@@ -317,6 +317,28 @@ class TestRunWorkflowInThread:
         assert event["status"] == "error"
         assert "boom" in event["message"]
 
+    def test_secret_redacted_in_queued_error_message(self):
+        """A secret in the raised exception's text never reaches the SSE queue.
+
+        The queued message goes straight to the user's browser, unlike the
+        logging.error call on the line above it (which has its own redacting
+        log filter, out of scope here).
+        """
+        releaser = MagicMock()
+        leaked_key = "AIza" + "x" * 35
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   side_effect=RuntimeError(f"call failed: key={leaked_key}")):
+            from src.backend.services.workflow_service import run_workflow_in_thread
+            q = Queue()
+            run_workflow_in_thread(q, "query", "gemini", "model", releaser=releaser)
+
+        event = q.get_nowait()
+        assert event["status"] == "error"
+        assert event["message"].startswith("Workflow thread failed: ")
+        assert leaked_key not in event["message"]
+        assert "[REDACTED]" in event["message"]
+        releaser.done.assert_called_once()
+
     def test_releaser_done_called_in_finally(self):
         """releaser.done() is called regardless of success or failure."""
         releaser = MagicMock()

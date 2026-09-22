@@ -80,8 +80,14 @@ interface TestRow {
 /** One result under a test, as GET /api/tests/{test_id} returns it (spec
  *  6.2). `n` is the version it ran; null for a result that names none — a
  *  regeneration that failed before a version landed, or a row migrated from
- *  before versions existed. failure_class/failure_locator are P3 columns and
- *  are always null today. */
+ *  before versions existed. failure_class/failure_sentence are computed on
+ *  read (Task 7, 2026-09-21); both null unless status is failed/error.
+ *  failure_class is then the classifier's code (`unknown` included) when a
+ *  message exists. failure_sentence is the sentence for the classified
+ *  failure TYPE (one code can map to several sentences, or none), or null
+ *  when no message exists or the type has no sentence. The raw message never
+ *  reaches this route. failure_locator is a P3 column and stays null today;
+ *  no analyzer writes one yet. */
 interface TestResult {
   run_id: string
   status: string
@@ -89,6 +95,7 @@ interface TestResult {
   created_at: string
   has_report: boolean
   failure_class: string | null
+  failure_sentence: string | null
   failure_locator: string | null
 }
 
@@ -591,7 +598,7 @@ function DrawerCode({ version, copied, onCopy }: Readonly<{
 }>) {
   const code = version?.robot_code ?? null
   return (
-    <section className="flex flex-col gap-2" aria-label="Robot code">
+    <section className="flex min-w-0 flex-col gap-2" aria-label="Robot code">
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Robot code
@@ -817,11 +824,18 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
           </DialogDescription>
         </DialogHeader>
 
-        {/* Spec 7.4 item 1 — the classified failure reason — renders nothing
-            in P2, and this is not a placeholder for content that exists:
-            test_runs has no failure_class column and get_test_detail hands
-            back a literal None for every result. The seam is the read above,
-            which fetches the newest result for a classifier to explain. */}
+        {/* Spec 7.4 item 1 — the classified failure reason. Computed on read
+            (Task 7, 2026-09-21): tests_endpoints classifies the newest
+            result's stored message into failure_class/failure_sentence for
+            failed/error results, nothing is stored, and the raw message
+            never reaches this payload. results[0] is that newest result —
+            the fetch above already asks for limit=1. Absent (null, or no
+            result at all) renders nothing. */}
+        {detail?.results[0]?.failure_sentence && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs font-medium">
+            {detail.results[0].failure_sentence}
+          </div>
+        )}
 
         <div className="flex flex-col gap-1.5">
           <label

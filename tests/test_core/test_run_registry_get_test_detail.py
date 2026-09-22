@@ -80,14 +80,15 @@ def _version_row(admin, test_id, n, robot_code="*** Tasks ***",
 
 def _run_row(admin, test_id, version_id, status, created_at,
              run_id=None, user_id="alice", org_id=ORG_A,
-             user_email="a@x.com"):
+             user_email="a@x.com", error_message=None):
     run_id = run_id or str(uuid.uuid4())
     admin.execute(
         "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
-        " status, org_id, test_id, test_version_id, created_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " status, org_id, test_id, test_version_id, created_at,"
+        " error_message)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (run_id, user_id, user_email, "q", status, org_id, test_id,
-         version_id, created_at))
+         version_id, created_at, error_message))
     return run_id
 
 
@@ -347,6 +348,41 @@ def test_failure_class_and_locator_are_null_placeholders(reg):
                                folder_org_id=ORG_A)
     assert detail["results"][0]["failure_class"] is None
     assert detail["results"][0]["failure_locator"] is None
+
+
+def test_a_result_carries_its_own_error_message(reg):
+    """Task 7: get_test_detail now selects t.error_message onto each result,
+    so tests_endpoints can classify it one layer up. This registry method
+    still classifies nothing itself (failure_class stays None here)."""
+    r, admin = reg
+    test_id = str(uuid.uuid4())
+    _test_row(admin, test_id)
+    version_id = _version_row(admin, test_id, 1)
+    run_id = _run_row(admin, test_id, version_id, "failed",
+                      "2026-01-01T10:00:00Z", error_message="boom")
+
+    detail = r.get_test_detail(test_id, user_id="alice", org_id=ORG_A,
+                               folder_org_id=ORG_A)
+    result = next(x for x in detail["results"] if x["run_id"] == run_id)
+    assert result["error_message"] == "boom"
+    assert result["failure_class"] is None
+
+
+def test_a_passed_results_error_message_is_still_carried(reg):
+    """A stale message on a passed row (record_start's newest-non-NULL-wins
+    rule can leave one) reaches the dict just the same -- the STATUS decides
+    what tests_endpoints does with it, not this method."""
+    r, admin = reg
+    test_id = str(uuid.uuid4())
+    _test_row(admin, test_id)
+    version_id = _version_row(admin, test_id, 1)
+    run_id = _run_row(admin, test_id, version_id, "passed",
+                      "2026-01-01T10:00:00Z", error_message="stale")
+
+    detail = r.get_test_detail(test_id, user_id="alice", org_id=ORG_A,
+                               folder_org_id=ORG_A)
+    result = next(x for x in detail["results"] if x["run_id"] == run_id)
+    assert result["error_message"] == "stale"
 
 
 def test_versions_and_results_do_not_multiply_each_other(reg):

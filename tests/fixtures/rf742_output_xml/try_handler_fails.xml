@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:43:29.819171" rpa="false" schemaversion="5">
+<suite id="s1" name="Try Handler Fails" source="/w/try_handler_fails.robot">
+<test id="s1-t1" name="Handler Fails" line="2">
+<try>
+<branch type="TRY">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:29.857661" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#in-try")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:29.857425" elapsed="0.000304">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:29.857222" elapsed="0.000554">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</status>
+</branch>
+<branch type="EXCEPT" pattern_type="GLOB" assign="${err}">
+<pattern>*</pattern>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:29.858030" level="FAIL">Could not click the button</msg>
+<arg>Could not click the button</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:29.857907" elapsed="0.000153">Could not click the button</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:29.857858" elapsed="0.000230">Could not click the button</status>
+</branch>
+<status status="FAIL" start="2026-09-21T18:43:29.857192" elapsed="0.000913">Could not click the button</status>
+</try>
+<status status="FAIL" start="2026-09-21T18:43:29.857060" elapsed="0.001105">Could not click the button</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:43:29.820009" elapsed="0.038337"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Try Handler Fails" id="s1" pass="0" fail="1" skip="0">Try Handler Fails</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

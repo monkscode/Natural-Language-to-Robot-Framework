@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:43:26.943532" rpa="false" schemaversion="5">
+<suite id="s1" name="Expect Error Mismatch" source="/w/expect_error_mismatch.robot">
+<test id="s1-t1" name="Expect Error Mismatch" line="2">
+<kw name="Run Keyword And Expect Error" owner="BuiltIn">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:26.992095" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#mismatch")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#mismatch")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:26.991890" elapsed="0.000276">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#mismatch")</status>
+</kw>
+<msg time="2026-09-21T18:43:26.992311" level="FAIL">Expected error 'Nothing like this*' but got 'TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#mismatch")'.</msg>
+<arg>Nothing like this*</arg>
+<arg>Fail</arg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#mismatch")</arg>
+<doc>Runs the keyword and checks that the expected error occurred.</doc>
+<status status="FAIL" start="2026-09-21T18:43:26.991593" elapsed="0.000754">Expected error 'Nothing like this*' but got 'TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#mismatch")'.</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:26.991243" elapsed="0.001181">Expected error 'Nothing like this*' but got 'TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#mismatch")'.</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:43:26.944627" elapsed="0.047962"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Expect Error Mismatch" id="s1" pass="0" fail="1" skip="0">Expect Error Mismatch</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

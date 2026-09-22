@@ -1442,8 +1442,12 @@ class RunRegistry:
         verbatim). rerun_of links a re-run to its ORIGINAL run (root-flattened
         by the caller) — the run whose learning record user feedback should
         update, since re-run executions skip learning. error_message follows the
-        same newest-non-NULL-wins rule as robot_code: a run that fails, is
-        retried and succeeds keeps the reason it failed the first time.
+        same newest-non-NULL-wins rule as robot_code here. On an executed run
+        set_status writes the final value exactly (a pass clears it), so
+        while a reused row is running it still carries the previous run's
+        message until set_status replaces it. A generation failure's reason
+        is written here, by the 'error' upsert, and never passes through
+        set_status.
 
         org_id is used verbatim when the caller supplies one; when it is
         absent and a user_id is present, _lookup_org_id derives it before the
@@ -1592,14 +1596,23 @@ class RunRegistry:
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] record_start failed for {run_id}: {e}")
 
-    def set_status(self, run_id: str, status: str) -> None:
-        """Advance a run's status (no-op if the row was never recorded)."""
+    def set_status(
+        self, run_id: str, status: str, error_message: str | None = None
+    ) -> None:
+        """Advance a run's status (no-op if the row was never recorded).
+
+        error_message is written EXACTLY as given -- not COALESCEd like
+        record_start's -- so a message must be passed on every failing call
+        and None on every other one. That is deliberate: the Generate page
+        reuses one run id across Run clicks, and a fail-then-pass on the
+        same row must end with NULL, not the stale reason from the first
+        failure."""
         try:
             with self._pool.connection() as conn:
                 conn.execute(
-                    "UPDATE test_runs SET status = %s, updated_at = now() "
-                    "WHERE run_id = %s",
-                    (status, run_id),
+                    "UPDATE test_runs SET status = %s, updated_at = now(), "
+                    "error_message = %s WHERE run_id = %s",
+                    (status, error_message, run_id),
                 )
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
@@ -2999,10 +3012,17 @@ class RunRegistry:
         never ran, which is exactly what case 15 forbids.
 
         `failure_class` and `failure_locator` are on every result and are
-        ALWAYS None. They are P3 columns (section 8): `test_runs` has no
-        such columns yet and no analyzer writes them. The keys exist so the
-        drawer can build its seam against a stable shape; the values are
-        placeholders, and no caller should read anything into a null one.
+        ALWAYS None IN THIS METHOD'S OWN RETURN VALUE -- this registry method
+        classifies nothing itself. `failure_locator` stays that way
+        everywhere: it is a P3 column (section 8), `test_runs` has no such
+        column yet and no analyzer writes one. `failure_class` does NOT stay
+        None end to end: tests_endpoints.test_detail computes it (and a
+        sibling `failure_sentence` key) one layer up, from the
+        `error_message` this method now also returns, for `failed`/`error`
+        results only (Task 7, 2026-09-21) -- kept out of this module so
+        core/run_registry.py stays free of a classifier import.
+        `error_message` itself never reaches the wire: the route pops it off
+        every result, whatever its status, before returning.
 
         `has_report` is NOT set here. The API layer derives it from `status`
         with history_endpoints' own _REPORT_STATUSES, so the two detail
@@ -3129,7 +3149,8 @@ class RunRegistry:
                 # version survives the join with n NULL rather than being
                 # dropped from its own test's timeline.
                 results = conn.execute(
-                    "SELECT t.run_id, t.status, t.created_at, v.n "
+                    "SELECT t.run_id, t.status, t.created_at, v.n, "
+                    "       t.error_message "
                     f"FROM test_runs t {run_join} "
                     "LEFT JOIN test_versions v"
                     "  ON v.version_id = t.test_version_id "
@@ -3191,9 +3212,15 @@ class RunRegistry:
                 "status": x["status"],
                 "n": x["n"],
                 "created_at": x["created_at"].isoformat(),
-                # P3 columns (section 8); see the docstring above.
+                # failure_locator is a P3 column (section 8) and stays None
+                # everywhere. failure_class is None HERE -- tests_endpoints
+                # computes the real value from error_message below, for
+                # failed/error results (Task 7). error_message is read only
+                # for that computation: the route pops it before the payload
+                # goes out, on every result regardless of status.
                 "failure_class": None,
                 "failure_locator": None,
+                "error_message": x["error_message"],
             } for x in results],
             "results_total": total,
         }
@@ -4145,6 +4172,7 @@ class RunRegistry:
                 row = conn.execute(
                     "SELECT t.run_id, t.user_id, t.user_email, t.user_query, "
                     "       t.robot_code, t.rerun_of, t.status, t.org_id, "
+                    "       t.error_message, "
                     "       t.created_at, t.updated_at, "
                     "       t.test_id, t.ran_as_platform_admin, "
                     "       te.name AS test_name, "

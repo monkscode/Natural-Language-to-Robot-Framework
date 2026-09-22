@@ -67,7 +67,8 @@ def _team_of_three(client):
 
 
 def _seed_test(user_id, org_id, user_email, query="search shoes",
-               robot_code="*** Tasks ***", status="passed"):
+               robot_code="*** Tasks ***", status="passed",
+               error_message=None):
     """One test/version/run via record_start -- the real _attach_test path,
     not a hand-built row. Returns (test_id, run_id)."""
     from src.backend.core.run_registry import get_run_registry
@@ -75,7 +76,7 @@ def _seed_test(user_id, org_id, user_email, query="search shoes",
     reg = get_run_registry()
     reg.record_start(
         run_id, {"user_id": user_id, "org_id": org_id, "email": user_email},
-        query, status, robot_code=robot_code)
+        query, status, robot_code=robot_code, error_message=error_message)
     with reg._pool.connection() as conn:
         row = conn.execute(
             "SELECT test_id FROM test_runs WHERE run_id = %s",
@@ -410,7 +411,7 @@ def test_limit_is_capped_like_history(client):
 # ---------------------------------------------------------------------------
 
 def _add_result(test_id, status, created_at, user_id="someone",
-                org_id=None, version_id=None):
+                org_id=None, version_id=None, error_message=None):
     """One extra result against an existing test, written straight to the
     table: record_start cannot mint a second result with a chosen status and
     timestamp for a test that already exists."""
@@ -420,10 +421,11 @@ def _add_result(test_id, status, created_at, user_id="someone",
     with reg._pool.connection() as conn:
         conn.execute(
             "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
-            " status, org_id, test_id, test_version_id, created_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            " status, org_id, test_id, test_version_id, created_at,"
+            " error_message)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (run_id, user_id, "x@x.com", "q", status, org_id, test_id,
-             version_id, created_at))
+             version_id, created_at, error_message))
     return run_id
 
 
@@ -562,9 +564,11 @@ def test_detail_has_report_uses_the_history_rule_and_nothing_else(client):
     assert by_run[made["generated"]]["has_report"] is False
 
 
-def test_detail_failure_fields_are_present_and_null(client):
-    """P3 columns (section 8). The keys exist so the drawer can build its
-    seam; nothing writes a value until P3."""
+def test_detail_failure_fields_are_present_and_null_with_no_message(client):
+    """failure_locator is a P3 column (section 8) and stays null forever --
+    no analyzer writes one yet. failure_class/failure_sentence are null HERE
+    only because this failed row carries no error_message to classify (Task
+    7) -- see the tests below for the case where one is present."""
     from src.backend.auth.jwt_utils import decode_token
     email = f"tn-{uuid.uuid4().hex[:8]}@e.com"
     tok = _register(client, email)
@@ -575,7 +579,97 @@ def test_detail_failure_fields_are_present_and_null(client):
     result = client.get(f"/api/tests/{test_id}",
                         headers=_auth(tok)).json()["results"][0]
     assert result["failure_class"] is None
+    assert result["failure_sentence"] is None
     assert result["failure_locator"] is None
+
+
+def test_detail_a_failed_result_gets_a_class_and_a_sentence(client):
+    """Task 7: computed on read from the stored error_message, for
+    failed/error results only. Proven against the classifier's own answer so
+    this cannot pass while quietly reading the wrong category."""
+    from src.backend.auth.jwt_utils import decode_token
+    from src.backend.crew_ai.optimization.failure_analyzer import FailureClassifier
+    email = f"tc-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    message = "No keyword with name 'Do Something' found"
+    test_id, run_id = _seed_test(claims["user_id"], claims["org_id"], email,
+                                 status="failed", error_message=message)
+
+    result = client.get(f"/api/tests/{test_id}",
+                        headers=_auth(tok)).json()["results"][0]
+    assert result["run_id"] == run_id
+    assert result["failure_class"] == FailureClassifier().classify(message).category
+    assert result["failure_sentence"]
+    assert "keyword" in result["failure_sentence"].lower()
+    assert result["failure_locator"] is None
+
+
+def test_detail_an_error_result_gets_a_class_and_maybe_no_sentence(client):
+    """An 'error' status is classified too, but a message with no matching
+    sentence still gets its class -- failure_category includes "unknown",
+    failure_sentence does not invent one."""
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"te-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, run_id = _seed_test(
+        claims["user_id"], claims["org_id"], email, status="error",
+        error_message="something nobody has ever seen")
+
+    result = client.get(f"/api/tests/{test_id}",
+                        headers=_auth(tok)).json()["results"][0]
+    assert result["run_id"] == run_id
+    assert result["failure_class"] == "unknown"
+    assert result["failure_sentence"] is None
+
+
+def test_detail_a_passed_row_with_a_stored_message_gets_neither(client):
+    """record_start's error_message follows newest-non-NULL-wins, so a
+    passed row can still hold a stale message from an earlier attempt. The
+    STATUS gates classification, not the presence of a message."""
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tp-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, run_id = _seed_test(
+        claims["user_id"], claims["org_id"], email, status="passed",
+        error_message="No keyword with name 'Do Something' found")
+
+    result = client.get(f"/api/tests/{test_id}",
+                        headers=_auth(tok)).json()["results"][0]
+    assert result["run_id"] == run_id
+    assert result["failure_class"] is None
+    assert result["failure_sentence"] is None
+    assert result["failure_locator"] is None
+
+
+def test_detail_never_returns_the_raw_error_message(client):
+    """Ruling 2026-09-21 (Task 7): the results list follows Q1's rule -- the
+    sentence or the class, never the raw text. error_message is read only to
+    compute the two keys, then popped, on every result whatever its
+    status -- checked across failed, error and passed rows in one payload."""
+    from src.backend.auth.jwt_utils import decode_token
+    email = f"tr-{uuid.uuid4().hex[:8]}@e.com"
+    tok = _register(client, email)
+    claims = decode_token(tok)
+    test_id, passed_run = _seed_test(
+        claims["user_id"], claims["org_id"], email, status="passed",
+        error_message="stale message")
+    failed_run = _add_result(
+        test_id, "failed", "2026-03-01T10:00:00Z",
+        user_id=claims["user_id"], org_id=claims["org_id"],
+        error_message="No keyword with name 'Do Something' found")
+    error_run = _add_result(
+        test_id, "error", "2026-03-02T10:00:00Z",
+        user_id=claims["user_id"], org_id=claims["org_id"],
+        error_message="a generation failure")
+
+    body = client.get(f"/api/tests/{test_id}", headers=_auth(tok)).json()
+    assert {passed_run, failed_run, error_run} <= {
+        x["run_id"] for x in body["results"]}
+    for result in body["results"]:
+        assert "error_message" not in result
 
 
 def test_detail_redacts_org_id_from_everyone_and_ids_from_non_admins(client):

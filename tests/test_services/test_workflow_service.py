@@ -350,6 +350,40 @@ class TestGenerationFailureIsRecorded:
         ])
         assert recorded["status"] == "generated"
 
+    def test_reason_is_redacted_before_storing(self):
+        """M1: a generation-failure message can carry a secret (a bad API key
+        quoted back by the provider's own error) and the History drawer now
+        shows this stored text verbatim, so it must never reach the row raw."""
+        key = "AIzaSy" + "D" * 33  # a Google API key shape redact_secrets masks
+        recorded, _ = self._run([
+            {"status": "error", "message": f"provider call failed at ?key={key}",
+             "workflow_id": self._WF_ID},
+        ])
+        assert key not in recorded["error_message"]
+        assert "[REDACTED]" in recorded["error_message"]
+
+    def test_an_already_redacted_reason_is_stored_unchanged(self):
+        recorded, _ = self._run([
+            {"status": "error", "message": "provider call failed at ?key=[REDACTED]",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "provider call failed at ?key=[REDACTED]"
+
+    def test_redaction_happens_before_the_cap(self):
+        key = "AIzaSy" + "D" * 33
+        recorded, _ = self._run([
+            {"status": "error", "message": f"key={key} " + "x" * 3000,
+             "workflow_id": self._WF_ID},
+        ])
+        assert len(recorded["error_message"]) == 2000
+        assert key not in recorded["error_message"]
+
+    def test_default_message_still_applies_when_redacting(self):
+        recorded, _ = self._run([
+            {"status": "error", "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "Generation failed"
+
 
 class TestStreamExecuteOnly:
     """Tests for stream_execute_only generator.
@@ -901,3 +935,357 @@ def test_stream_docker_execution_uses_runner_exec_client(tmp_path):
 
     rc.execute.assert_called_once_with("abc123", "test.robot")
     assert any("passed" in c for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# E5b Part B: every status write in _stream_docker_execution records why.
+#
+# The real _set_run_status runs against a mocked get_run_registry, so each test
+# checks both the value a site computes and that _set_run_status forwards it —
+# and nothing reaches the live database. get_artifact_store points run_dir at
+# tmp_path (nothing under robot_tests/). The output.xml files are real Robot
+# Framework 7.4.2 output (tests/fixtures/rf742_output_xml/, see
+# tests/test_core/test_failure_sentences.py for how they were produced).
+# ---------------------------------------------------------------------------
+
+import contextlib
+from pathlib import Path
+from unittest.mock import call
+
+from src.backend.core.failure_sentences import failure_sentence
+from src.backend.core.secret_redaction import redact_secrets
+
+_RF_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "rf742_output_xml"
+_RUN_ID = "3f0c9f4e-8a3b-4d7e-9c55-6b1f2a0d7e11"
+_KEY = "AIzaSy" + "D" * 33  # a Google API key shape redact_secrets masks
+_PAGE_LOAD_SENTENCE = failure_sentence(
+    "TimeoutError: page.goto: Timeout 30000ms exceeded.\n"
+    "Call log:\n  - navigating to \"https://example.com/\", waiting until \"load\"")
+
+
+def _fixture_xml(name: str) -> str:
+    return str(_RF_FIXTURES / f"{name}.xml")
+
+
+def _runner_body(test_status: str | None, output_xml_path: str | None) -> dict:
+    """The dict docker_service.run_test_in_container returns (docker_service.py:527-579)."""
+    body = {
+        "status": "complete",
+        "message": "Test execution finished: Some tests failed (exit code 1).",
+        "output_xml_path": output_xml_path,
+        "exit_code": 1,
+        "result": {"logs": "", "log_html": f"/reports/{_RUN_ID}/log.html",
+                   "report_html": f"/reports/{_RUN_ID}/report.html"},
+    }
+    if test_status is not None:
+        body["test_status"] = test_status
+    return body
+
+
+def _sse(chunks: list[str]) -> list[dict]:
+    out = []
+    for c in chunks:
+        for line in c.splitlines():
+            if line.startswith("data: "):
+                out.append(json.loads(line[6:]))
+    return out
+
+
+def _drive_execution(tmp_path, *, body=None, execute_error=None, registry=None,
+                     extra=()):
+    """Run the real _stream_docker_execution; return (events, set_status calls)."""
+    registry = registry or MagicMock()
+
+    async def _drive():
+        chunks = []
+        async for chunk in workflow_service._stream_docker_execution(
+                _RUN_ID, "*** Test Cases ***\nT\n    Log    x\n", "q", lambda: None):
+            chunks.append(chunk)
+        return chunks
+
+    with contextlib.ExitStack() as stack:
+        rc = stack.enter_context(patch.object(workflow_service, "runner_exec_client"))
+        gas = stack.enter_context(patch.object(workflow_service, "get_artifact_store"))
+        stack.enter_context(patch.object(workflow_service, "get_run_registry",
+                                         return_value=registry))
+        stack.enter_context(patch.object(workflow_service, "_process_learning_record",
+                                         return_value=None))
+        stack.enter_context(patch.object(workflow_service, "inline_report_screenshots",
+                                         return_value=0))
+        stack.enter_context(patch.object(workflow_service, "_safe_evict_hint_metadata"))
+        for p in extra:
+            stack.enter_context(p)
+        gas.return_value.run_dir.return_value = tmp_path
+        gas.return_value.persist_run.return_value = None
+        rc.ensure_image.return_value = {"status": "ready"}
+        if execute_error is not None:
+            rc.execute.side_effect = execute_error
+        else:
+            rc.execute.return_value = body
+        chunks = asyncio.run(_drive())
+    return _sse(chunks), registry.set_status.call_args_list
+
+
+def _result_event(events: list[dict]) -> dict:
+    """The execution event that carries the runner's verdict."""
+    return next(e for e in events if e.get("stage") == "execution" and "test_status" in e)
+
+
+class TestFailedVerdictRecordsTheReason:
+    """The :1392 site, `failed` arm: output.xml -> redact -> cap -> classify."""
+
+    def test_the_first_failing_tests_message_is_stored_not_the_first_tests(self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("pass_then_fail"))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        expected = ("TimeoutError: locator.fill: Timeout 10000ms exceeded.\n"
+                    "Call log:\n  - waiting for locator(\"#second\")")
+        assert calls == [call(_RUN_ID, "failed", expected)]
+        assert _result_event(events)["failure_sentence"] == failure_sentence(expected)
+        assert _result_event(events)["failure_sentence"] is not None
+
+    def test_a_caught_failure_is_not_stored_as_the_reason(self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("caught_then_real"))
+
+        _, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls == [call(_RUN_ID, "failed",
+                              "TimeoutError: locator.fill: Timeout 10000ms exceeded.\n"
+                              "Call log:\n  - waiting for locator(\"#real\")")]
+
+    def test_the_stored_reason_is_redacted_then_capped_keeping_the_head(self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("long_failure_with_token"))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        stored = calls[0].args[2]
+        assert calls[0].args[:2] == (_RUN_ID, "failed")
+        assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
+        assert "SECRETVALUE123" not in stored
+        assert stored.startswith(
+            "Error: page.goto: net::ERR_ABORTED at https://example.com/app?token=[REDACTED]\n")
+        # The card classifies the SAME text History stores.
+        assert _result_event(events)["failure_sentence"] == failure_sentence(stored)
+        assert _result_event(events)["failure_sentence"] is not None
+
+    def test_a_suite_setup_header_is_stripped_so_a_locator_timeout_is_not_a_page_load(
+            self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("suite_setup_failure"))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        stored = calls[0].args[2]
+        assert stored == ("TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
+                          "Call log:\n  - waiting for locator(\"#suite-setup\")")
+        assert _result_event(events)["failure_sentence"] != _PAGE_LOAD_SENTENCE
+
+    def test_an_unparseable_output_xml_stores_none_and_the_verdict_stays_failed(
+            self, tmp_path):
+        broken = tmp_path / "output.xml"
+        broken.write_text("<robot><suite><test><status status='FAIL'>", encoding="utf-8")
+        body = _runner_body("failed", str(broken))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls == [call(_RUN_ID, "failed", None)]
+        event = _result_event(events)
+        assert event["test_status"] == "failed"
+        assert "failure_sentence" in event
+        assert event["failure_sentence"] is None
+        assert not [e for e in events if e.get("status") == "error"]
+
+    def test_a_missing_output_xml_path_stores_none(self, tmp_path):
+        """docker_service's exit-code fallback returns failed with no path (:571-575)."""
+        events, calls = _drive_execution(tmp_path, body=_runner_body("failed", None))
+
+        assert calls == [call(_RUN_ID, "failed", None)]
+        assert _result_event(events)["failure_sentence"] is None
+
+    @pytest.mark.parametrize("target", ["first_failure_message", "failure_sentence"])
+    def test_an_exception_in_the_derivation_changes_neither_verdict_nor_event(
+            self, tmp_path, target):
+        body = _runner_body("failed", _fixture_xml("single_failure"))
+        before = dict(body)
+
+        events, calls = _drive_execution(
+            tmp_path, body=body,
+            extra=[patch.object(workflow_service, target,
+                                side_effect=RuntimeError("derivation blew up"))])
+
+        assert calls == [call(_RUN_ID, "failed", None)]
+        assert _result_event(events) == {"stage": "execution", **before,
+                                         "failure_sentence": None}
+        assert not [e for e in events if e.get("status") == "error"]
+
+    def test_a_swallowed_derivation_error_is_logged_with_its_traceback_and_path(
+            self, tmp_path, caplog):
+        path = _fixture_xml("single_failure")
+
+        with caplog.at_level("ERROR"):
+            _drive_execution(
+                tmp_path, body=_runner_body("failed", path),
+                extra=[patch.object(workflow_service, "first_failure_message",
+                                    side_effect=RuntimeError("derivation blew up"))])
+
+        records = [r for r in caplog.records if "failure reason" in r.getMessage()]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is RuntimeError
+        assert path in records[0].getMessage()
+
+    def test_the_sentence_is_classified_from_exactly_the_stored_string(self, tmp_path):
+        """The raw text (token, 3,184 chars) and the stored one (redacted, 2,000
+        chars) classify the same today, so only the call itself can prove the
+        card and History read ONE text."""
+        seen = []
+
+        def recording(message):
+            seen.append(message)
+            return failure_sentence(message)
+
+        _, calls = _drive_execution(
+            tmp_path, body=_runner_body("failed", _fixture_xml("long_failure_with_token")),
+            extra=[patch.object(workflow_service, "failure_sentence", recording)])
+
+        stored = calls[0].args[2]
+        assert stored is not None
+        assert seen == [stored]
+
+    def test_the_derivation_runs_off_the_event_loop(self, tmp_path):
+        seen = []
+        real = workflow_service.first_failure_message
+
+        def recording(path):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return real(path)
+
+        _drive_execution(
+            tmp_path, body=_runner_body("failed", _fixture_xml("single_failure")),
+            extra=[patch.object(workflow_service, "first_failure_message", recording)])
+
+        assert seen == [False]
+
+
+class TestOtherVerdictsAtTheResultSite:
+    """The :1392 site's `passed` and `error` arms."""
+
+    def test_a_passed_run_stores_none_and_derives_nothing(self, tmp_path):
+        derive = MagicMock()
+        body = _runner_body("passed", _fixture_xml("single_failure"))
+
+        events, calls = _drive_execution(
+            tmp_path, body=body,
+            extra=[patch.object(workflow_service, "first_failure_message", derive)])
+
+        assert calls == [call(_RUN_ID, "passed", None)]
+        derive.assert_not_called()
+        assert "failure_sentence" not in _result_event(events)
+
+    def test_a_malformed_runner_body_stores_its_message_redacted_and_capped(self, tmp_path):
+        body = _runner_body(None, None)
+        body["message"] = f"runner said something odd at /x?key={_KEY} " + "y" * 3000
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        stored = calls[0].args[2]
+        assert calls[0].args[:2] == (_RUN_ID, "error")
+        assert stored == redact_secrets(body["message"])[
+            :workflow_service._ERROR_MESSAGE_MAX_CHARS]
+        assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
+        assert _KEY not in stored
+        assert not any("failure_sentence" in e for e in events)
+
+    def test_a_malformed_runner_bodys_streamed_message_is_redacted_not_capped(
+            self, tmp_path):
+        """The row gets the capped/redacted text; the SSE event must too —
+        never the raw message (CodeRabbit security finding, PR #112)."""
+        body = _runner_body(None, None)
+        body["message"] = f"runner said something odd at /x?key={_KEY} " + "y" * 3000
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls[0].args[:2] == (_RUN_ID, "error")
+        streamed = next(e for e in events
+                        if e.get("stage") == "execution" and "exit_code" in e)
+        assert _KEY not in streamed["message"]
+        assert streamed["message"] == redact_secrets(
+            f"runner said something odd at /x?key={_KEY} " + "y" * 3000)
+        assert len(streamed["message"]) > workflow_service._ERROR_MESSAGE_MAX_CHARS
+
+    def test_a_malformed_runner_body_with_no_message_stores_none(self, tmp_path):
+        body = _runner_body("weird", None)
+        del body["message"]
+
+        _, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls == [call(_RUN_ID, "error", None)]
+
+
+class TestSaveFailureRecordsTheReason:
+    """The :1354 site: the text is built once, before the write, and reused."""
+
+    def test_the_text_is_redacted_capped_stored_and_yielded(self, tmp_path):
+        def leaky_open(*_a, **_kw):
+            raise OSError(f"cannot write /run/secrets/env?key={_KEY} " + "z" * 3000)
+
+        events, calls = _drive_execution(
+            tmp_path, body=_runner_body("passed", None),
+            extra=[patch("builtins.open", leaky_open)])
+
+        stored = calls[0].args[2]
+        assert calls == [call(_RUN_ID, "error", stored)]
+        assert stored.startswith(
+            "Failed to save test code: cannot write /run/secrets/env?key=[REDACTED]")
+        assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
+        assert _KEY not in stored
+        assert events[-1]["status"] == "error"
+        assert events[-1]["message"] == stored
+
+
+class TestExecutionExceptionRecordsTheReason:
+    """The :1437 site: `detail` is built before the write; the yield stays uncapped."""
+
+    def test_the_text_is_redacted_and_capped_in_the_row_but_not_in_the_event(self, tmp_path):
+        error = RuntimeError(
+            "Docker container exited with a system error (exit code 3).\n"
+            f"Container stdout/stderr (tail):\nGET /x?key={_KEY}\n" + "w" * 3000)
+
+        events, calls = _drive_execution(tmp_path, execute_error=error)
+
+        detail = redact_secrets(str(error))
+        assert calls == [call(_RUN_ID, "error",
+                              detail[:workflow_service._ERROR_MESSAGE_MAX_CHARS])]
+        assert _KEY not in calls[0].args[2]
+        assert events[-1] == {"stage": "execution", "status": "error", "message": detail}
+        assert len(events[-1]["message"]) > workflow_service._ERROR_MESSAGE_MAX_CHARS
+
+    def test_an_exception_with_no_text_records_its_type_name(self, tmp_path):
+        events, calls = _drive_execution(tmp_path, execute_error=TimeoutError())
+
+        assert calls == [call(_RUN_ID, "error", "TimeoutError")]
+        assert events[-1]["message"] == "TimeoutError"
+
+
+class TestRecordingAReasonNeverBreaksARun:
+
+    def test_a_registry_failure_does_not_propagate(self, tmp_path):
+        registry = MagicMock()
+        registry.set_status.side_effect = RuntimeError("database is down")
+        body = _runner_body("failed", _fixture_xml("single_failure"))
+
+        events, calls = _drive_execution(tmp_path, body=body, registry=registry)
+
+        assert len(calls) == 1
+        assert _result_event(events)["test_status"] == "failed"
+        assert not [e for e in events if e.get("status") == "error"]
+
+    def test_set_run_status_forwards_the_message_and_swallows_a_bootstrap_failure(self):
+        registry = MagicMock()
+        with patch.object(workflow_service, "get_run_registry", return_value=registry):
+            workflow_service._set_run_status("rid", "failed", "why")
+        registry.set_status.assert_called_once_with("rid", "failed", "why")
+
+        with patch.object(workflow_service, "get_run_registry",
+                          side_effect=RuntimeError("no pool")):
+            workflow_service._set_run_status("rid", "failed", "why")  # must not raise

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:33.776148" rpa="false" schemaversion="5">
+<suite id="s1" name="Caught Then Real" source="/w/caught_then_real.robot">
+<test id="s1-t1" name="Caught Then Real" line="2">
+<kw name="Run Keyword And Ignore Error" owner="BuiltIn">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:33.814643" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#caught")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#caught")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:33.814450" elapsed="0.000258">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#caught")</status>
+</kw>
+<arg>Fail</arg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#caught")</arg>
+<doc>Runs the given keyword with the given arguments and ignores possible error.</doc>
+<status status="PASS" start="2026-09-21T18:17:33.814253" elapsed="0.000496"/>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:33.814938" level="FAIL">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real")</msg>
+<arg>TimeoutError: locator.fill: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#real")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:33.814794" elapsed="0.000173">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:33.813944" elapsed="0.001088">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:33.776932" elapsed="0.038282"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Caught Then Real" id="s1" pass="0" fail="1" skip="0">Caught Then Real</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

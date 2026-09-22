@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:44:24.354224" rpa="false" schemaversion="5">
+<suite id="s1" name="Silenced If Then Teardown Failure" source="/w/silenced_if_then_teardown_failure.robot">
+<test id="s1-t1" name="Silenced If Then Teardown" line="2">
+<kw name="Set Log Level" owner="BuiltIn">
+<arg>NONE</arg>
+<doc>Sets the log threshold to the specified level.</doc>
+<status status="PASS" start="2026-09-21T18:44:24.393335" elapsed="0.000196"/>
+</kw>
+<if>
+<branch type="IF" condition="True">
+<kw name="Fail" owner="BuiltIn">
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#silenced")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:44:24.393665" elapsed="0.000231">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#silenced")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:44:24.393595" elapsed="0.000340">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#silenced")</status>
+</branch>
+<status status="FAIL" start="2026-09-21T18:44:24.393580" elapsed="0.000371">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#silenced")</status>
+</if>
+<kw name="Fail" owner="BuiltIn" type="TEARDOWN">
+<arg>Error: teardown message</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:44:24.394051" elapsed="0.000132">Error: teardown message</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:44:24.393044" elapsed="0.001182">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#silenced")
+
+Also teardown failed:
+Error: teardown message</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:44:24.354995" elapsed="0.039405"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Silenced If Then Teardown Failure" id="s1" pass="0" fail="1" skip="0">Silenced If Then Teardown Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

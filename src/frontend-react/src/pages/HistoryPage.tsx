@@ -90,6 +90,21 @@ interface RunDetail extends Run {
   // passes it, and both a platform admin and the token-less dev caller may
   // read a peer's corrections while the client knows it is neither.
   can_read_feedback?: boolean
+  // Only present when status is failed/error (server withholds both keys
+  // for every other status — their absence is not "no reason", it is "not
+  // applicable"). failure_sentence is the human-readable summary;
+  // error_message is the raw underlying text. A generation failure always
+  // stores a message ("Generation failed" at minimum); for an execution
+  // failure error_message is null, for example, when the row predates this
+  // change, output.xml is missing or cannot be parsed, output.xml holds no
+  // failure text (no failed test and no failing suite teardown — an
+  // all-skipped run is one case of this), or deriving the reason raised
+  // (logged server-side, never changes the run's outcome).
+  // failure_sentence is additionally null when the message maps to no
+  // sentence — a generation failure's text usually does not, since the
+  // sentence map only covers execution-time failure types.
+  error_message?: string | null
+  failure_sentence?: string | null
 }
 
 interface HistoryResponse {
@@ -346,6 +361,17 @@ function RunDrawerHeader({ selected, d, detailError, viewerEmail, copied, onCopy
         )}
         <RerunOriginLine d={d} copied={copied} onCopy={onCopy} onOpenRun={onOpenRun} />
       </SheetDescription>
+      {/* Only failed/error statuses carry a reason — the server withholds
+          both keys for every other status, so their absence there is
+          "not applicable", not "no reason found". Shape borrowed from
+          learning/RunDrawer.tsx's failed_keyword/error_message pair:
+          sentence prominent, raw message below in muted whitespace-pre-wrap. */}
+      {d && (d.status === 'failed' || d.status === 'error') && (d.failure_sentence || d.error_message) && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+          {d.failure_sentence && <p className="font-medium">{d.failure_sentence}</p>}
+          {d.error_message && <p className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">{d.error_message}</p>}
+        </div>
+      )}
     </SheetHeader>
   )
 }

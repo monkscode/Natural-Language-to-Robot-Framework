@@ -58,6 +58,7 @@ from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import RunOwnership, get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.failure_sentences import failure_sentence
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,17 @@ router = APIRouter()
 
 # Statuses with Robot artifacts on disk — only these runs have a log.html.
 _REPORT_STATUSES = ("passed", "failed")
+
+# Statuses for which the detail payload carries a failure reason (Ruling R7).
+# A reused run id (Task 1) can hold a stale message only while "running" —
+# every EXECUTION terminal write goes through set_status, which writes
+# error_message EXACTLY (a pass clears it); generation mints a fresh run id
+# per attempt, so its record_start writes have no earlier message to keep.
+# That leaves "running" as the sole status where record_start's COALESCE can
+# still be showing the previous run's message. Restricting this tuple to
+# failed/error is defence in depth for any other status, not the mechanism
+# that clears a stale reason on a pass.
+_FAILURE_STATUSES = ("failed", "error")
 
 
 def _can_open(scope: HistoryScope, user: dict | None, run: dict) -> bool:
@@ -395,6 +407,15 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
 
     run["robot_code"] = resolve_robot_code(run)
     run["has_report"] = run["status"] in _REPORT_STATUSES
+    # R7: only a failed/errored run carries a reason. Every other status pops
+    # the column the SELECT put on the dict and adds no sentence — a reused
+    # run id (Task 1) can still hold a stale message while running (set_status
+    # has not yet overwritten record_start's COALESCEd value), and it must
+    # not render against that outcome.
+    if run["status"] in _FAILURE_STATUSES:
+        run["failure_sentence"] = failure_sentence(run["error_message"])
+    else:
+        run.pop("error_message", None)
     # At most ONE extra lookup, and only for a row that IS a re-run — the
     # drawer header offers the same link the row pill does, so it needs the
     # same answer. Same helper, so the two cannot disagree. The feedback flag

@@ -396,12 +396,19 @@ function resultTitle(pass: boolean, total: number | null, failed: number | null 
 /** The result card's second line. Pass runs get whichever facts we actually
     have — a test count only when there is more than one, a duration only when
     the run was timed — and a neutral sentence when we have neither. */
-function resultSubtitle(pass: boolean, total: number | null, secs: number | null): string {
-  if (!pass) return 'Open the detailed log to see exactly which step went wrong.'
+function resultSubtitle(pass: boolean, total: number | null, secs: number | null, failureSentence: string | null): string {
+  if (!pass) return failureSentence || 'Open the detailed log to see exactly which step went wrong.'
   const parts: string[] = []
   if (total && total > 1) parts.push(`${total} tests`)
   if (secs != null) parts.push(`finished in ${secs.toFixed(1)}s`)
   return parts.join(' · ') || 'Execution finished'
+}
+
+/** The sentence to show for a just-finished run: only on a failed verdict,
+    and only when the server actually sent one. */
+function failureSentenceOf(event: Readonly<{ test_status?: unknown; failure_sentence?: unknown }>): string | null {
+  const sentence = event.failure_sentence
+  return event.test_status !== 'passed' && typeof sentence === 'string' && sentence ? sentence : null
 }
 
 /* ── Result card banner: outcome icon, headline, and the two report links ── */
@@ -493,9 +500,9 @@ function ResultFailureList({ failures, withTestName }: Readonly<{
 
 /* ── Post-run result card: outcome banner, per-test breakdown, report links,
    and an optional feedback footer (children) ── */
-function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }: Readonly<{
+function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, failureSentence, children }: Readonly<{
   outcome: Exclude<Outcome, null>; summary: RobotSummary | null; secs: number | null
-  reportUrl: string | null; logUrl: string | null; children?: ReactNode
+  reportUrl: string | null; logUrl: string | null; failureSentence: string | null; children?: ReactNode
 }>) {
   const pass = outcome === 'pass'
   const tests = summary?.tests ?? []
@@ -518,7 +525,7 @@ function ExecutionResult({ outcome, summary, secs, reportUrl, logUrl, children }
         <ResultBanner
           pass={pass}
           title={resultTitle(pass, total, summary?.failed)}
-          subtitle={resultSubtitle(pass, total, secs)}
+          subtitle={resultSubtitle(pass, total, secs, failureSentence)}
           reportUrl={reportUrl}
           logUrl={logUrl}
         />
@@ -1149,6 +1156,7 @@ export default function GeneratePage() {
   const [reportUrl, setReportUrl] = useState<string | null>(null)
   const [logUrl, setLogUrl]     = useState<string | null>(null)
   const [summary, setSummary]   = useState<RobotSummary | null>(null)
+  const [failureSentence, setFailureSentence] = useState<string | null>(null)
   const [error, setError]   = useState('')
   const [copied, setCopied] = useState(false)
 
@@ -1194,7 +1202,7 @@ export default function GeneratePage() {
 
   async function handleGenerate() {
     if (!query.trim() || busy) return
-    setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setCode('')
+    setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setCode('')
     setGenProgress(0); setGenStage('Starting test generation…')
     workflowId.current = null
     generatedQuery.current = query
@@ -1230,7 +1238,7 @@ export default function GeneratePage() {
   async function handleRun() {
     const robot = code.trim()
     if (!robot || busy) return
-    setError(''); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null)
+    setError(''); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null)
     execStart.current = Date.now()
     setExecSecs(null)
     setPhase('executing')
@@ -1258,6 +1266,9 @@ export default function GeneratePage() {
           // failure messages, pass/fail counts). The result card renders it
           // structured, so the stream just gets a one-line closing status.
           if (data.result.logs) setSummary(parseRobotSummary(String(data.result.logs)))
+          // Top-level on the event, sibling to `result`/`test_status` (workflow_service.py's
+          // `{'stage': 'execution', **result}` yield) — present only on a failed verdict.
+          setFailureSentence(failureSentenceOf(data))
           addExec(passed ? 'success' : 'error', data.message || (passed ? 'All tests passed' : 'Some tests failed'))
         } else if (data.status === 'error') {
           addExec('error', data.message || 'Execution failed')
@@ -1291,7 +1302,7 @@ export default function GeneratePage() {
     if (code.trim() && !window.confirm('This will clear your current test. Start a new test?')) return
     setQuery(''); setCode(''); setPhase('idle')
     setGenProgress(0); setGenStage('')
-    setGenLogs([]); setExecLogs([]); setOutcome(null); setExecSecs(null); setReportUrl(null); setLogUrl(null); setSummary(null); setError('')
+    setGenLogs([]); setExecLogs([]); setOutcome(null); setExecSecs(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setError('')
     workflowId.current = null; feedbackId.current = null; generatedQuery.current = ''; execStart.current = null
   }
 
@@ -1417,7 +1428,7 @@ export default function GeneratePage() {
           mt-6 collapses with the workspace margin for even breathing room. */}
       {outcome && (
         <div ref={resultRef} className="mt-6 mb-3 scroll-mt-4">
-          <ExecutionResult outcome={outcome} summary={summary} secs={execSecs} reportUrl={reportUrl} logUrl={logUrl}>
+          <ExecutionResult outcome={outcome} summary={summary} secs={execSecs} reportUrl={reportUrl} logUrl={logUrl} failureSentence={failureSentence}>
             {/* Feedback — only for generated runs. Paste-and-execute has no
                 query, so there is nothing for the learning system to
                 attribute (legacy guard). The id check lives here so the
