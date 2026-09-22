@@ -343,11 +343,11 @@ def test_detail(
         # Classified HERE rather than in run_registry, so
         # core/run_registry.py stays free of a classifier import. The raw
         # message is popped off EVERY result, whatever its status, before
-        # this payload goes out -- the results list follows the same rule
-        # the History drawer does: the sentence or the class, never the raw
-        # text (that text is one click away in the History drawer of that
-        # same run, under the same access rule). failure_locator stays
-        # None: it is a P3 column (section 8) and no analyzer writes one yet.
+        # this payload goes out -- the results list follows the rule set for
+        # lists (the History list): the sentence or the class, never the raw
+        # text; the raw text is one click away in the History drawer of that
+        # same run, under the same access rule. failure_locator stays None: it
+        # is a P3 column (section 8) and no analyzer writes one yet.
         msg = r.pop("error_message", None)
         if r["status"] in ("failed", "error"):
             r["failure_class"] = failure_category(msg)
