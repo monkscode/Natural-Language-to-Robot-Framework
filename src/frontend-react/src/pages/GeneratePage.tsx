@@ -406,8 +406,9 @@ function resultSubtitle(pass: boolean, total: number | null, secs: number | null
 
 /** The sentence to show for a just-finished run: only on a failed verdict,
     and only when the server actually sent one. */
-function failureSentenceOf(passed: boolean, raw: unknown): string | null {
-  return !passed && raw ? String(raw) : null
+function failureSentenceOf(event: Readonly<{ test_status?: unknown; failure_sentence?: unknown }>): string | null {
+  const sentence = event.failure_sentence
+  return event.test_status !== 'passed' && typeof sentence === 'string' && sentence ? sentence : null
 }
 
 /* ── Result card banner: outcome icon, headline, and the two report links ── */
@@ -1267,7 +1268,7 @@ export default function GeneratePage() {
           if (data.result.logs) setSummary(parseRobotSummary(String(data.result.logs)))
           // Top-level on the event, sibling to `result`/`test_status` (workflow_service.py's
           // `{'stage': 'execution', **result}` yield) — present only on a failed verdict.
-          setFailureSentence(failureSentenceOf(passed, data.failure_sentence))
+          setFailureSentence(failureSentenceOf(data))
           addExec(passed ? 'success' : 'error', data.message || (passed ? 'All tests passed' : 'Some tests failed'))
         } else if (data.status === 'error') {
           addExec('error', data.message || 'Execution failed')
