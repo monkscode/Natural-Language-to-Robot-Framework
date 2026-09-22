@@ -1114,10 +1114,13 @@ def _store_failure(result_store: dict, event: dict) -> None:
     """Remember a generation failure so the caller can record a test_runs row.
 
     The error SSE already carries workflow_id (so the bench can detach failed
-    runs); this keeps it, plus the reason, for the history row.
+    runs); this keeps it, plus the reason, for the history row. Redacted
+    BEFORE the cap — the History drawer now shows this stored text verbatim
+    (E5b Part B), so a credential a provider quoted back in its own error
+    must never reach the row raw.
     """
-    result_store["error_message"] = (event.get("message") or "Generation failed")[
-        :_ERROR_MESSAGE_MAX_CHARS]
+    result_store["error_message"] = redact_secrets(
+        event.get("message") or "Generation failed")[:_ERROR_MESSAGE_MAX_CHARS]
     if event.get("workflow_id"):
         result_store["workflow_id"] = event["workflow_id"]
 

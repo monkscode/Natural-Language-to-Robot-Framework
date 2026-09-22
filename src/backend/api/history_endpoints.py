@@ -68,9 +68,12 @@ router = APIRouter()
 _REPORT_STATUSES = ("passed", "failed")
 
 # Statuses for which the detail payload carries a failure reason (Ruling R7).
-# A reused run id (Task 1) can hold a stale message while "running" or after
-# a later "passed" — every other status pops error_message and adds no
-# failure_sentence, so a stale reason never renders against the wrong outcome.
+# A reused run id (Task 1) can hold a stale message only while "running" —
+# set_status writes error_message EXACTLY on every terminal write, so a pass
+# clears it; "running" is the sole status where record_start's COALESCE lets
+# the previous run's message survive. Restricting this tuple to failed/error
+# is defence in depth for any other status, not the mechanism that clears a
+# stale reason on a pass.
 _FAILURE_STATUSES = ("failed", "error")
 
 
@@ -404,8 +407,9 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
     run["has_report"] = run["status"] in _REPORT_STATUSES
     # R7: only a failed/errored run carries a reason. Every other status pops
     # the column the SELECT put on the dict and adds no sentence — a reused
-    # run id (Task 1) can still hold a stale message while running or after a
-    # later pass, and it must not render against that outcome.
+    # run id (Task 1) can still hold a stale message while running (set_status
+    # has not yet overwritten record_start's COALESCEd value), and it must
+    # not render against that outcome.
     if run["status"] in _FAILURE_STATUSES:
         run["failure_sentence"] = failure_sentence(run["error_message"])
     else:

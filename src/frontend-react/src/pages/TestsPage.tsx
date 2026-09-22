@@ -83,8 +83,9 @@ interface TestRow {
  *  before versions existed. failure_class/failure_sentence are computed on
  *  read (Task 7, 2026-09-21); both null unless status is failed/error.
  *  failure_class is then the classifier's code (`unknown` included) when a
- *  message exists. failure_sentence is the code's sentence, or null when
- *  no message exists or the class has no sentence. The raw message never
+ *  message exists. failure_sentence is the sentence for the classified
+ *  failure TYPE (one code can map to several sentences, or none), or null
+ *  when no message exists or the type has no sentence. The raw message never
  *  reaches this route. failure_locator is a P3 column and stays null today;
  *  no analyzer writes one yet. */
 interface TestResult {

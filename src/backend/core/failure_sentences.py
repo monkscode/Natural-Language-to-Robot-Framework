@@ -27,6 +27,7 @@ Depends on: crew_ai/optimization/failure_analyzer.py (FailureClassifier),
 xml.etree.ElementTree.
 """
 import logging
+from collections.abc import Iterator
 from xml.etree import ElementTree
 
 from src.backend.crew_ai.optimization.failure_analyzer import FailureClassifier
@@ -71,7 +72,7 @@ def _wrong_element_kind() -> str:
 def _click_intercepted() -> str:
     return (
         "Something else on the page — a popup, banner, or overlay — was covering "
-        "the element and blocked the click. Closing that overlay first may fix it."
+        "the element and blocked the action. Closing that overlay first may fix it."
     )
 
 
@@ -143,8 +144,8 @@ def _assertion_empty_actual() -> str:
 
 def _element_not_visible() -> str:
     return (
-        "The element was found, but it was not visible — it may be hidden, "
-        "off-screen, or covered by something else."
+        "The element was found, but it was not visible — it may be hidden or "
+        "off-screen."
     )
 
 
@@ -221,7 +222,12 @@ def failure_category(error_message: str | None) -> str | None:
     """The classifier's category code (e.g. "C1"), verbatim -- "unknown"
     included. This is the same vocabulary execution_records.failure_category
     already stores (feedback_loop.py:1006-1008), so a Tests-page result and a
-    learning row use one code for the same failure.
+    learning row share one CODE SPACE, not one code for the same failure: the
+    learning path classifies OutputXmlParser's text (which keeps RF's own
+    "Parent suite setup failed:" header and can store a caught failure),
+    while this reads first_failure_message's text (header-stripped, first
+    uncaught failure), so the same run can get different codes from the two
+    paths (the suite-setup fixture: learning D1, this module C1).
 
     None for None, "", or whitespace-only text: there is nothing to
     classify, and "unknown" would misrepresent an absent message as one the
@@ -335,7 +341,7 @@ def _test_status_reason(test: ElementTree.Element) -> str:
     return text.partition(_TEARDOWN_TAIL)[0].strip()
 
 
-def _suite_teardowns(suite: ElementTree.Element):
+def _suite_teardowns(suite: ElementTree.Element) -> Iterator[ElementTree.Element]:
     """Every suite-level <kw type="TEARDOWN">, in document order (a child
     suite's teardown is written before its parent's)."""
     for child in suite:

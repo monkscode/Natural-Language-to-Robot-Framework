@@ -189,6 +189,27 @@ def test_mapped_type_gets_a_matching_sentence(message, expected_fragment, specif
     assert expected_fragment in sentence.lower()
 
 
+def test_click_intercepted_sentence_says_blocked_the_action_not_the_click():
+    """M4: the classifier's marker ('intercepts pointer events') fires for
+    hover, check, drag and other pointer actions too, not only a click — the
+    sentence must not claim the action was specifically a click."""
+    assert failure_sentence(INTERCEPTED) == (
+        "Something else on the page — a popup, banner, or overlay — was "
+        "covering the element and blocked the action. Closing that overlay "
+        "first may fix it."
+    )
+
+
+def test_element_not_visible_sentence_does_not_claim_covered():
+    """M4: a covered element is a different class (click_intercepted); this
+    sentence's markers (not visible / resolved to hidden / outside the
+    viewport) never mean covered, so it must not suggest that cause."""
+    assert failure_sentence(WAITFOR_HIDDEN) == (
+        "The element was found, but it was not visible — it may be hidden "
+        "or off-screen."
+    )
+
+
 def test_unrecognised_message_returns_none():
     from src.backend.crew_ai.optimization.failure_analyzer import FailureClassifier
 

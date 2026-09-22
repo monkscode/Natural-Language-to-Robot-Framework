@@ -21,7 +21,7 @@ not the only one.
 | Table | One row per | Holds |
 |---|---|---|
 | `workflow_metrics` | successful generation | cost, tokens, per-stage breakdown, gate outcome, locator counts — all inside a `data` JSONB column |
-| `test_runs` | run (any outcome) | the user's query, status, and `error_message` when generation failed |
+| `test_runs` | run (any outcome) | the user's query, status, and `error_message` — a generation failure's reason (`status = 'error'`, `robot_code` NULL), an execution error's reason (`status = 'error'`, `robot_code` NOT NULL), or a failed test's first uncaught failure message (`status = 'failed'`) |
 
 They join on **`workflow_metrics.workflow_id = test_runs.run_id`** — the same id under
 two names.
@@ -288,7 +288,13 @@ real rate.
 ## Failures, and what the user asked for
 
 Failed generations write **no** `workflow_metrics` row — the metrics block runs after the
-dryrun gate, which a failed run never reaches. They are recorded in `test_runs` instead:
+dryrun gate, which a failed run never reaches. They are recorded in `test_runs` instead, at
+`status = 'error'`. That status is not generation-only, though: an execution can also end
+at `'error'` (the test file failed to save, or the runner/container itself errored), and
+`error_message` now carries that text too. The two are told apart by `robot_code` — a
+generation failure's row never gets one (nothing was ever generated to store), while an
+execution reaches `test_runs` only after code was generated and so always carries a
+non-null `robot_code`. Restrict to generation failures with:
 
 ```sql
 SELECT
@@ -297,24 +303,28 @@ SELECT
     user_query,
     error_message
 FROM test_runs
-WHERE status = 'error'
+WHERE status = 'error' AND robot_code IS NULL
   AND created_at > now() - interval '7 days'
 ORDER BY created_at DESC;
 ```
 
 Grouping the reasons tells you whether you are looking at rate limits, a missing
-credential, or the model:
+credential, or the model — again restricted to generation failures, or the count mixes in
+execution errors:
 
 ```sql
 SELECT
     left(error_message, 80) AS reason,
     count(*)                AS occurrences
 FROM test_runs
-WHERE status = 'error' AND error_message IS NOT NULL
+WHERE status = 'error' AND robot_code IS NULL AND error_message IS NOT NULL
 GROUP BY 1
 ORDER BY occurrences DESC
 LIMIT 20;
 ```
+
+A `status = 'failed'` row (the test ran and a check failed) also carries a message: the
+first uncaught failure Robot Framework wrote to `output.xml`, not a generation reason.
 
 ## Runs that vanished
 
@@ -390,9 +400,12 @@ SELECT status, user_query, error_message, created_at, updated_at
 FROM test_runs WHERE run_id = '<id>';
 ```
 
-`status = 'error'` means generation never produced code, and `error_message` is the
-reason. A row still at `'running'` long after `created_at` means the run died without
-reaching either terminal path.
+`status = 'error'` means either generation never produced code (`robot_code` NULL) or
+execution itself errored out after code was generated (`robot_code` NOT NULL) —
+`error_message` is the reason either way. `status = 'failed'` means the test ran and a
+check failed; `error_message` there is the first uncaught failure from `output.xml`. A row
+still at `'running'` long after `created_at` means the run died without reaching a
+terminal path.
 
 **2. What it cost and what the gate did.**
 

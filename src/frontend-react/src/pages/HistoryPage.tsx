@@ -93,8 +93,13 @@ interface RunDetail extends Run {
   // Only present when status is failed/error (server withholds both keys
   // for every other status — their absence is not "no reason", it is "not
   // applicable"). failure_sentence is the human-readable summary;
-  // error_message is the raw underlying text. Either can be null even on a
-  // failed run (e.g. a generation failure with no execution to report from).
+  // error_message is the raw underlying text. A generation failure always
+  // stores a message ("Generation failed" at minimum), so error_message is
+  // null only for a row from before this change, an output.xml the server
+  // could not read, or a run where every test was skipped.
+  // failure_sentence is additionally null when the message maps to no
+  // sentence — a generation failure's text usually does not, since the
+  // sentence map only covers execution-time failure types.
   error_message?: string | null
   failure_sentence?: string | null
 }

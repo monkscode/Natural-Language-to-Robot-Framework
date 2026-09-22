@@ -350,6 +350,40 @@ class TestGenerationFailureIsRecorded:
         ])
         assert recorded["status"] == "generated"
 
+    def test_reason_is_redacted_before_storing(self):
+        """M1: a generation-failure message can carry a secret (a bad API key
+        quoted back by the provider's own error) and the History drawer now
+        shows this stored text verbatim, so it must never reach the row raw."""
+        key = "AIzaSy" + "D" * 33  # a Google API key shape redact_secrets masks
+        recorded, _ = self._run([
+            {"status": "error", "message": f"provider call failed at ?key={key}",
+             "workflow_id": self._WF_ID},
+        ])
+        assert key not in recorded["error_message"]
+        assert "[REDACTED]" in recorded["error_message"]
+
+    def test_an_already_redacted_reason_is_stored_unchanged(self):
+        recorded, _ = self._run([
+            {"status": "error", "message": "provider call failed at ?key=[REDACTED]",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "provider call failed at ?key=[REDACTED]"
+
+    def test_redaction_happens_before_the_cap(self):
+        key = "AIzaSy" + "D" * 33
+        recorded, _ = self._run([
+            {"status": "error", "message": f"key={key} " + "x" * 3000,
+             "workflow_id": self._WF_ID},
+        ])
+        assert len(recorded["error_message"]) == 2000
+        assert key not in recorded["error_message"]
+
+    def test_default_message_still_applies_when_redacting(self):
+        recorded, _ = self._run([
+            {"status": "error", "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "Generation failed"
+
 
 class TestStreamExecuteOnly:
     """Tests for stream_execute_only generator.
