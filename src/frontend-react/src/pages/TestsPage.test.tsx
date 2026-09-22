@@ -1039,6 +1039,10 @@ describe('TestsPage — the Update dialog', () => {
     // One editable control in the whole dialog: the description. The code
     // block is a <pre>, so it cannot be one.
     expect(within(dialog).getAllByRole('textbox')).toHaveLength(1)
+    // A long code line must not widen the dialog's grid track — the section
+    // needs min-w-0 to shrink below its content's min-content width, so the
+    // <pre>'s own overflow-auto scrolls the line instead of the whole dialog.
+    expect(code).toHaveClass('min-w-0')
   })
 
   it('writes nothing when the dialog is cancelled', async () => {

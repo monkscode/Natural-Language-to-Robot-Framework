@@ -598,7 +598,7 @@ function DrawerCode({ version, copied, onCopy }: Readonly<{
 }>) {
   const code = version?.robot_code ?? null
   return (
-    <section className="flex flex-col gap-2" aria-label="Robot code">
+    <section className="flex min-w-0 flex-col gap-2" aria-label="Robot code">
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Robot code

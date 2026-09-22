@@ -491,7 +491,11 @@ describe('HistoryPage drawer — why a run failed', () => {
     await openDrawer()
 
     expect(await screen.findByText('The locator for the search box could not be found.')).toBeInTheDocument()
-    expect(screen.getByText('ElementNotFound: css=input[name="q"]')).toBeInTheDocument()
+    const rawMessage = screen.getByText('ElementNotFound: css=input[name="q"]')
+    expect(rawMessage).toBeInTheDocument()
+    // A real failure message can carry a long unbroken token (e.g. a 190-char
+    // selector) that whitespace-pre-wrap alone won't wrap, overflowing the box.
+    expect(rawMessage).toHaveClass('break-words')
   })
 
   it('shows the message alone for an error run with no sentence', async () => {

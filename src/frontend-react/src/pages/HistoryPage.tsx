@@ -369,7 +369,7 @@ function RunDrawerHeader({ selected, d, detailError, viewerEmail, copied, onCopy
       {d && (d.status === 'failed' || d.status === 'error') && (d.failure_sentence || d.error_message) && (
         <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
           {d.failure_sentence && <p className="font-medium">{d.failure_sentence}</p>}
-          {d.error_message && <p className="mt-0.5 whitespace-pre-wrap text-muted-foreground">{d.error_message}</p>}
+          {d.error_message && <p className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">{d.error_message}</p>}
         </div>
       )}
     </SheetHeader>
