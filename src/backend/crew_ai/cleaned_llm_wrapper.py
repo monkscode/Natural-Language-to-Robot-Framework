@@ -746,7 +746,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
       provider factory entirely — no provider SDK needs to be installed)
     - Cleans 'Action: tool_name` extra text' → 'Action: tool_name'
     - Cleans 'Action Input: prefix {...}' → 'Action Input: {...}'
-    - Retries on transient API errors via LiteLLM (num_retries=3)
+    - Cloud (vertex/gemini): per-try timeouts of 1x/2x/4x LLM_REQUEST_TIMEOUT_S and wrapper-owned retries (provider_retry.py); local: LiteLLM's num_retries=3 and no timeout
     - Tracks all responses via self._monitor (per-instance, never shared across workflows)
 
     Args:
@@ -780,6 +780,7 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
         resolve_completion_kwargs,
         resolve_thinking_kwargs,
     )
+    from src.backend.core.config import settings  # lazy import: avoids circular import
 
     if model_provider not in PROVIDER_PREFIXES:
         raise ValueError(
@@ -838,10 +839,12 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
         logger.info(f"🧹 Creating CleanedLLMWrapper for Vertex AI model: {routed_model}")
         llm = CleanedLLMWrapper(
             model=routed_model,
-            num_retries=3,
+            num_retries=0,    # The wrapper retries (W5); LiteLLM's own retries would
+                              # re-send 400/401s with no wait. 0 == unset for LiteLLM.
             is_litellm=True,
             **schema_kwargs,
         )
+        llm._provider_retry = ProviderRetryPolicy(settings.LLM_REQUEST_TIMEOUT_S)
         # The thinking guard itself lives in llm_provider_routing so that every
         # LiteLLM call site reads one rule — see resolve_thinking_kwargs for why
         # it carries thinkingConfig rather than `thinking`, why it is gated on
@@ -861,10 +864,12 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
     # is_litellm=True has no routing effect — CleanedLLMWrapper.__new__ bypasses
     # LLM.__new__ entirely. Kept for documentation clarity only.
     logger.info(f"🧹 Creating CleanedLLMWrapper for Gemini model: {routed_model}")
-    return CleanedLLMWrapper(
+    llm = CleanedLLMWrapper(
         api_key=api_key or os.getenv("GEMINI_API_KEY"),
         model=routed_model,
-        num_retries=3,    # LiteLLM internal retry for transient API errors (429, 503, etc.)
+        num_retries=0,    # The wrapper retries (W5) — see the vertex branch.
         is_litellm=True,
         **schema_kwargs,
     )
+    llm._provider_retry = ProviderRetryPolicy(settings.LLM_REQUEST_TIMEOUT_S)
+    return llm

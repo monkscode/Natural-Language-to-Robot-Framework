@@ -24,7 +24,7 @@ class TestGetLlm:
             MockCleanedLLMWrapper.assert_called_once_with(
                 api_key="test-key",
                 model="gemini/gemini-2.5-flash",
-                num_retries=3,
+                num_retries=0,
                 is_litellm=True
             )
 
@@ -57,7 +57,7 @@ class TestGetLlm:
             MockCleanedLLMWrapper.assert_called_once_with(
                 api_key="env-key-123",
                 model="gemini/gemini-2.5-flash",
-                num_retries=3,
+                num_retries=0,
                 is_litellm=True
             )
 
@@ -73,7 +73,7 @@ class TestGetLlm:
             assert llm == MockCleanedLLMWrapper.return_value
             MockCleanedLLMWrapper.assert_called_once_with(
                 model="vertex_ai/gemini-2.5-flash",
-                num_retries=3,
+                num_retries=0,
                 is_litellm=True,
             )
 
@@ -89,7 +89,7 @@ class TestGetLlm:
             assert llm == MockCleanedLLMWrapper.return_value
             MockCleanedLLMWrapper.assert_called_once_with(
                 model="vertex_ai/gemini-2.5-flash",
-                num_retries=3,
+                num_retries=0,
                 is_litellm=True,
             )
 

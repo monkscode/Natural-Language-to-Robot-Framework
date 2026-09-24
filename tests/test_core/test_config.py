@@ -162,6 +162,28 @@ class TestSettingsValidators:
             self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})
 
 
+class TestLlmRequestTimeout:
+    """LLM_REQUEST_TIMEOUT_S (W5, owner D3): the base of the 1x/2x/4x schedule."""
+
+    def _settings(self, value):
+        with patch.dict(os.environ, {"LLM_REQUEST_TIMEOUT_S": str(value)}, clear=False):
+            from src.backend.core.config import Settings
+            return Settings(_env_file=None)
+
+    def test_default_is_sixty_seconds(self):
+        from src.backend.core.config import Settings
+        assert Settings.model_fields["LLM_REQUEST_TIMEOUT_S"].default == 60
+
+    @pytest.mark.parametrize("value", [30, 60, 600])
+    def test_accepts_the_allowed_range(self, value):
+        assert self._settings(value).LLM_REQUEST_TIMEOUT_S == value
+
+    @pytest.mark.parametrize("value", [0, 29, 601])
+    def test_rejects_outside_the_range(self, value):
+        with pytest.raises(ValueError, match="LLM_REQUEST_TIMEOUT_S must be between 30 and 600"):
+            self._settings(value)
+
+
 def test_local_service_urls_use_ipv4_loopback(monkeypatch):
     """Local service hops must default to 127.0.0.1, never localhost.
 

@@ -96,6 +96,23 @@ LOCAL_MODEL=llama3.1
 ollama pull llama3.1
 ```
 
+### LLM_REQUEST_TIMEOUT_S
+
+Seconds the first try of a cloud LLM request (`MODEL_PROVIDER=gemini` or `vertex`) may
+take. The second and third tries get twice and four times as long, so the default gives
+60 s, 120 s and 240 s; a call that gets no answer gives up after about 7.5 minutes and the
+UI says the model provider did not answer. Rejections from the provider (HTTP 429, 5xx)
+are retried after a short backoff (up to 4 times) without using up a try.
+
+```env
+LLM_REQUEST_TIMEOUT_S=60
+```
+
+**Default:** 60 · **Allowed:** 30–600
+
+**Not applied to** `MODEL_PROVIDER=local`: Ollama models can take minutes on a CPU, so
+they keep LiteLLM's own behaviour (no per-try timeout, 3 automatic retries).
+
 ## Application Settings
 
 ### APP_PORT

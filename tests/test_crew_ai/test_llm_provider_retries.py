@@ -328,7 +328,6 @@ class TestThroughRealCrewaiAndLitellm:
         assert w._token_usage == before
 
 
-@pytest.mark.xfail(strict=True, reason="the policy is attached by get_llm in Task 3")
 class TestSharedPlannerAssemblerState:
     def test_both_wrappers_get_the_policy_and_still_share_monitor_and_usage(self):
         from src.backend.crew_ai.agents import RobotAgents
