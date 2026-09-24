@@ -2291,3 +2291,16 @@ def test_coverage_disclosure_guard_fires_on_wrapped_and_aliased_totals(
         test_llm_spend_panels_disclose_their_coverage(mutant)
     assert panel["title"] in str(raised.value), (
         "the guard fired on a different panel than the mutated one")
+
+
+def test_element_panel_says_where_each_tag_came_from():
+    """browser-service 1.0.39 made `element_tag` the tag of the node the RETURNED
+    locator resolves to (blank on a found row when it cannot be read) and added
+    `element_tag_source` and `indexed_tag`. Without those two columns the panel
+    cannot tell a resolved tag from an unreadable one, and a locator that resolves
+    to a different element than the one the agent indexed looks like any other row."""
+    dashboard = json.loads((DASHBOARD_DIR / "trace-one-run.json").read_text(encoding="utf-8"))
+    sqls = [sql for sql in _sql_targets(dashboard) if "'element_tag'" in sql]
+    assert len(sqls) == 1, "expected exactly one panel reading element_tag"
+    assert "'element_tag_source'" in sqls[0]
+    assert "'indexed_tag'" in sqls[0]

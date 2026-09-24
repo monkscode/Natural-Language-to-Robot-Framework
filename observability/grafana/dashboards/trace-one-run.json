@@ -95,14 +95,14 @@
     {
       "type": "table",
       "title": "4 — Every element, and how its locator was found",
-      "description": "The key is present on 434/434 metrics rows; one of them holds a JSON null rather than an array, as of 2026-08-10 — this panel excludes it via jsonb_typeof so it returns no rows instead of erroring. fallback_depth above 0 means the primary strategy did not resolve.",
+      "description": "The key is present on 434/434 metrics rows; one of them holds a JSON null rather than an array, as of 2026-08-10 — this panel excludes it via jsonb_typeof so it returns no rows instead of erroring. fallback_depth above 0 means the primary strategy did not resolve. Since browser-service 1.0.39, tag is the tag of the element the returned locator resolves to (blank when it could not be read); tag_source says resolved, unknown, or indexed (a not-found row, which keeps the indexed element's tag); indexed_tag is the element the agent pointed at. Older rows leave both new columns empty and show the indexed tag.",
       "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
       "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23},
       "targets": [{
         "refId": "A",
         "format": "table",
         "rawQuery": true,
-        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = ${run_id:sqlstring} AND jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
+        "rawSql": "SELECT e.value->>'element_id' AS element, e.value->>'element_tag' AS tag, e.value->>'element_tag_source' AS tag_source, e.value->>'indexed_tag' AS indexed_tag, e.value->>'locator_approach' AS approach, (e.value->>'fallback_depth')::int AS fallback_depth, (e.value->>'success')::boolean AS success, (e.value->>'is_in_iframe')::boolean AS in_iframe, (e.value->>'is_collection')::boolean AS is_collection, (e.value->>'has_id')::boolean AS has_id, (e.value->>'has_text_content')::boolean AS has_text, (e.value->>'element_data_available')::boolean AS element_data, e.value->>'url_domain' AS domain FROM workflow_metrics m, jsonb_array_elements(m.data->'element_approach_metrics') AS e WHERE m.workflow_id = ${run_id:sqlstring} AND jsonb_typeof(m.data->'element_approach_metrics') = 'array'"
       }]
     },
     {
