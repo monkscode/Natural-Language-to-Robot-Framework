@@ -813,15 +813,15 @@ _U07_LOGIN_TAIL = (
     "${browser}    chromium\n"
     "${headless}    True\n"
     "${url}    https://example.test\n"
-    "${username_input}    [name=username]\n"
-    "${password_input}    [name=password]\n"
-    "${login_button}    button[type=submit]\n"
-    "${dashboard_heading}    h6:has-text(Dashboard)\n"
+    "${username_input}    [name='username']\n"
+    "${password_input}    [name='password']\n"
+    "${login_button}    button[type='submit']\n"
+    "${dashboard_heading}    h6:has-text('Dashboard')\n"
     "\n"
     "*** Test Cases ***\n"
     "Login Test\n"
     "    New Browser    ${browser}    headless=${headless}\n"
-    "    New Context    viewport=1920x1080\n"
+    "    New Context    viewport={'width': 1920, 'height': 1080}\n"
     "    New Page    ${url}\n"
     "    Fill Text    ${username_input}    user\n"
     "    Fill Text    ${password_input}    secret\n"
@@ -839,15 +839,15 @@ _U07_LOGIN_TAIL_EXPECTED = (
     "${browser}    chromium\n"
     "${headless}    True\n"
     "${url}    https://example.test\n"
-    "${username_input}    [name=username]\n"
-    "${password_input}    [name=password]\n"
-    "${login_button}    button[type=submit]\n"
-    "${dashboard_heading}    h6:has-text(Dashboard)\n"
+    "${username_input}    [name='username']\n"
+    "${password_input}    [name='password']\n"
+    "${login_button}    button[type='submit']\n"
+    "${dashboard_heading}    h6:has-text('Dashboard')\n"
     "\n"
     "*** Test Cases ***\n"
     "Login Test\n"
     "    New Browser    ${browser}    headless=${headless}\n"
-    "    New Context    viewport=1920x1080\n"
+    "    New Context    viewport={'width': 1920, 'height': 1080}\n"
     "    New Page    ${url}\n"
     "    Fill Text    ${username_input}    user\n"
     "    Fill Text    ${password_input}    secret\n"
@@ -878,15 +878,17 @@ def test_rewrite_converts_the_real_assembler_shape_despite_variables_section(lab
 
 
 def test_rewrite_converts_with_a_pipe_separated_variables_section():
+    # The pipe-form header is deliberately the FIRST header in the file (no
+    # *** Settings *** ahead of it): a mutant that never recognises pipe headers
+    # would leave the guard ON (its pre-first-header default) and this file
+    # would stay unchanged, so this shape actually exercises pipe detection.
     source = (
-        "*** Settings ***\nLibrary    Browser\n\n"
         "| *** Variables *** |\n"
         "| ${x} | value |\n\n"
         "*** Test Cases ***\nT\n"
         "    Get Element States    ${h}    contains    visible\n"
     )
     expected = (
-        "*** Settings ***\nLibrary    Browser\n\n"
         "| *** Variables *** |\n"
         "| ${x} | value |\n\n"
         "*** Test Cases ***\nT\n"
@@ -998,5 +1000,83 @@ def test_rewrite_try_wrapper_guard_control_converts_without_the_wrapper():
     expected = (
         _SUITE + "    Check\n\n"
         f"*** Keywords ***\nCheck\n    {_WFES}    id=x    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected
+
+
+# --- Fix wave: the guard must never UNDER-match inside a section Robot could
+# read as Keywords (whole-branch review finding 1). RF 7.4.2 reads a line as
+# pipe-separated whenever the first two characters, stripped, are just "|" --
+# that includes a pipe followed by a Unicode space character like NBSP, not
+# only "", " " or "\t". And RF's tokenizer splits physical lines on more than
+# "\n" (also a lone "\r", vertical tab, form feed, and a handful of rarer
+# separator characters) -- a Keywords header that lands after one of those on
+# the same "\n"-delimited chunk is invisible to a scan that only splits on
+# "\n", so the section state (and therefore the own-keyword guard) can end up
+# wrong in the direction that matters: converting a call that Robot would
+# actually resolve to the file's own keyword.
+
+def test_rewrite_leaves_the_file_alone_when_the_pipe_header_uses_a_unicode_space():
+    """RF: `line[:2].strip() == "|"` accepts a pipe followed by NBSP, not just a
+    plain space/tab. Before the fix, `_section_header_name` required the second
+    character to be "", " " or "\t" exactly, so this NBSP-padded pipe header was
+    invisible to us -- the file stayed classified as *** Test Cases *** through
+    the definition, the own-keyword guard was skipped, and the call converted.
+    """
+    source = (
+        "*** Test Cases ***\n"
+        "T\n"
+        "    Get Element States    ${h}    contains    visible\n"
+        "\n"
+        "|\xa0*** Keywords ***\xa0|\n"
+        "Get Element States\n"
+        "    [Arguments]    ${a}    ${b}    ${c}\n"
+        "    Log    own\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == source
+
+
+def test_rewrite_leaves_the_file_alone_when_a_rare_linebreak_hides_a_header():
+    """RF's tokenizer splits physical lines on more than "\\n" (also a lone
+    "\\r", and rarer separator characters such as "\\x1c"). A Keywords header
+    that lands after one of those, glued onto a step line we only split on
+    "\\n", is invisible to our header scan: the file stays classified under
+    *** Test Cases *** (non-keyword) through the following definition line, so
+    without the file-wide fallback this converts the call even though a real
+    Robot parse would resolve it to the file's own keyword.
+    """
+    source = (
+        "*** Test Cases ***\n"
+        "T\n"
+        "    Get Element States    ${h}    contains    visible\n"
+        "    Log    done\x1c*** Keywords ***\n"
+        "Get Element States\n"
+        "    [Arguments]    ${a}    ${b}    ${c}\n"
+        "    Log    own\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == source
+
+
+def test_rewrite_still_converts_a_crlf_file_with_a_variables_section():
+    """Control for the rare-linebreak fallback above: an ordinary CRLF file (no
+    rare separator characters, just the "\\r\\n" every generated file may use)
+    must still convert normally -- "\\r\\n" is not one of the characters that
+    trips the conservative fallback.
+    """
+    source = (
+        "*** Variables ***\r\n"
+        "${x}    value\r\n"
+        "\r\n"
+        "*** Test Cases ***\r\n"
+        "T\r\n"
+        "    Get Element States    ${h}    contains    visible\r\n"
+    )
+    expected = (
+        "*** Variables ***\r\n"
+        "${x}    value\r\n"
+        "\r\n"
+        "*** Test Cases ***\r\n"
+        "T\r\n"
+        f"    {_WFES}    ${{h}}    visible\r\n"
     )
     assert rewrite_visibility_checks_to_wait(source) == expected
