@@ -342,7 +342,36 @@ _ERROR_CATCHING_WRAPPERS = frozenset({
     "wait until keyword succeeds",
 })
 
-_KEYWORDS_SECTION_RE = re.compile(r"^\*++[ \t]*+keywords?[ \t]*+\*", re.IGNORECASE)
+# Section names Robot Framework recognizes that can never define a keyword. Anything
+# else — a Keywords/Keyword header (any case, singular/plural, with or without a
+# trailing "*"), an empty name, or an unrecognized/localized header — is treated as
+# "could define keywords": a `Language:` setting can make an unfamiliar spelling a
+# valid, localized Keywords header, so an unrecognized name is not proof it isn't one.
+_NON_KEYWORD_SECTIONS = frozenset({
+    "Settings", "Setting", "Variables", "Variable",
+    "Test Cases", "Test Case", "Tasks", "Task", "Comments", "Comment",
+})
+
+
+def _section_header_name(line: str) -> str | None:
+    """Return the normalized name of a section-header line, or None when the line
+    is not a header.
+
+    Robot Framework recognizes a line as a section header when its first cell
+    starts with `*` (`*** Settings ***`, `*Keywords`, `| *** Variables *** |`, ...),
+    regardless of case, of how many `*` follow, and of whether pipe or space
+    separation is used; a trailing cell after the header cell does not matter.
+    This returns that first cell with its leading/trailing `*` and spaces
+    stripped, internal whitespace collapsed to single spaces, and title-cased —
+    what this comparison needs, not a claim that it is Robot's own normalization.
+    """
+    if line[:1] == "|" and line[:2].strip() == "|":
+        cell = line.split("|")[1].strip()
+    else:
+        cell = _CELL_SPLIT_RE.split(line)[0]
+    if not cell.startswith("*"):
+        return None
+    return " ".join(cell.split()).strip("* ").title()
 
 
 def _names_get_element_states(line: str, first_part: str) -> bool:
@@ -356,7 +385,7 @@ def _names_get_element_states(line: str, first_part: str) -> bool:
     wildcard — greedily, so a custom embedded regex containing `}` can only
     over-match, never under-match.
     """
-    if line[:1] == "|" and line[1:2] in ("", " ", "\t"):
+    if line[:1] == "|" and line[:2].strip() == "|":
         cell = line.split("|")[1].strip()
         if not cell:
             return False
@@ -396,9 +425,11 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     line cannot see: a `TRY` block, or its own keywords together with an
     error-catching wrapper. There a longer wait can turn a caught failure into
     a pass/fail flip or a 30s stall. It is also left unchanged when the file
-    defines its own keyword named `Get Element States` — Robot resolves that
-    name to the file's own keyword before the Browser library, so rewriting the
-    call would swap in a different keyword. Idempotent.
+    defines its own keyword named `Get Element States`, in a Keywords section,
+    under a header this function cannot name as a non-keyword section, or before
+    the first header — Robot resolves that name to the file's own keyword before
+    the Browser library, so rewriting the call would swap in a different
+    keyword. Idempotent.
 
     Args:
         robot_code: The Robot Framework source as a string.
@@ -413,15 +444,36 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     if "element states" not in lower and "element_states" not in lower:
         return robot_code
 
+    # Robot's tokenizer splits physical lines on more than "\n" — also a lone "\r"
+    # (one not paired into "\r\n"), and the rarer separator characters below. A
+    # section header that lands after one of those, glued onto whatever line we
+    # split on "\n", would be invisible to the header scan a few lines down —
+    # meaning the section state (and both guards gated on it) could end up
+    # wrong in the direction that matters: converting a call Robot would
+    # actually resolve to the file's own keyword. When any of them is present,
+    # section state is untrustworthy for the whole file: the own-keyword guard
+    # falls back to checking every non-indented line regardless of section —
+    # the same, unconditional check this module used before section tracking
+    # existed — and the TRY/wrapper guard treats the file as if it did have a
+    # Keywords section, since a hidden header could be one.
+    _other_linebreak_chars = "\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
+    unsafe_section_state = any(
+        c in robot_code.replace("\r\n", "\n") for c in _other_linebreak_chars
+    )
+
     has_try = False
     has_keywords_section = False
     has_catching_wrapper = False
     defines_own_keyword = False
+    in_non_keyword_section = False
     rewrote = 0
     out_lines = []
     for line in robot_code.split("\n"):
-        if _KEYWORDS_SECTION_RE.match(line):
-            has_keywords_section = True
+        section_name = _section_header_name(line)
+        if section_name is not None:
+            in_non_keyword_section = section_name in _NON_KEYWORD_SECTIONS
+            if not in_non_keyword_section:
+                has_keywords_section = True
         stripped = line.lstrip()
         if stripped.startswith("#") or stripped.startswith("..."):
             out_lines.append(line)
@@ -433,10 +485,14 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         # to the file's own keyword before any library, ignoring case, spaces and
         # underscores, and also matching an embedded-argument name or a pipe-separated
         # definition, so a file defining `Get Element States` (in any of those forms)
-        # calls its own — rewriting that call would swap in a different keyword. Any
-        # section counts: a test of that name only over-matches, which leaves the file
-        # unchanged.
-        if _names_get_element_states(line, parts[0]):
+        # calls its own — rewriting that call would swap in a different keyword. Only a
+        # section that could define a keyword counts: a *** Variables *** entry is
+        # `${name}    value`, a non-indented line whose first cell is an
+        # embedded-argument wildcard that over-matches every keyword name; a test,
+        # a setting and a comment cannot define keywords either. An unrecognized
+        # header might be a localized Keywords header, so it counts as "could". When
+        # section state is unsafe (see above), the section is ignored entirely.
+        if (unsafe_section_state or not in_non_keyword_section) and _names_get_element_states(line, parts[0]):
             defines_own_keyword = True
         # parts[0] is empty only for an indented line; anything else is a
         # section header or a test/keyword name, never a step.
@@ -516,7 +572,7 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
             "resolves ahead of the Browser library"
         )
         return robot_code
-    if has_try or (has_keywords_section and has_catching_wrapper):
+    if has_try or (has_catching_wrapper and (has_keywords_section or unsafe_section_state)):
         logger.info(
             f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
             "unchanged — the file catches errors (TRY, or its own keywords under an "
