@@ -24,7 +24,7 @@ from src.backend.core.workflow_metrics import (
 )
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
-from src.backend.core.provider_errors import friendly_setup_error
+from src.backend.core.provider_errors import friendly_provider_error, friendly_setup_error
 from src.backend.core.failure_sentences import failure_sentence, first_failure_message
 from src.backend.core.secret_redaction import redact_secrets
 from src.backend.services.report_inliner import inline_report_screenshots
@@ -980,7 +980,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # them as a nested google.rpc JSON blob. Translate the ones we recognise
         # into an instruction; anything else keeps the raw text, redacted — the
         # provider quotes the failing request URL, which carries the API key.
-        setup_hint = friendly_setup_error(e)
+        setup_hint = friendly_setup_error(e) or friendly_provider_error(e)
         message = setup_hint or f"An error occurred: {redact_secrets(str(e))}"
         yield {"status": "error", "message": message,
                "workflow_id": workflow_id}

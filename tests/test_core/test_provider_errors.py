@@ -6,9 +6,13 @@ raises. Before this mapping existed, an invalid API key — the single most comm
 first-run mistake — rendered ~15 lines of google.rpc.ErrorInfo in the UI with no
 mention of which setting was wrong or where to fix it.
 """
+import json
+
+import litellm
 import pytest
 
-from src.backend.core.provider_errors import friendly_setup_error
+from src.backend.core.provider_errors import friendly_setup_error, friendly_provider_error
+from src.backend.crew_ai.provider_retry import RetryReport, attach_report
 
 # --- verbatim captures -------------------------------------------------------
 
@@ -132,3 +136,73 @@ class TestPassthrough:
         msg = friendly_setup_error(Exception(leaky))
         assert msg is not None
         assert "AIzaSy" not in msg
+
+
+class TestGoogleAiStudioDailyQuota:
+    def _429(self, quota_id):
+        """A Google AI Studio 429 as litellm 1.75.3 wraps it (body shape: inspect_ai#5526)."""
+        body = {"error": {
+            "code": 429,
+            "message": "You exceeded your current quota, please check your plan and billing details.",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                 "violations": [{"quotaId": quota_id}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "34s"},
+            ],
+        }}
+        return litellm.RateLimitError(message="VertexAIException - " + json.dumps(body, indent=2),
+                                      llm_provider="gemini", model="gemini-3.5-flash")
+
+    def test_per_day_quota_says_when_it_resets(self):
+        msg = friendly_setup_error(self._429("GenerateRequestsPerDayPerProjectPerModel-FreeTier"))
+        assert "daily free quota" in msg
+        assert "midnight Pacific time" in msg
+
+    def test_per_minute_quota_keeps_the_rate_limit_message(self):
+        msg = friendly_setup_error(self._429("GenerateRequestsPerMinutePerProjectPerModel-FreeTier"))
+        assert msg.startswith("The model provider rate-limited this request")
+
+
+class TestProviderDidNotAnswer:
+    def _timeout(self, report=True):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="gemini-3.5-flash", llm_provider="vertex_ai")
+        if report:
+            attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 3, 3, 0,
+                                           (60.0, 120.0, 240.0), 420.4, "Timeout"))
+        return exc
+
+    def test_timeout_after_all_tries_names_the_provider_and_the_waits(self):
+        msg = friendly_provider_error(self._timeout())
+        assert msg.startswith("The model provider did not answer.")
+        assert "vertex_ai/gemini-3.5-flash" in msg
+        assert "3 tries over 7 min 0 s" in msg
+        assert "60 s, 120 s and 240 s" in msg
+        assert "Connection timed out after None seconds" not in msg
+
+    def test_unavailable_503_after_rejections(self):
+        exc = litellm.ServiceUnavailableError(
+            message='VertexAIException - {"error": {"code": 503, "status": "UNAVAILABLE"}}',
+            llm_provider="vertex_ai", model="gemini-3.5-flash")
+        attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 5, 0, 5, (), 16.2,
+                                       "ServiceUnavailableError"))
+        msg = friendly_provider_error(exc)
+        assert msg.startswith("The model provider did not answer.")
+        assert "unavailable (HTTP 503)" in msg
+        assert "5 tries over 16 s" in msg
+        assert '"code": 503' not in msg
+
+    def test_without_a_report_it_still_says_so_without_numbers(self):
+        msg = friendly_provider_error(self._timeout(report=False))
+        assert msg.startswith("The model provider did not answer.")
+        assert "tries" not in msg
+
+    @pytest.mark.parametrize("exc", [
+        litellm.RateLimitError(message="429", llm_provider="vertex_ai", model="m"),
+        litellm.APIConnectionError(message="unmapped", llm_provider="vertex_ai", model="m"),
+        litellm.BadRequestError(message="400", model="m", llm_provider="vertex_ai"),
+        RuntimeError("boom"),
+    ])
+    def test_everything_else_is_left_to_the_other_rules(self, exc):
+        assert friendly_provider_error(exc) is None
