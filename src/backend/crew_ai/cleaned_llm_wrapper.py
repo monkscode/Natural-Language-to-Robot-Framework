@@ -598,19 +598,9 @@ class CleanedLLMWrapper(LLM):
 
             out_of_time = budget is not None and budget.next_timeout_s() is None
             if attempt >= max_retries or out_of_time:
-                self._monitor.log_empty_failure()
-                logger.error(
-                    "[LLM_RETRY] Empty response from %s through %d attempt(s)%s; giving up. "
-                    "Workflow totals — retries: %d, recoveries: %d, failures: %d.",
-                    self.model, attempt + 1,
-                    " (no time left in this call's budget)" if out_of_time else "",
-                    self._monitor.empty_response_retries,
-                    self._monitor.empty_response_recoveries,
-                    self._monitor.empty_response_failures,
-                )
+                self._give_up_on_empty(attempt + 1, out_of_time)
                 break
 
-            self._monitor.log_empty_retry()
             backoff_seconds = min(
                 self._EMPTY_RETRY_BASE_SECONDS * (2 ** attempt),
                 self._EMPTY_RETRY_CAP_SECONDS,
@@ -624,6 +614,12 @@ class CleanedLLMWrapper(LLM):
                 backoff_seconds * 1000,
             )
             time.sleep(backoff_seconds)
+            # The backoff may have spent the budget's last usable seconds: ask again
+            # right before the next try, so no try ever starts without a timeout.
+            if budget is not None and budget.next_timeout_s() is None:
+                self._give_up_on_empty(attempt + 1, out_of_time=True)
+                break
+            self._monitor.log_empty_retry()
 
         # Empty result after all retries → return as-is, CrewAI surfaces the error.
         if not isinstance(result, str):
@@ -657,10 +653,20 @@ class CleanedLLMWrapper(LLM):
         if budget is None:
             return super().call(messages, *args, **kwargs)
         workflow_id = (self.additional_params.get("metadata") or {}).get("workflow_id")
+        # A try only ever starts on a timeout the budget granted with no sleep
+        # since. A fresh budget has its whole deadline (30 s or more) left, and
+        # call() asks again right after its empty-retry backoff, so None here can
+        # only mean the clock crossed MIN_TRY_S in the instant since call() asked.
+        # Fail closed: start no try; call() takes the missing content as empty and
+        # gives up. Inside the loop, _wait_for_next_try asks after every backoff.
+        timeout_s = budget.next_timeout_s()
+        if timeout_s is None:
+            logger.warning(
+                "[LLM_RETRY] %s: no time left in this call's budget; no try started "
+                "(workflow %s)", self.model, workflow_id,
+            )
+            return None
         while True:
-            # Never None here: a fresh budget always allows a try, record_failure()
-            # gives up before refusing one, and call() checks before an empty retry.
-            timeout_s = budget.next_timeout_s()
             budget.start_try(timeout_s)
             self.timeout = timeout_s
             try:
@@ -669,12 +675,8 @@ class CleanedLLMWrapper(LLM):
                 kind = classify_provider_error(exc)
                 if kind == "fatal":
                     raise
-                if kind == "timeout":
-                    self._monitor.log_provider_timeout()
-                else:
-                    self._monitor.log_provider_rejection()
-                wait_s = budget.record_failure(kind, provider_retry_delay_s(exc))
-                if wait_s is None:
+                timeout_s = self._wait_for_next_try(budget, exc, kind, timeout_s, workflow_id)
+                if timeout_s is None:
                     self._monitor.log_provider_failure()
                     attach_report(exc, budget.report(self.model, exc))
                     logger.error(
@@ -683,14 +685,44 @@ class CleanedLLMWrapper(LLM):
                         budget.rejections, type(exc).__name__, workflow_id,
                     )
                     raise
-                logger.warning(
-                    "[LLM_RETRY] %s try %d %s (%s, per-try timeout %.0f s); retrying in %.1f s "
-                    "(workflow %s)", self.model, budget.tries,
-                    "timed out" if kind == "timeout" else "was rejected",
-                    type(exc).__name__, timeout_s, wait_s, workflow_id,
-                )
-                if wait_s:
-                    time.sleep(wait_s)
+
+    def _wait_for_next_try(self, budget: RetryBudget, exc: Exception, kind: str,
+                           timeout_s: float, workflow_id: str | None) -> float | None:
+        """Count one retryable failed try, wait out its backoff, and return the
+        next try's timeout -- or None when the call must give up.
+
+        The budget is asked again AFTER the sleep: a backoff granted with just
+        enough time left can overrun it, and no try may start without a timeout.
+        """
+        if kind == "timeout":
+            self._monitor.log_provider_timeout()
+        else:
+            self._monitor.log_provider_rejection()
+        wait_s = budget.record_failure(kind, provider_retry_delay_s(exc))
+        if wait_s is None:
+            return None
+        logger.warning(
+            "[LLM_RETRY] %s try %d %s (%s, per-try timeout %.0f s); retrying in %.1f s "
+            "(workflow %s)", self.model, budget.tries,
+            "timed out" if kind == "timeout" else "was rejected",
+            type(exc).__name__, timeout_s, wait_s, workflow_id,
+        )
+        if wait_s:
+            time.sleep(wait_s)
+        return budget.next_timeout_s()
+
+    def _give_up_on_empty(self, attempts: int, out_of_time: bool) -> None:
+        """Count and log a call whose every attempt came back empty."""
+        self._monitor.log_empty_failure()
+        logger.error(
+            "[LLM_RETRY] Empty response from %s through %d attempt(s)%s; giving up. "
+            "Workflow totals — retries: %d, recoveries: %d, failures: %d.",
+            self.model, attempts,
+            " (no time left in this call's budget)" if out_of_time else "",
+            self._monitor.empty_response_retries,
+            self._monitor.empty_response_recoveries,
+            self._monitor.empty_response_failures,
+        )
 
 
 def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,

@@ -7,6 +7,7 @@ litellm.completion, driven offline by LiteLLM's mock_timeout / mock_response.
 """
 
 import os
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import litellm
@@ -193,6 +194,93 @@ class TestEmptyResponses:
              patch("crewai.llm.LLM.call", side_effect=fake):
             assert w.call(["msg"]) == ""
         assert len(seen) == 1
+        assert w._monitor.empty_response_failures == 1
+
+
+class _FakeClock:
+    """The budget's clock, injected: only tries and sleeps move it; a sleep runs overshoot_s long."""
+
+    def __init__(self, overshoot_s=0.0):
+        self.now = 1000.0
+        self.overshoot_s = overshoot_s
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds + self.overshoot_s
+
+    def installed(self):
+        """Patch the clock the budget binds when call() creates it, and the wrapper's sleep."""
+        stack = ExitStack()
+        stack.enter_context(patch("src.backend.crew_ai.provider_retry.time.monotonic",
+                                  side_effect=lambda: self.now))
+        stack.enter_context(patch("src.backend.crew_ai.cleaned_llm_wrapper.time.sleep",
+                                  side_effect=self.sleep))
+        return stack
+
+
+def _timed(wrapper, clock, tries):
+    """side_effect for LLM.call: each (seconds, outcome) try records wrapper.timeout,
+    moves the clock by its seconds, then raises or returns."""
+    seen = []
+
+    def fake_call(*args, **kwargs):
+        seen.append(wrapper.timeout)
+        seconds, outcome = tries[len(seen) - 1]
+        clock.now += seconds
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return fake_call, seen
+
+
+class TestNoUntimedTry:
+    """No sleep may sit between the budget allowing a try and the try (review fix round 1)."""
+
+    def test_empty_retry_backoff_that_spends_the_budget_gives_up(self):
+        w = _wrapper()  # deadline 60 + 120 + 240 + 30 = 450 s
+        clock = _FakeClock()
+        fake, seen = _timed(w, clock, [(60.0, _timeout()), (120.0, _timeout()), (239.0, ""),
+                                       (25.3, ""), (1.0, "must not be reached")])
+        with _settings(), clock.installed(), patch("crewai.llm.LLM.call", side_effect=fake):
+            assert w.call(["msg"]) == ""
+        # 5.2 s were left before the 1.0 s backoff, 4.2 s (< MIN_TRY_S) after it.
+        assert None not in seen
+        assert seen == [60.0, 120.0, 240.0, 30.5]
+        assert clock.sleeps == [0.5, 1.0]
+        assert w._monitor.empty_response_failures == 1
+        assert w._monitor.empty_response_retries == 1
+
+    def test_rejection_backoff_that_overshoots_the_budget_raises_the_original_error(self):
+        w = _wrapper()
+        clock = _FakeClock(overshoot_s=0.05)
+        errors = [_timeout(), _timeout(), _rate_limited(), _rate_limited()]
+        fake, seen = _timed(w, clock, [(60.0, errors[0]), (120.0, errors[1]), (239.0, errors[2]),
+                                       (24.425, errors[3]), (1.0, "must not be reached")])
+        with _settings(), clock.installed(), \
+             patch("src.backend.crew_ai.provider_retry._SYSTEM_RANDOM.random", return_value=0.0), \
+             patch("crewai.llm.LLM.call", side_effect=fake):
+            with pytest.raises(litellm.RateLimitError) as raised:
+                w.call(["msg"])
+        # 6.025 s were left when the 1.0 s backoff was granted; the sleep ran 1.05 s.
+        assert raised.value is errors[3]
+        assert None not in seen
+        assert seen == pytest.approx([60.0, 120.0, 240.0, 30.45])
+        assert clock.sleeps == [0.5, 1.0]
+        report = report_of(raised.value)
+        assert (report.tries, report.timeouts, report.rejections) == (4, 2, 2)
+        assert w._monitor.provider_failures == 1
+
+    def test_a_try_the_budget_refuses_is_never_sent(self):
+        """Defensive: the clock crosses MIN_TRY_S between call()'s check and the next try."""
+        w = _wrapper()
+        fake, seen = _recording(w, ["", "must not be reached"])
+        with _settings(), patch("time.sleep"), \
+             patch.object(RetryBudget, "next_timeout_s", side_effect=[60.0, 31.0, 31.0, None, None]), \
+             patch("crewai.llm.LLM.call", side_effect=fake):
+            assert w.call(["msg"]) is None
+        assert seen == [60.0]
         assert w._monitor.empty_response_failures == 1
 
 
