@@ -43,8 +43,12 @@ NOTE ON DOUBLE BaseLLM.__init__:
     Both calls are idempotent — they set the same fields to the same values.
     Do not remove the __new__ call to "fix" this.
 
-RATE LIMITING:
-    Handled automatically by LiteLLM (used internally by CrewAI).
+PROVIDER TIMEOUTS AND RETRIES (W5, owner design D3, 2026-09-24):
+    Cloud wrappers (vertex, gemini) carry a ProviderRetryPolicy: per-try
+    timeouts of 60 s, 120 s and 240 s at the default LLM_REQUEST_TIMEOUT_S, and
+    this wrapper -- not LiteLLM -- retries timeouts and provider rejections
+    (see provider_retry.py). Local (Ollama) wrappers keep LiteLLM's own
+    num_retries=3 and its 600 s default timeout.
 """
 
 import logging
@@ -57,6 +61,13 @@ from typing import Optional
 from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
 
 from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
+from .provider_retry import (
+    ProviderRetryPolicy,
+    RetryBudget,
+    attach_report,
+    classify_provider_error,
+    provider_retry_delay_s,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +263,7 @@ class CleanedLLMWrapper(LLM):
     - 'Action: tool_name` extra text' → 'Action: tool_name'
     - 'Action Input: prefix {...}' → 'Action Input: {...}'
 
-    Rate limiting is handled automatically by LiteLLM (used internally by CrewAI).
+    Provider timeouts and retries: see _call_provider and provider_retry.py.
     """
 
     def __new__(cls, model: str, **kwargs):
@@ -526,6 +537,11 @@ class CleanedLLMWrapper(LLM):
         )
         return result
 
+    # Per-try timeouts + retries for cloud providers (W5). get_llm sets it on
+    # vertex/gemini instances; the class default None (local Ollama, or any
+    # wrapper built another way) means one crewai call per attempt, as before W5.
+    _provider_retry: ProviderRetryPolicy | None = None
+
     # Backoff for empty-response retries: 0.5s * 2^retry_idx, capped at 5s.
     # Worst-case extra latency at default max_retries=2: 0.5 + 1.0 = 1.5s.
     _EMPTY_RETRY_BASE_SECONDS = 0.5
@@ -539,19 +555,21 @@ class CleanedLLMWrapper(LLM):
         Tool results in `messages` are reused on retry (no tool re-invocation).
 
         Pass-through:
-          • Exceptions propagate — LiteLLM's num_retries handles transient API errors.
+          • Provider errors: a cloud wrapper retries timeouts and rejections per its policy (_call_provider); everything else propagates unchanged.
           • Non-string non-None returns (structured tool calls) skip retry and cleaning.
           • If every attempt empties, the empty result is returned so CrewAI raises
             its existing "None or empty" error — failures are loud, never silent.
         """
         from src.backend.core.config import settings  # lazy import: avoids circular import
         max_retries = settings.LLM_EMPTY_RESPONSE_MAX_RETRIES
+        # One budget per call(): the empty-response retries below share its deadline.
+        budget = self._provider_retry.new_budget() if self._provider_retry else None
 
         result = None
         saw_empty = False
 
         for attempt in range(max_retries + 1):
-            result = super().call(messages, *args, **kwargs)
+            result = self._call_provider(budget, messages, *args, **kwargs)
 
             # Structured tool-call response (e.g. function-calling object) — pass through.
             if result is not None and not isinstance(result, str):
@@ -578,12 +596,14 @@ class CleanedLLMWrapper(LLM):
 
             saw_empty = True
 
-            if attempt >= max_retries:
+            out_of_time = budget is not None and budget.next_timeout_s() is None
+            if attempt >= max_retries or out_of_time:
                 self._monitor.log_empty_failure()
                 logger.error(
-                    "[LLM_RETRY] Empty response from %s through all %d attempt(s); giving up. "
+                    "[LLM_RETRY] Empty response from %s through %d attempt(s)%s; giving up. "
                     "Workflow totals — retries: %d, recoveries: %d, failures: %d.",
                     self.model, attempt + 1,
+                    " (no time left in this call's budget)" if out_of_time else "",
                     self._monitor.empty_response_retries,
                     self._monitor.empty_response_recoveries,
                     self._monitor.empty_response_failures,
@@ -623,6 +643,54 @@ class CleanedLLMWrapper(LLM):
             logger.debug(f"🧹 Cleaned LLM response (length: {len(result)} → {len(cleaned)})")
         self._monitor.log_response(was_cleaned=was_cleaned)
         return cleaned
+
+    def _call_provider(self, budget: RetryBudget | None, messages, *args, **kwargs):
+        """One crewai LLM.call; with a budget, retried per the provider policy.
+
+        The timeout is set per try on self.timeout, which crewai forwards to
+        litellm.completion on every call (crewai/llm.py:682). A failed try never
+        reaches crewai's token accounting (llm.py:1146-1150) or the LiteLLM
+        success callback, so nothing here can double-count. The exception that
+        ends the call is re-raised UNCHANGED: crewai passes litellm.* errors
+        straight through, but re-runs the whole task on any other type.
+        """
+        if budget is None:
+            return super().call(messages, *args, **kwargs)
+        workflow_id = (self.additional_params.get("metadata") or {}).get("workflow_id")
+        while True:
+            # Never None here: a fresh budget always allows a try, record_failure()
+            # gives up before refusing one, and call() checks before an empty retry.
+            timeout_s = budget.next_timeout_s()
+            budget.start_try(timeout_s)
+            self.timeout = timeout_s
+            try:
+                return super().call(messages, *args, **kwargs)
+            except Exception as exc:
+                kind = classify_provider_error(exc)
+                if kind == "fatal":
+                    raise
+                if kind == "timeout":
+                    self._monitor.log_provider_timeout()
+                else:
+                    self._monitor.log_provider_rejection()
+                wait_s = budget.record_failure(kind, provider_retry_delay_s(exc))
+                if wait_s is None:
+                    self._monitor.log_provider_failure()
+                    attach_report(exc, budget.report(self.model, exc))
+                    logger.error(
+                        "[LLM_RETRY] %s gave up after %d tries (%d timed out, %d rejected): %s "
+                        "(workflow %s)", self.model, budget.tries, budget.timeouts,
+                        budget.rejections, type(exc).__name__, workflow_id,
+                    )
+                    raise
+                logger.warning(
+                    "[LLM_RETRY] %s try %d %s (%s, per-try timeout %.0f s); retrying in %.1f s "
+                    "(workflow %s)", self.model, budget.tries,
+                    "timed out" if kind == "timeout" else "was rejected",
+                    type(exc).__name__, timeout_s, wait_s, workflow_id,
+                )
+                if wait_s:
+                    time.sleep(wait_s)
 
 
 def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,

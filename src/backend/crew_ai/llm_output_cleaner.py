@@ -203,6 +203,11 @@ class LLMFormattingMonitor:
         self.empty_response_retries = 0     # extra attempts triggered by an empty result
         self.empty_response_recoveries = 0  # calls that emptied at least once but eventually returned content
         self.empty_response_failures = 0    # calls that emptied through every attempt
+        # Provider retries (W5): tries a cloud call lost to a timeout or a
+        # rejection (429 / 5xx / dropped connection), and calls that gave up.
+        self.provider_timeouts = 0
+        self.provider_rejections = 0
+        self.provider_failures = 0
 
     def log_response(self, was_cleaned: bool = False):
         """Log an LLM response."""
@@ -228,6 +233,18 @@ class LLMFormattingMonitor:
         """Record one call that returned empty through every retry attempt."""
         self.empty_response_failures += 1
 
+    def log_provider_timeout(self):
+        """Record one try that hit its per-try timeout."""
+        self.provider_timeouts += 1
+
+    def log_provider_rejection(self):
+        """Record one try the provider rejected (429, 5xx, dropped connection)."""
+        self.provider_rejections += 1
+
+    def log_provider_failure(self):
+        """Record one call that gave up after its provider retries."""
+        self.provider_failures += 1
+
     def get_numeric_stats(self) -> dict:
         """Return raw counters as a dict for structured storage."""
         total = self.total_responses
@@ -241,6 +258,9 @@ class LLMFormattingMonitor:
             "empty_response_retries": self.empty_response_retries,
             "empty_response_recoveries": self.empty_response_recoveries,
             "empty_response_failures": self.empty_response_failures,
+            "provider_timeouts": self.provider_timeouts,
+            "provider_rejections": self.provider_rejections,
+            "provider_failures": self.provider_failures,
         }
 
     def get_stats(self) -> str:
@@ -273,6 +293,12 @@ class LLMFormattingMonitor:
                 f"Empty-Response: {self.empty_response_retries} retry attempts, "
                 f"{self.empty_response_recoveries} recovered, "
                 f"{self.empty_response_failures} failed"
+            )
+
+        if self.provider_timeouts or self.provider_rejections or self.provider_failures:
+            parts.append(
+                f"Provider retries: {self.provider_timeouts} timed out, "
+                f"{self.provider_rejections} rejected, {self.provider_failures} gave up"
             )
 
         return ", ".join(parts)
