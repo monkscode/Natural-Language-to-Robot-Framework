@@ -713,7 +713,7 @@ def _own_keyword_file(definition: str, operator: str = "contains", expression: s
      _own_keyword_file("get_element_states")),
     ("Robot ignores spaces in a keyword name — _canon_keyword does not",
      _own_keyword_file("GetElementStates")),
-    ("a one-star section header is valid Robot and _KEYWORDS_SECTION_RE misses it",
+    ("a one-star section header is valid Robot and still counts as a Keywords section",
      _own_keyword_file("Get Element States", header="* Keywords")),
     ("a pipe-separated definition is the file's own keyword too (RF 7.4.2: rc=0)",
      "*** Test Cases ***\nT\n    Get Element States    ${h}    contains    visible\n\n"
@@ -790,3 +790,213 @@ _SUITE = "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
 def test_rewrite_visibility_checks_file_guards(label, source, expected):
     expected = source if expected is None else expected
     assert rewrite_visibility_checks_to_wait(source) == expected, label
+
+
+# --- Section-aware own-keyword / TRY-wrapper guard (Task 1) ---
+#
+# PR #111's guard checked every non-indented line for a name that could
+# resolve to "Get Element States", regardless of which section it was in.
+# A Variables entry (${name}    value) is a non-indented line whose first
+# cell is ${name} -- an embedded-argument wildcard that matches every
+# keyword name -- so the guard fired on ordinary generated tests and the
+# rewrite never ran. These tests pin the fix: the guard (and the
+# TRY/wrapper guard, which shares the same section classifier) only look
+# inside a section that could actually define a keyword.
+
+_U07_LOGIN_TAIL = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "Library    BuiltIn\n"
+    "Library    Collections\n"
+    "\n"
+    "*** Variables ***\n"
+    "${browser}    chromium\n"
+    "${headless}    True\n"
+    "${url}    https://example.test\n"
+    "${username_input}    [name=username]\n"
+    "${password_input}    [name=password]\n"
+    "${login_button}    button[type=submit]\n"
+    "${dashboard_heading}    h6:has-text(Dashboard)\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Login Test\n"
+    "    New Browser    ${browser}    headless=${headless}\n"
+    "    New Context    viewport=1920x1080\n"
+    "    New Page    ${url}\n"
+    "    Fill Text    ${username_input}    user\n"
+    "    Fill Text    ${password_input}    secret\n"
+    "    Click    ${login_button}\n"
+    "    Get Element States    ${dashboard_heading}    "
+)
+
+_U07_LOGIN_TAIL_EXPECTED = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "Library    BuiltIn\n"
+    "Library    Collections\n"
+    "\n"
+    "*** Variables ***\n"
+    "${browser}    chromium\n"
+    "${headless}    True\n"
+    "${url}    https://example.test\n"
+    "${username_input}    [name=username]\n"
+    "${password_input}    [name=password]\n"
+    "${login_button}    button[type=submit]\n"
+    "${dashboard_heading}    h6:has-text(Dashboard)\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Login Test\n"
+    "    New Browser    ${browser}    headless=${headless}\n"
+    "    New Context    viewport=1920x1080\n"
+    "    New Page    ${url}\n"
+    "    Fill Text    ${username_input}    user\n"
+    "    Fill Text    ${password_input}    secret\n"
+    "    Click    ${login_button}\n"
+    "    Wait For Elements State    ${dashboard_heading}    visible"
+)
+
+
+@pytest.mark.parametrize(
+    "label, source, expected",
+    [
+        (
+            "live u07 shape, validate form -- neutralised values, no trailing newline",
+            _U07_LOGIN_TAIL + "validate    value & visible",
+            _U07_LOGIN_TAIL_EXPECTED,
+        ),
+        (
+            "live u07 shape, contains form -- same file, same result",
+            _U07_LOGIN_TAIL + "contains    visible",
+            _U07_LOGIN_TAIL_EXPECTED,
+        ),
+    ],
+)
+def test_rewrite_converts_the_real_assembler_shape_despite_variables_section(label, source, expected):
+    assert rewrite_visibility_checks_to_wait(source) == expected, label
+    assert not source.endswith("\n")
+    assert not expected.endswith("\n")
+
+
+def test_rewrite_converts_with_a_pipe_separated_variables_section():
+    source = (
+        "*** Settings ***\nLibrary    Browser\n\n"
+        "| *** Variables *** |\n"
+        "| ${x} | value |\n\n"
+        "*** Test Cases ***\nT\n"
+        "    Get Element States    ${h}    contains    visible\n"
+    )
+    expected = (
+        "*** Settings ***\nLibrary    Browser\n\n"
+        "| *** Variables *** |\n"
+        "| ${x} | value |\n\n"
+        "*** Test Cases ***\nT\n"
+        f"    {_WFES}    ${{h}}    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected
+
+
+def test_rewrite_converts_with_a_variables_entry_continued_on_a_dots_line():
+    source = (
+        "*** Variables ***\n"
+        "${long_var}    first_part\n"
+        "...    second_part\n"
+        "\n"
+        "*** Test Cases ***\nT\n"
+        "    Get Element States    ${h}    contains    visible\n"
+    )
+    expected = (
+        "*** Variables ***\n"
+        "${long_var}    first_part\n"
+        "...    second_part\n"
+        "\n"
+        "*** Test Cases ***\nT\n"
+        f"    {_WFES}    ${{h}}    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected
+
+
+@pytest.mark.parametrize("section_header", ["*** Test Cases ***", "*** Tasks ***"])
+def test_rewrite_converts_when_a_test_or_task_is_named_get_element_states(section_header):
+    source = (
+        f"{section_header}\n"
+        "Get Element States\n"
+        "    Log    hi\n"
+        "\n"
+        "T2\n"
+        "    Get Element States    ${h}    contains    visible\n"
+    )
+    expected = (
+        f"{section_header}\n"
+        "Get Element States\n"
+        "    Log    hi\n"
+        "\n"
+        "T2\n"
+        f"    {_WFES}    ${{h}}    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected
+
+
+def test_rewrite_converts_with_get_element_states_text_in_a_comments_section():
+    source = (
+        "*** Comments ***\n"
+        "Get Element States\n"
+        "\n"
+        "*** Test Cases ***\nT\n"
+        "    Get Element States    ${h}    contains    visible\n"
+    )
+    expected = (
+        "*** Comments ***\n"
+        "Get Element States\n"
+        "\n"
+        "*** Test Cases ***\nT\n"
+        f"    {_WFES}    ${{h}}    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected
+
+
+@pytest.mark.parametrize("label, source", [
+    ("Keywords section whose keyword name is only dollar-brace-x (matches every call)",
+     _own_keyword_file("${x}")),
+    ("*** Keyword *** (singular)",
+     _own_keyword_file("Get Element States", header="*** Keyword ***")),
+    ("*** KEYWORDS *** (uppercase)",
+     _own_keyword_file("Get Element States", header="*** KEYWORDS ***")),
+    ("*** Keywords (no trailing star)",
+     _own_keyword_file("Get Element States", header="*** Keywords")),
+    ("pipe-form Keywords header",
+     _own_keyword_file("Get Element States", header="| *** Keywords *** |")),
+    ("*** Keywords ***    trailing text",
+     _own_keyword_file("Get Element States", header="*** Keywords ***    trailing text")),
+    ("unrecognized/localized header *** Avainsanat *** -- conservative: could define keywords",
+     _own_keyword_file("Get Element States", header="*** Avainsanat ***")),
+    ("no section header at all -- guard is ON before the first header",
+     "${x}    y\n    Get Element States    ${h}    contains    visible\n"),
+])
+def test_rewrite_still_leaves_the_file_alone_across_header_spellings(label, source):
+    assert rewrite_visibility_checks_to_wait(source) == source, label
+
+
+def _wrapped_check_file(header):
+    return (
+        _SUITE + "    Run Keyword And Return Status    Check\n\n"
+        f"{header}\nCheck\n    Get Element States    id=x    contains    visible\n"
+    )
+
+
+@pytest.mark.parametrize("header", ["* Keywords", "*** Keywords", "| *** Keywords *** |"])
+def test_rewrite_try_wrapper_guard_recognizes_the_same_header_spellings(header):
+    source = _wrapped_check_file(header)
+    assert rewrite_visibility_checks_to_wait(source) == source, header
+
+
+def test_rewrite_try_wrapper_guard_control_converts_without_the_wrapper():
+    # Control for the row-22(b) case above: same file, no wrapper call, so it must convert.
+    source = (
+        _SUITE + "    Check\n\n"
+        "*** Keywords ***\nCheck\n    Get Element States    id=x    contains    visible\n"
+    )
+    expected = (
+        _SUITE + "    Check\n\n"
+        f"*** Keywords ***\nCheck\n    {_WFES}    id=x    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected
