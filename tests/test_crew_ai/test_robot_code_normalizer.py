@@ -1080,3 +1080,45 @@ def test_rewrite_still_converts_a_crlf_file_with_a_variables_section():
         f"    {_WFES}    ${{h}}    visible\r\n"
     )
     assert rewrite_visibility_checks_to_wait(source) == expected
+
+
+# --- PR #113 review: the rare-linebreak fallback must also gate the
+# TRY/wrapper guard, not only the own-keyword guard. When a hidden "*** Keywords
+# ***" header is glued (via a rare linebreak Robot honours) onto the end of the
+# "\n"-line carrying the wrapper call, `has_keywords_section` stays False --
+# so a caught visibility check inside the file's own keyword converted even
+# though Robot would resolve the wrapped call to that keyword and a longer
+# wait there could flip a caught FAIL or stall for 30s.
+
+def test_rewrite_leaves_the_file_alone_when_a_hidden_header_hides_a_wrapped_own_keyword():
+    source = (
+        "*** Test Cases ***\n"
+        "T\n"
+        "    Run Keyword And Return Status    Check\x1c*** Keywords ***\n"
+        "Check\n"
+        "    Get Element States    id=x    contains    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == source
+
+
+def test_rewrite_still_converts_the_same_file_without_the_wrapper():
+    """Control for the case above: same hidden header, but the test calls the
+    keyword directly (no error-catching wrapper), so the TRY/wrapper guard
+    never applies and the line must still convert -- both before and after the
+    fix, since `has_catching_wrapper` is False either way.
+    """
+    source = (
+        "*** Test Cases ***\n"
+        "T\n"
+        "    Check\x1c*** Keywords ***\n"
+        "Check\n"
+        "    Get Element States    id=x    contains    visible\n"
+    )
+    expected = (
+        "*** Test Cases ***\n"
+        "T\n"
+        "    Check\x1c*** Keywords ***\n"
+        "Check\n"
+        f"    {_WFES}    id=x    visible\n"
+    )
+    assert rewrite_visibility_checks_to_wait(source) == expected

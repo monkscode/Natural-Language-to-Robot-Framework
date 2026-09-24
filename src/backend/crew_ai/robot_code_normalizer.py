@@ -448,14 +448,14 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     # (one not paired into "\r\n"), and the rarer separator characters below. A
     # section header that lands after one of those, glued onto whatever line we
     # split on "\n", would be invisible to the header scan a few lines down —
-    # meaning the section state (and the own-keyword guard gated on it) could
-    # end up wrong in the direction that matters: converting a call Robot would
+    # meaning the section state (and both guards gated on it) could end up
+    # wrong in the direction that matters: converting a call Robot would
     # actually resolve to the file's own keyword. When any of them is present,
-    # section state is untrustworthy for the whole file, so the own-keyword
-    # guard falls back to checking every non-indented line regardless of
-    # section — the same, unconditional check this module used before section
-    # tracking existed. `has_keywords_section` (the TRY/wrapper guard) is not
-    # part of this fallback; it stays exactly as computed below.
+    # section state is untrustworthy for the whole file: the own-keyword guard
+    # falls back to checking every non-indented line regardless of section —
+    # the same, unconditional check this module used before section tracking
+    # existed — and the TRY/wrapper guard treats the file as if it did have a
+    # Keywords section, since a hidden header could be one.
     _other_linebreak_chars = "\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
     unsafe_section_state = any(
         c in robot_code.replace("\r\n", "\n") for c in _other_linebreak_chars
@@ -572,7 +572,7 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
             "resolves ahead of the Browser library"
         )
         return robot_code
-    if has_try or (has_keywords_section and has_catching_wrapper):
+    if has_try or (has_catching_wrapper and (has_keywords_section or unsafe_section_state)):
         logger.info(
             f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
             "unchanged — the file catches errors (TRY, or its own keywords under an "
