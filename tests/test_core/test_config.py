@@ -174,13 +174,13 @@ class TestLlmRequestTimeout:
         from src.backend.core.config import Settings
         assert Settings.model_fields["LLM_REQUEST_TIMEOUT_S"].default == 60
 
-    @pytest.mark.parametrize("value", [30, 60, 600])
+    @pytest.mark.parametrize("value", [30, 60, 150])
     def test_accepts_the_allowed_range(self, value):
         assert self._settings(value).LLM_REQUEST_TIMEOUT_S == value
 
-    @pytest.mark.parametrize("value", [0, 29, 601])
+    @pytest.mark.parametrize("value", [0, 29, 151])
     def test_rejects_outside_the_range(self, value):
-        with pytest.raises(ValueError, match="LLM_REQUEST_TIMEOUT_S must be between 30 and 600"):
+        with pytest.raises(ValueError, match="LLM_REQUEST_TIMEOUT_S must be between 30 and 150"):
             self._settings(value)
 
 

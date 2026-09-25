@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     # assembler p99 34.0 s (n=2,342 since the 2026-07-23 thinking fix).
     LLM_REQUEST_TIMEOUT_S: int = Field(
         default=60,
-        description="Seconds the first try of a cloud (gemini/vertex) LLM request may take; tries 2 and 3 get 2x and 4x. Allowed 30-600. Never applied to local Ollama models.",
+        description="Seconds the first try of a cloud (gemini/vertex) LLM request may take; tries 2 and 3 get 2x and 4x. Allowed 30-150. Never applied to local Ollama models.",
     )
 
     # Custom Actions Configuration
@@ -301,13 +301,17 @@ class Settings(BaseSettings):
 
     @validator('LLM_REQUEST_TIMEOUT_S')
     def validate_llm_request_timeout_s(cls, v):
-        """LLM_REQUEST_TIMEOUT_S must be between 30 and 600 seconds.
+        """LLM_REQUEST_TIMEOUT_S must be between 30 and 150 seconds.
 
         30: even then the third try (4x = 120 s) is over three times the
-        healthy planner p99 (37.2 s). 600: LiteLLM's own default.
+        healthy planner p99 (37.2 s). 150: the third try (4x = 600 s) then
+        equals LiteLLM's own per-request default, so no try waits longer than
+        before W5, and a call gives up within 18 min. At 600 the worst case
+        was 70.5 min, longer than the 40 min W5 removes (owner D10,
+        2026-09-25).
         """
-        if v < 30 or v > 600:
-            raise ValueError(f"LLM_REQUEST_TIMEOUT_S must be between 30 and 600, got {v}")
+        if v < 30 or v > 150:
+            raise ValueError(f"LLM_REQUEST_TIMEOUT_S must be between 30 and 150, got {v}")
         return v
 
     @validator('MAX_LOCATOR_STRATEGIES')
