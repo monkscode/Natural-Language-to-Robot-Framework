@@ -165,12 +165,14 @@ def _join_seconds(values: tuple[float, ...]) -> str:
 def friendly_provider_error(exc: BaseException) -> str | None:
     """Say plainly that the model provider did not answer, else None.
 
-    Covers the failures a cloud call ends on after its retries (W5): a timeout,
-    a 503 or a 500. Rate limits are already explained by friendly_setup_error.
+    Covers the failures a call ends on after its retries (W5): a timeout, a
+    503 or a 500. Rate limits are already explained by friendly_setup_error.
     APIConnectionError is deliberately NOT covered: LiteLLM also uses it as the
     catch-all for errors it cannot map, and a wrong diagnosis is worse than a
-    raw one (see the module docstring). A timeout whose llm_provider is Ollama
-    is a local-machine problem, not the provider's, and gets its own sentence.
+    raw one (see the module docstring). A local Ollama model (llm_provider
+    starting with "ollama") gets its own sentence for any of the three,
+    because the server is the user's own machine, not a cloud provider;
+    every other provider gets the "did not answer" sentence.
     """
     if isinstance(exc, litellm.Timeout):
         what = "gave no reply"

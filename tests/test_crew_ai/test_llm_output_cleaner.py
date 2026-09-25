@@ -157,6 +157,7 @@ class TestFormattingMonitor:
         assert "Empty-Response" in stats
         assert "1 retry attempts" in stats
         assert "1 recovered" in stats
+        assert "0 failed" in stats
 
     def test_stats_string_surfaces_provider_retries_even_with_zero_responses(self):
         """Minor 3: the planner-hang case (crew.py:594) has total_responses == 0
