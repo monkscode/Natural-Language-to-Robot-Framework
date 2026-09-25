@@ -90,10 +90,15 @@ def classify_provider_error(exc: BaseException) -> FailureKind:
     """Sort one failed try: 'timeout', 'rejected' (retry after a backoff) or 'fatal'.
 
     Timeout is checked first because litellm.Timeout also descends from
-    openai.APIConnectionError. LiteLLM maps Vertex/Gemini 408 and 504 to
+    openai.APIConnectionError. LiteLLM 1.75.3 maps Vertex/Gemini 408 to
     Timeout, 429 to RateLimitError, 500 and "The model is overloaded." to
-    InternalServerError, 503 to ServiceUnavailableError, and anything it cannot
-    map to APIConnectionError (litellm_core_utils/exception_mapping_utils.py).
+    InternalServerError and 503 to ServiceUnavailableError; every other status
+    (502, 504, 520, ...) and anything else it cannot map becomes
+    APIConnectionError, its catch-all (litellm_core_utils/exception_mapping_utils.py;
+    gemini takes the vertex branch, which has no 504 case). APIConnectionError
+    is retried as a rejection, whatever caused it: a chain-based transport
+    test would make those gateway errors and Vertex token-fetch failures
+    fatal (probed 2026-09-25, PR #115 review).
     A 429 on a per-day quota is fatal: nothing succeeds before the daily reset.
     """
     if isinstance(exc, litellm.Timeout):
@@ -113,7 +118,7 @@ class RetryReport:
     """What one call() went through before it gave up. Read for the SSE message.
 
     timed_out_after_s: the per-try LIMIT of each try that timed out, in order —
-    not the time the try actually took. A fast HTTP 408 or 504 also counts as a
+    not the time the try actually took. A fast HTTP 408 also counts as a
     timeout, so a value here does not mean the try ran that long.
     """
     model: str

@@ -103,8 +103,8 @@ take. The second and third tries get twice and four times as long, so the defaul
 60 s, 120 s and 240 s; a call that gets no answer gives up after about 7.5 minutes and the
 UI says the model provider did not answer. Rejections from the provider (HTTP 429, 500,
 503, a dropped connection) are retried up to 4 times after a backoff (0.5–8 s, or the wait
-Google names — capped at 60 s, plus up to 1 s); they do not move on to the longer timeout. HTTP 408 and 504
-count as timeouts. A per-day free-tier quota is not retried.
+Google names — capped at 60 s, plus up to 1 s); they do not move on to the longer timeout. HTTP 408
+counts as a timeout; other gateway errors (502, 504) are retried like rejections. A per-day free-tier quota is not retried.
 
 ```env
 LLM_REQUEST_TIMEOUT_S=60

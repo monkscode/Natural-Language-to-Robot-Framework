@@ -246,3 +246,57 @@ class TestReportAttachment:
 
     def test_absent_report_is_none(self):
         assert report_of(ValueError("x")) is None
+
+
+class TestRealLiteLLMMapping:
+    """Pins what LiteLLM 1.75.3 really raises for provider statuses, and how W5 sorts it.
+
+    PR #115 review (2026-09-25): a chain-based "transport only" rule for
+    APIConnectionError was declined because these gateway statuses arrive as a
+    cause-free APIConnectionError and must stay retryable. A local HTTP server
+    answers each status; only 127.0.0.1 is contacted.
+    """
+
+    @staticmethod
+    def _serve(status, content_type, body):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Reply(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Reply)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    @pytest.mark.parametrize("status,content_type,body,kind", [
+        (408, "application/json", b'{"error": {"code": 408, "message": "t", "status": "DEADLINE_EXCEEDED"}}', "timeout"),
+        (502, "application/json", b'{"error": {"code": 502, "message": "Bad Gateway"}}', "rejected"),
+        (502, "text/html", b"<html>502 Bad Gateway</html>", "rejected"),
+        (504, "application/json", b'{"error": {"code": 504, "message": "d", "status": "DEADLINE_EXCEEDED"}}', "rejected"),
+        (520, "text/html", b"<html>520</html>", "rejected"),
+        (200, "text/html", b"<html>not json</html>", "rejected"),
+        (503, "application/json", b'{"error": {"code": 503, "message": "u", "status": "UNAVAILABLE"}}', "rejected"),
+        (400, "application/json", b'{"error": {"code": 400, "message": "b", "status": "INVALID_ARGUMENT"}}', "fatal"),
+    ])
+    def test_gemini_statuses_are_sorted_from_the_real_mapping(self, status, content_type, body, kind):
+        server = self._serve(status, content_type, body)
+        try:
+            with pytest.raises(Exception) as raised:
+                litellm.completion(model="gemini/gemini-3.5-flash", api_key="k", num_retries=0, timeout=5,
+                                   messages=[{"role": "user", "content": "hi"}],
+                                   api_base=f"http://127.0.0.1:{server.server_address[1]}/v1/models/gemini-3.5-flash")
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert classify_provider_error(raised.value) == kind, (
+            f"HTTP {status} -> {type(raised.value).__name__} sorted as {classify_provider_error(raised.value)}")
