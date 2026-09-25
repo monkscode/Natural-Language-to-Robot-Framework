@@ -263,10 +263,25 @@ class LLMFormattingMonitor:
             "provider_failures": self.provider_failures,
         }
 
+    def _provider_retries_text(self) -> str | None:
+        """The 'Provider retries: …' fragment, or None when nothing happened."""
+        if not (self.provider_timeouts or self.provider_rejections or self.provider_failures):
+            return None
+        return (
+            f"Provider retries: {self.provider_timeouts} timed out, "
+            f"{self.provider_rejections} rejected, {self.provider_failures} gave up"
+        )
+
     def get_stats(self) -> str:
         """Get formatted statistics string."""
         if self.total_responses == 0:
-            return "No LLM responses processed yet"
+            # The planner-hang case (crew.py:594): the call never returned, so
+            # total_responses stayed 0, but the provider retries still ran and
+            # must not be hidden behind the bare "no responses" line.
+            provider_text = self._provider_retries_text()
+            if provider_text is None:
+                return "No LLM responses processed yet"
+            return f"No LLM responses processed yet, {provider_text}"
 
         clean_rate = (self.cleaned_responses / self.total_responses) * 100
 
@@ -295,11 +310,9 @@ class LLMFormattingMonitor:
                 f"{self.empty_response_failures} failed"
             )
 
-        if self.provider_timeouts or self.provider_rejections or self.provider_failures:
-            parts.append(
-                f"Provider retries: {self.provider_timeouts} timed out, "
-                f"{self.provider_rejections} rejected, {self.provider_failures} gave up"
-            )
+        provider_text = self._provider_retries_text()
+        if provider_text is not None:
+            parts.append(provider_text)
 
         return ", ".join(parts)
 

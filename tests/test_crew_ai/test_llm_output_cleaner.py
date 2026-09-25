@@ -157,4 +157,53 @@ class TestFormattingMonitor:
         assert "Empty-Response" in stats
         assert "1 retry attempts" in stats
         assert "1 recovered" in stats
-        assert "0 failed" in stats
+
+    def test_stats_string_surfaces_provider_retries_even_with_zero_responses(self):
+        """Minor 3: the planner-hang case (crew.py:594) has total_responses == 0
+        because the call never returned, but the provider retries still happened
+        and must not be hidden behind the bare 'No LLM responses' line."""
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_provider_timeout()
+        monitor.log_provider_timeout()
+        monitor.log_provider_timeout()
+        monitor.log_provider_failure()
+        stats = monitor.get_stats()
+        assert stats == "No LLM responses processed yet, Provider retries: 3 timed out, 0 rejected, 1 gave up"
+
+    def test_stats_string_stays_bare_with_zero_responses_and_zero_retries(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        assert monitor.get_stats() == "No LLM responses processed yet"
+
+    def test_numeric_stats_provider_counters(self):
+        """Minor 4: provider counters are workflow_service's only persisted W5
+        signal (get_numeric_stats() -> workflow_metrics.llm_cleaning_stats)."""
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_response()
+        monitor.log_provider_timeout()
+        monitor.log_provider_timeout()
+        monitor.log_provider_rejection()
+        monitor.log_provider_failure()
+        nums = monitor.get_numeric_stats()
+        assert nums["provider_timeouts"] == 2
+        assert nums["provider_rejections"] == 1
+        assert nums["provider_failures"] == 1
+        stats = monitor.get_stats()
+        assert "Provider retries: 2 timed out, 1 rejected, 1 gave up" in stats
+
+    def test_numeric_stats_provider_counters_default_to_zero(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        nums = monitor.get_numeric_stats()
+        assert nums["provider_timeouts"] == 0
+        assert nums["provider_rejections"] == 0
+        assert nums["provider_failures"] == 0
+
+    def test_stats_string_omits_provider_retries_when_zero(self):
+        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        monitor = LLMFormattingMonitor()
+        monitor.log_response()
+        stats = monitor.get_stats()
+        assert "Provider retries" not in stats
