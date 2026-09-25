@@ -51,7 +51,10 @@ TIMEOUT_MULTIPLIERS: tuple[int, ...] = (1, 2, 4)
 REJECTION_RETRIES = 4
 REJECTION_BACKOFF_BASE_S = 1.0
 REJECTION_BACKOFF_CAP_S = 8.0
-# Deadline headroom beyond sum(schedule): twice the worst-case backoff (15 s).
+# Deadline headroom beyond sum(schedule): twice the worst-case plain backoff
+# (1 + 2 + 4 + 8 = 15 s). A wait the provider names (AI Studio retryDelay, up to
+# 61 s each) is not covered: it spends schedule time, and one that would pass the
+# deadline gives up at once instead of sleeping.
 BACKOFF_ALLOWANCE_S = 30.0
 # Never start a try with less than this left before the deadline.
 MIN_TRY_S = 5.0
@@ -107,7 +110,12 @@ def classify_provider_error(exc: BaseException) -> FailureKind:
 
 @dataclass(frozen=True)
 class RetryReport:
-    """What one call() went through before it gave up. Read for the SSE message."""
+    """What one call() went through before it gave up. Read for the SSE message.
+
+    timed_out_after_s: the per-try LIMIT of each try that timed out, in order —
+    not the time the try actually took. A fast HTTP 408 or 504 also counts as a
+    timeout, so a value here does not mean the try ran that long.
+    """
     model: str
     tries: int
     timeouts: int

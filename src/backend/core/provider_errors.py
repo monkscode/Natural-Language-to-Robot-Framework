@@ -63,9 +63,10 @@ def _vertex_billing() -> str:
 
 def _daily_quota() -> str:
     return (
-        "The model provider's daily free quota for this model is used up (Google AI "
-        "Studio free tier). It resets at midnight Pacific time. To keep going now, use a "
-        f"paid-tier key, or switch MODEL_PROVIDER to vertex in {_ENV_FILE}."
+        "The model provider's daily quota for this model is used up, so retrying now "
+        "will not help. Per-day quotas reset once a day (Google AI Studio's free tier "
+        "at midnight Pacific time). To keep going now, use a key or project with more "
+        f"quota, or switch MODEL_PROVIDER in {_ENV_FILE} to a provider with quota left."
     )
 
 
@@ -168,7 +169,8 @@ def friendly_provider_error(exc: BaseException) -> str | None:
     a 503 or a 500. Rate limits are already explained by friendly_setup_error.
     APIConnectionError is deliberately NOT covered: LiteLLM also uses it as the
     catch-all for errors it cannot map, and a wrong diagnosis is worse than a
-    raw one (see the module docstring).
+    raw one (see the module docstring). A timeout whose llm_provider is Ollama
+    is a local-machine problem, not the provider's, and gets its own sentence.
     """
     if isinstance(exc, litellm.Timeout):
         what = "gave no reply"
@@ -185,8 +187,18 @@ def friendly_provider_error(exc: BaseException) -> str | None:
     else:
         detail = f"{report.model} {what} after {report.tries} tries over {_duration(report.elapsed_s)}"
         if report.timed_out_after_s:
-            detail += f" (it waited {_join_seconds(report.timed_out_after_s)})"
+            if len(report.timed_out_after_s) == 1:
+                detail += f" (the try that timed out had a limit of {_join_seconds(report.timed_out_after_s)})"
+            else:
+                detail += f" (the tries that timed out had limits of {_join_seconds(report.timed_out_after_s)})"
         detail += "."
+    if str(getattr(exc, "llm_provider", "") or "").startswith("ollama"):
+        return redact_secrets(
+            f"Your local model did not answer. {detail} This comes from your own Ollama "
+            "server, not from your test description — check that Ollama is running at "
+            "the OLLAMA_API_BASE address and that the model is pulled; a large model on "
+            "a CPU can need longer than the 600 s LiteLLM allows per request by default."
+        )
     return redact_secrets(
         f"The model provider did not answer. {detail} The problem is on the provider's "
         "side, not in your test description — try again in a few minutes."

@@ -156,12 +156,21 @@ class TestGoogleAiStudioDailyQuota:
 
     def test_per_day_quota_says_when_it_resets(self):
         msg = friendly_setup_error(self._429("GenerateRequestsPerDayPerProjectPerModel-FreeTier"))
-        assert "daily free quota" in msg
+        assert "daily quota for this model is used up" in msg
         assert "midnight Pacific time" in msg
 
     def test_per_minute_quota_keeps_the_rate_limit_message(self):
         msg = friendly_setup_error(self._429("GenerateRequestsPerMinutePerProjectPerModel-FreeTier"))
         assert msg.startswith("The model provider rate-limited this request")
+
+    def test_per_day_quota_is_provider_neutral_for_vertex(self):
+        exc = self._429("GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+        exc.llm_provider = "vertex_ai"
+        msg = friendly_setup_error(exc)
+        assert "switch MODEL_PROVIDER to vertex" not in msg
+        assert "(Google AI Studio free tier)" not in msg
+        assert "retrying now will not help" in msg
+        assert "midnight Pacific time" in msg
 
 
 class TestProviderDidNotAnswer:
@@ -180,6 +189,21 @@ class TestProviderDidNotAnswer:
         assert "3 tries over 7 min 0 s" in msg
         assert "60 s, 120 s and 240 s" in msg
         assert "Connection timed out after None seconds" not in msg
+        assert "waited" not in msg
+
+    def test_timeout_wording_reports_limits_not_waits_plural(self):
+        msg = friendly_provider_error(self._timeout())
+        assert "the tries that timed out had limits of 60 s, 120 s and 240 s" in msg
+        assert "waited" not in msg
+
+    def test_timeout_wording_reports_limit_not_wait_singular(self):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="gemini-3.5-flash", llm_provider="vertex_ai")
+        attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 3, 1, 2,
+                                       (60.0,), 61.0, "Timeout"))
+        msg = friendly_provider_error(exc)
+        assert "the try that timed out had a limit of 60 s" in msg
+        assert "waited" not in msg
 
     def test_unavailable_503_after_rejections(self):
         exc = litellm.ServiceUnavailableError(
@@ -206,3 +230,21 @@ class TestProviderDidNotAnswer:
     ])
     def test_everything_else_is_left_to_the_other_rules(self, exc):
         assert friendly_provider_error(exc) is None
+
+    def test_a_vertex_timeout_still_blames_the_provider(self):
+        msg = friendly_provider_error(self._timeout())
+        assert msg.startswith("The model provider did not answer.")
+
+    def test_an_ollama_timeout_blames_the_local_machine_not_the_provider(self):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="llama3", llm_provider="ollama")
+        msg = friendly_provider_error(exc)
+        assert msg.startswith("Your local model did not answer.")
+        assert "ollama/llama3 gave no reply." in msg
+        assert "provider's side" not in msg
+
+    def test_an_ollama_chat_timeout_is_also_local(self):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="llama3", llm_provider="ollama_chat")
+        msg = friendly_provider_error(exc)
+        assert msg.startswith("Your local model did not answer.")
