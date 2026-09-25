@@ -28,7 +28,7 @@ def hung_server():
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen(16)
-    accepted, conns = [], []
+    accepted, conns, timers = [], [], []
 
     def serve():
         while True:
@@ -38,10 +38,21 @@ def hung_server():
                 return
             accepted.append(time.monotonic())
             conns.append(conn)  # held open, never answered
+            # Safety valve (Minor 8): if a wiring regression drops the timeout
+            # policy but keeps num_retries=0, an untimed client would otherwise
+            # wait LiteLLM's 600 s default per socket here (~20 min for this
+            # file, no CI timeout-minutes / pytest-timeout). Close each
+            # connection after ~15 s so that failure is fast instead of a hang.
+            timer = threading.Timer(15.0, conn.close)
+            timer.daemon = True
+            timer.start()
+            timers.append(timer)
 
     threading.Thread(target=serve, daemon=True).start()
     yield f"http://127.0.0.1:{sock.getsockname()[1]}/v1/models/gemini-3.5-flash", accepted
     sock.close()
+    for timer in timers:
+        timer.cancel()
     for conn in conns:
         conn.close()
 
