@@ -203,6 +203,11 @@ class LLMFormattingMonitor:
         self.empty_response_retries = 0     # extra attempts triggered by an empty result
         self.empty_response_recoveries = 0  # calls that emptied at least once but eventually returned content
         self.empty_response_failures = 0    # calls that emptied through every attempt
+        # Provider retries (W5): tries a cloud call lost to a timeout or a
+        # rejection (429 / 5xx / dropped connection), and calls that gave up.
+        self.provider_timeouts = 0
+        self.provider_rejections = 0
+        self.provider_failures = 0
 
     def log_response(self, was_cleaned: bool = False):
         """Log an LLM response."""
@@ -228,6 +233,18 @@ class LLMFormattingMonitor:
         """Record one call that returned empty through every retry attempt."""
         self.empty_response_failures += 1
 
+    def log_provider_timeout(self):
+        """Record one try that hit its per-try timeout."""
+        self.provider_timeouts += 1
+
+    def log_provider_rejection(self):
+        """Record one try the provider rejected (429, 5xx, dropped connection)."""
+        self.provider_rejections += 1
+
+    def log_provider_failure(self):
+        """Record one call that gave up after its provider retries."""
+        self.provider_failures += 1
+
     def get_numeric_stats(self) -> dict:
         """Return raw counters as a dict for structured storage."""
         total = self.total_responses
@@ -241,12 +258,30 @@ class LLMFormattingMonitor:
             "empty_response_retries": self.empty_response_retries,
             "empty_response_recoveries": self.empty_response_recoveries,
             "empty_response_failures": self.empty_response_failures,
+            "provider_timeouts": self.provider_timeouts,
+            "provider_rejections": self.provider_rejections,
+            "provider_failures": self.provider_failures,
         }
+
+    def _provider_retries_text(self) -> str | None:
+        """The 'Provider retries: …' fragment, or None when nothing happened."""
+        if not (self.provider_timeouts or self.provider_rejections or self.provider_failures):
+            return None
+        return (
+            f"Provider retries: {self.provider_timeouts} timed out, "
+            f"{self.provider_rejections} rejected, {self.provider_failures} gave up"
+        )
 
     def get_stats(self) -> str:
         """Get formatted statistics string."""
         if self.total_responses == 0:
-            return "No LLM responses processed yet"
+            # The planner-hang case (crew.py:594): the call never returned, so
+            # total_responses stayed 0, but the provider retries still ran and
+            # must not be hidden behind the bare "no responses" line.
+            provider_text = self._provider_retries_text()
+            if provider_text is None:
+                return "No LLM responses processed yet"
+            return f"No LLM responses processed yet, {provider_text}"
 
         clean_rate = (self.cleaned_responses / self.total_responses) * 100
 
@@ -274,6 +309,10 @@ class LLMFormattingMonitor:
                 f"{self.empty_response_recoveries} recovered, "
                 f"{self.empty_response_failures} failed"
             )
+
+        provider_text = self._provider_retries_text()
+        if provider_text is not None:
+            parts.append(provider_text)
 
         return ", ".join(parts)
 

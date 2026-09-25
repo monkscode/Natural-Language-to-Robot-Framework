@@ -13,11 +13,15 @@ guess. Anything unrecognised returns None so the caller keeps its existing
 message — a wrong diagnosis is worse than a raw one.
 
 Referenced by: services/workflow_service.py.
-Depends on: core/secret_redaction.py, re.
+Depends on: core/secret_redaction.py, crew_ai/provider_retry.py (the retry
+report, the per-day quota test), litellm (exception classes), re.
 """
 import re
 
+import litellm
+
 from src.backend.core.secret_redaction import redact_secrets
+from src.backend.crew_ai.provider_retry import names_per_day_quota, report_of
 
 _ENV_FILE = "src/backend/.env"
 
@@ -54,6 +58,15 @@ def _vertex_billing() -> str:
         "serve requests. Enable it at "
         "https://console.cloud.google.com/billing, then retry. Check that "
         f"VERTEXAI_PROJECT in {_ENV_FILE} names the project you expect."
+    )
+
+
+def _daily_quota() -> str:
+    return (
+        "The model provider's daily quota for this model is used up, so retrying now "
+        "will not help. Per-day quotas reset once a day (Google AI Studio's free tier "
+        "at midnight Pacific time). To keep going now, use a key or project with more "
+        f"quota, or switch MODEL_PROVIDER in {_ENV_FILE} to a provider with quota left."
     )
 
 
@@ -116,6 +129,11 @@ _RULES = (
     (lambda t: "SERVICE_DISABLED" in t
                or "has not been used in project" in t.lower()
                or "vertex ai api has not been used" in t.lower(), _vertex_api_disabled),
+    # Google AI Studio per-day quota. Body shape from published real 429s
+    # (inspect_ai#5526, vercel/ai#18627), replayed through litellm 1.75.3 — not
+    # captured from our own traffic (we run vertex). Above _rate_limited: a
+    # per-day 429 matches that pattern too, and "wait a moment" is wrong here.
+    (names_per_day_quota, _daily_quota),
     (lambda t: bool(_RATE_LIMITED.search(t)), _rate_limited),
     (_is_vertex_permission, _vertex_permission),
 )
@@ -132,3 +150,58 @@ def friendly_setup_error(exc: BaseException) -> str | None:
             # so a future message that quotes context cannot leak a key.
             return redact_secrets(build())
     return None
+
+
+def _duration(seconds: float) -> str:
+    whole = int(round(seconds))
+    return f"{whole // 60} min {whole % 60} s" if whole >= 60 else f"{whole} s"
+
+
+def _join_seconds(values: tuple[float, ...]) -> str:
+    parts = [f"{v:g} s" for v in values]
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def friendly_provider_error(exc: BaseException) -> str | None:
+    """Say plainly that the model provider did not answer, else None.
+
+    Covers the failures a call ends on after its retries (W5): a timeout, a
+    503 or a 500. Rate limits are already explained by friendly_setup_error.
+    APIConnectionError is deliberately NOT covered: LiteLLM also uses it as the
+    catch-all for errors it cannot map, and a wrong diagnosis is worse than a
+    raw one (see the module docstring). A local Ollama model (llm_provider
+    starting with "ollama") gets its own sentence for any of the three,
+    because the server is the user's own machine, not a cloud provider;
+    every other provider gets the "did not answer" sentence.
+    """
+    if isinstance(exc, litellm.Timeout):
+        what = "gave no reply"
+    elif isinstance(exc, litellm.ServiceUnavailableError):
+        what = "reported itself unavailable (HTTP 503)"
+    elif isinstance(exc, litellm.InternalServerError):
+        what = "failed with a server error (HTTP 500)"
+    else:
+        return None
+    report = report_of(exc)
+    if report is None:
+        model = "/".join(p for p in (getattr(exc, "llm_provider", ""), getattr(exc, "model", "")) if p)
+        detail = f"{model or 'The model'} {what}."
+    else:
+        detail = f"{report.model} {what} after {report.tries} tries over {_duration(report.elapsed_s)}"
+        if report.timed_out_after_s:
+            if len(report.timed_out_after_s) == 1:
+                detail += f" (the try that timed out had a limit of {_join_seconds(report.timed_out_after_s)})"
+            else:
+                detail += f" (the tries that timed out had limits of {_join_seconds(report.timed_out_after_s)})"
+        detail += "."
+    if str(getattr(exc, "llm_provider", "") or "").startswith("ollama"):
+        return redact_secrets(
+            f"Your local model did not answer. {detail} This comes from your own Ollama "
+            "server, not from your test description — check that Ollama is running at "
+            "the OLLAMA_API_BASE address and that the model is pulled; a large model on "
+            "a CPU can need longer than the 600 s LiteLLM allows per request by default."
+        )
+    return redact_secrets(
+        f"The model provider did not answer. {detail} The problem is on the provider's "
+        "side, not in your test description — try again in a few minutes."
+    )

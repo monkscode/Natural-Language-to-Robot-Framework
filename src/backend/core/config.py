@@ -110,7 +110,18 @@ class Settings(BaseSettings):
         default=2,
         description="Extra LLM call attempts when response is empty/whitespace (0 = disabled, max 5). Exponential backoff: 500ms × 2^n capped at 5s.",
     )
-    
+
+    # LLM request timeout (W5, owner design D3, 2026-09-24). The first try of a
+    # cloud (gemini / vertex) LLM request may take this long; tries 2 and 3 get
+    # 2x and 4x (60 -> 60 s, 120 s, 240 s), and the wrapper, not LiteLLM,
+    # retries (crew_ai/provider_retry.py). Never applied to local Ollama models,
+    # which can take minutes on CPU. Evidence for 60: healthy planner p99 37.2 s,
+    # assembler p99 34.0 s (n=2,342 since the 2026-07-23 thinking fix).
+    LLM_REQUEST_TIMEOUT_S: int = Field(
+        default=60,
+        description="Seconds the first try of a cloud (gemini/vertex) LLM request may take; tries 2 and 3 get 2x and 4x. Allowed 30-150. Never applied to local Ollama models.",
+    )
+
     # Custom Actions Configuration
     ENABLE_CUSTOM_ACTIONS: bool = Field(default=True, description="Enable/disable custom actions for browser automation")
     MAX_LOCATOR_STRATEGIES: int = Field(default=21, description="Maximum number of locator strategies to try")
@@ -287,7 +298,22 @@ class Settings(BaseSettings):
         if v < 0 or v > 5:
             raise ValueError(f"LLM_EMPTY_RESPONSE_MAX_RETRIES must be between 0 and 5, got {v}")
         return v
-    
+
+    @validator('LLM_REQUEST_TIMEOUT_S')
+    def validate_llm_request_timeout_s(cls, v):
+        """LLM_REQUEST_TIMEOUT_S must be between 30 and 150 seconds.
+
+        30: even then the third try (4x = 120 s) is over three times the
+        healthy planner p99 (37.2 s). 150: the third try (4x = 600 s) then
+        equals LiteLLM's own per-request default, so no try waits longer than
+        before W5, and a call gives up within 18 min. At 600 the worst case
+        was 70.5 min, longer than the 40 min W5 removes (owner D10,
+        2026-09-25).
+        """
+        if v < 30 or v > 150:
+            raise ValueError(f"LLM_REQUEST_TIMEOUT_S must be between 30 and 150, got {v}")
+        return v
+
     @validator('MAX_LOCATOR_STRATEGIES')
     def validate_max_locator_strategies(cls, v):
         """Validate that MAX_LOCATOR_STRATEGIES is between 1 and 50."""

@@ -281,15 +281,17 @@ class TestGetLLM:
         _, kw = mock_cls.call_args
         assert kw.get("api_key") == "my-key"
 
-    def test_num_retries_set_for_gemini(self):
+    def test_litellm_retries_off_for_gemini(self):
+        """The wrapper owns cloud retries (W5); LiteLLM's would re-send 400/401s with no wait."""
         mock_cls, _ = self._get_llm("gemini")
         _, kw = mock_cls.call_args
-        assert kw.get("num_retries") == 3
+        assert kw.get("num_retries") == 0
 
-    def test_num_retries_set_for_vertex(self):
+    def test_litellm_retries_off_for_vertex(self):
+        """The wrapper owns cloud retries (W5); LiteLLM's would re-send 400/401s with no wait."""
         mock_cls, _ = self._get_llm("vertex")
         _, kw = mock_cls.call_args
-        assert kw.get("num_retries") == 3
+        assert kw.get("num_retries") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +523,7 @@ class TestCleanedLLMWrapperEmptyRetry:
     # ── Exceptions propagate ──────────────────────────────────────────────
 
     def test_exception_propagates_no_retry(self):
-        """Exceptions are LiteLLM's job (num_retries); we must not catch them."""
+        """Without a provider policy (a local wrapper, or one built directly) an exception propagates at once: no retry, no sleep."""
         wrapper = self._make_wrapper()
         with self._patch_settings(2), patch("time.sleep") as mock_sleep, \
              patch("crewai.llm.LLM.call", side_effect=RuntimeError("boom")) as mock_call:

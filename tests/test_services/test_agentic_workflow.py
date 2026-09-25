@@ -897,3 +897,24 @@ class TestTotalLlmCallsUsesActualCalls:
             m = self._capture_metrics(
                 {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': bad}})
             assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"
+
+
+class TestProviderDidNotAnswerReachesTheStream:
+    def test_final_timeout_becomes_a_plain_sentence(self):
+        import litellm
+
+        from src.backend.crew_ai.provider_retry import RetryReport, attach_report
+
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="gemini-3.5-flash", llm_provider="vertex_ai")
+        attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 3, 3, 0,
+                                       (60.0, 120.0, 240.0), 420.4, "Timeout"))
+        with patch("src.backend.services.workflow_service.run_crew", side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            from src.backend.services.workflow_service import run_agentic_workflow
+            events = list(run_agentic_workflow("login to github.com", "gemini", "gemini-2.5-flash"))
+        error = next(e for e in events if e.get("status") == "error")
+        assert error["message"].startswith("The model provider did not answer.")
+        assert "workflow_id" in error
