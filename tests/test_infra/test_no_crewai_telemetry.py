@@ -12,18 +12,17 @@ lookup and connect, so neither the check nor its control can send anything.
 
 Referenced by: none (leaf test module).
 Depends on: tests/conftest.py (the CREWAI_DISABLE_TELEMETRY pin), crewai 1.8.1.
+`_crewai_in_child` forces LITELLM_LOCAL_MODEL_COST_MAP=True in the child's env
+so litellm's own GitHub cost-map fetch never runs there, keeping each child's
+attempt list about crewai alone.
 """
 
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-_LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 # Records every DNS lookup and connect, REFUSES anything that is not loopback,
 # imports crewai, waits for its install-ping thread, then reports what crewai did.
@@ -48,7 +47,7 @@ _CHILD = textwrap.dedent("""
     socket.socket.connect = connect
     import crewai  # noqa: F401  (starts the install-ping thread unless disabled)
     for t in threading.enumerate():
-        if t is not threading.current_thread() and t.daemon:
+        if "_track_install" in t.name:
             t.join(timeout=5)
     from crewai.telemetry.telemetry import Telemetry
     from opentelemetry import trace
@@ -67,7 +66,10 @@ def _crewai_in_child(env: dict) -> dict:
     # import unless told to use its bundled copy. That download is not
     # telemetry; the bundled copy keeps these attempt lists about crewai alone.
     env = dict(env, LITELLM_LOCAL_MODEL_COST_MAP="True")
-    result = subprocess.run([sys.executable, "-c", _CHILD], cwd=REPO_ROOT, env=env,
+    # Run outside the repo: __main__ has no __file__ for a `python -c` script,
+    # so crewai's load_dotenv (crewai/llm.py:104) and litellm search upward
+    # from cwd instead, and would load the repo root's .env into the child.
+    result = subprocess.run([sys.executable, "-c", _CHILD], cwd=tempfile.gettempdir(), env=env,
                             capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr[-2000:]
     return json.loads(result.stdout.strip().splitlines()[-1])

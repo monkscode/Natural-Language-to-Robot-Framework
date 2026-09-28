@@ -52,8 +52,9 @@ os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 # crewai`, and its module-level EventListener makes crewai's own TracerProvider
 # the global one, so every span a test opens is exported to telemetry.crewai.com.
 # Both are gated by CREWAI_DISABLE_TELEMETRY (crewai Telemetry._is_telemetry_disabled).
-# Measured 2026-09-27 on the 446 tracing tests: 3 outbound attempts without it,
-# 0 with it. Forced rather than setdefault, like LOG_DIR below: a shell that
+# Measured 2026-09-27 on the 446 tracing tests: 3 crewai attempts (api.scarf.sh
+# + 2 x telemetry.crewai.com) without it, 0 with it. Forced rather than
+# setdefault, like LOG_DIR below: a shell that
 # exported "false" must not reach the session. A `pytest -p` plugin that imported
 # crewai would run before this line; none exists.
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
