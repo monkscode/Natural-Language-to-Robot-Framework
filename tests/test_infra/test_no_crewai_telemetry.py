@@ -1,0 +1,96 @@
+"""The test session never sends crewai telemetry.
+
+The defect (measured 2026-09-27): crewai 1.8.1 pings api.scarf.sh from a thread
+started at `import crewai`, and its module-level EventListener makes crewai's
+own TracerProvider the process's global one, so every span a test opened
+(create_workflow_span included) was exported to telemetry.crewai.com. Both are
+gated by crewai's Telemetry._is_telemetry_disabled(), which reads
+CREWAI_DISABLE_TELEMETRY; tests/conftest.py forces it to "true".
+
+crewai is imported ONLY in child processes that refuse every non-loopback DNS
+lookup and connect, so neither the check nor its control can send anything.
+
+Referenced by: none (leaf test module).
+Depends on: tests/conftest.py (the CREWAI_DISABLE_TELEMETRY pin), crewai 1.8.1.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+# Records every DNS lookup and connect, REFUSES anything that is not loopback,
+# imports crewai, waits for its install-ping thread, then reports what crewai did.
+_CHILD = textwrap.dedent("""
+    import json, socket, threading
+    LOOPBACK = ("127.0.0.1", "::1", "localhost")
+    attempts = []
+    _gai = socket.getaddrinfo
+    def gai(host, *a, **k):
+        h = host.decode() if isinstance(host, bytes) else host
+        if h not in LOOPBACK:
+            attempts.append(h)
+            raise socket.gaierror(socket.EAI_NONAME, "refused by the test")
+        return _gai(host, *a, **k)
+    socket.getaddrinfo = gai
+    _connect = socket.socket.connect
+    def connect(self, addr):
+        if not (isinstance(addr, tuple) and addr[0] in LOOPBACK):
+            attempts.append(str(addr))
+            raise ConnectionRefusedError("refused by the test")
+        return _connect(self, addr)
+    socket.socket.connect = connect
+    import crewai  # noqa: F401  (starts the install-ping thread unless disabled)
+    for t in threading.enumerate():
+        if t is not threading.current_thread() and t.daemon:
+            t.join(timeout=5)
+    from crewai.telemetry.telemetry import Telemetry
+    from opentelemetry import trace
+    resource = getattr(trace.get_tracer_provider(), "resource", None)
+    print(json.dumps({
+        "attempts": sorted(set(attempts)),
+        "disabled": Telemetry._is_telemetry_disabled(),
+        "ready": Telemetry().ready,
+        "global_service": resource.attributes.get("service.name") if resource is not None else None,
+    }))
+""")
+
+
+def _crewai_in_child(env: dict) -> dict:
+    # LiteLLM (imported by crewai) downloads its model list from GitHub at
+    # import unless told to use its bundled copy. That download is not
+    # telemetry; the bundled copy keeps these attempt lists about crewai alone.
+    env = dict(env, LITELLM_LOCAL_MODEL_COST_MAP="True")
+    result = subprocess.run([sys.executable, "-c", _CHILD], cwd=REPO_ROOT, env=env,
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr[-2000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_the_session_forces_crewai_telemetry_off():
+    """Forced, not setdefault: a shell that exported "false" must not reach the tests."""
+    assert os.environ.get("CREWAI_DISABLE_TELEMETRY") == "true"
+
+
+def test_crewai_under_the_session_env_is_silent():
+    """A child started with the session env (as every subprocess a test starts is)."""
+    seen = _crewai_in_child(dict(os.environ))
+    assert seen == {"attempts": [], "disabled": True, "ready": False, "global_service": None}
+
+
+def test_the_control_without_the_pin_would_have_sent():
+    """Proves the test above can fail: without the pin crewai tries api.scarf.sh
+    (refused by the child's guard, so nothing is sent) and makes its own
+    provider the global one."""
+    unpinned = {k: v for k, v in os.environ.items()
+                if k not in ("CREWAI_DISABLE_TELEMETRY", "OTEL_SDK_DISABLED", "CREWAI_DISABLE_TRACKING")}
+    seen = _crewai_in_child(unpinned)
+    assert "api.scarf.sh" in seen["attempts"]
+    assert seen["ready"] is True
+    assert seen["global_service"] == "crewAI-telemetry"
