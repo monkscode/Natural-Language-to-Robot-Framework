@@ -9,8 +9,10 @@ CREWAI_DISABLE_TELEMETRY; tests/conftest.py forces it to "true".
 
 crewai is imported ONLY in child processes that refuse every non-loopback DNS
 lookup and every connect except to a socket the child itself opened (asyncio's
-Windows self-pipe), with inherited `*_proxy` variables removed — so neither the
-check nor its control can send anything, even through a local proxy.
+Windows self-pipe), with inherited `*_proxy` variables removed and `no_proxy=*`
+forced (so the Windows/macOS system proxy is not consulted either) — so
+neither the check nor its control can send anything, even through a local or
+system proxy.
 
 Referenced by: none (leaf test module).
 Depends on: tests/conftest.py (the CREWAI_DISABLE_TELEMETRY pin), crewai 1.8.1.
@@ -75,10 +77,14 @@ _CHILD = textwrap.dedent("""
 def _crewai_in_child(env: dict) -> dict:
     # Drop every inherited *_proxy variable (including no_proxy) first, so an
     # env-configured proxy can never carry crewai's ping out of the child.
+    # urllib reads the Windows/macOS system proxy only when no *_proxy variable
+    # is set, so also force no_proxy=* to switch that lookup off too, and every
+    # request in the child goes direct (to the guard).
     # LiteLLM (imported by crewai) downloads its model list from GitHub at
     # import unless told to use its bundled copy. That download is not
     # telemetry; the bundled copy keeps these attempt lists about crewai alone.
     env = {k: v for k, v in env.items() if not k.lower().endswith("_proxy")}
+    env["no_proxy"] = "*"
     env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     # Run outside the repo: __main__ has no __file__ for a `python -c` script,
     # so crewai's load_dotenv (crewai/llm.py:104) and litellm search upward
@@ -121,10 +127,11 @@ def test_the_control_cannot_leave_through_a_proxy():
     goes direct and is refused at DNS (exactly like the plain control above),
     and nothing may ever reach a listener bound at the proxy's address.
 
-    Honest scope: this test proves the env-proxy path only. A Windows system
-    (registry) proxy is covered by the connect guard instead (it refuses the
-    connect to the proxy's port, since that port is not one the child itself
-    bound) and is not simulated here.
+    Honest scope: this test proves the env-proxy path only. A Windows/macOS
+    system proxy is switched off instead by the forced `no_proxy=*` (urllib
+    only reads the system proxy when no `*_proxy` variable is set); the
+    connect guard remains the backstop either way. A system proxy is not
+    simulated here.
     """
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.bind(("127.0.0.1", 0))
