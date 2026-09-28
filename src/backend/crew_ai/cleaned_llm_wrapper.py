@@ -791,6 +791,9 @@ def get_llm(model_provider: str, model_name: str, api_key: Optional[str] = None,
 
     routed_model = resolve_model_string(model_provider, model_name)
 
+    from .model_map_fallback import ensure_model_entry
+    ensure_model_entry(model_provider, routed_model)
+
     # Task 22 provider gate: only forward response_format where the routed
     # model actually supports schema enforcement — CrewAI raises ValueError at
     # call time otherwise (crewai llm.py supports_response_schema check).
