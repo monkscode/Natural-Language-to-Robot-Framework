@@ -117,10 +117,9 @@ def test_the_control_without_the_pin_would_have_sent():
 
 def test_the_control_cannot_leave_through_a_proxy():
     """An inherited HTTPS_PROXY cannot carry the control's install ping out of
-    the child: the ping must be refused at DNS (direct, non-proxied) exactly
-    like the plain control above, and nothing may ever reach a listener bound
-    at the proxy's address, even though the child's connect guard allows
-    loopback connects.
+    the child: `_crewai_in_child` strips it before the child runs, so the ping
+    goes direct and is refused at DNS (exactly like the plain control above),
+    and nothing may ever reach a listener bound at the proxy's address.
 
     Honest scope: this test proves the env-proxy path only. A Windows system
     (registry) proxy is covered by the connect guard instead (it refuses the
@@ -146,7 +145,7 @@ def test_the_control_cannot_leave_through_a_proxy():
             reached = True
         except socket.timeout:
             reached = False
-        assert not reached, "nothing reached the listener"
+        assert not reached, "the control's ping reached the proxy listener"
         assert "api.scarf.sh" in seen["attempts"]
     finally:
         srv.close()
