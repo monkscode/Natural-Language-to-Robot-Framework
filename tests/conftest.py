@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 # time, which is before any fixture runs.
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 
+# crewai telemetry OFF for the whole test process, set before anything imports
+# crewai. crewai 1.8.1 pings api.scarf.sh from a thread started at `import
+# crewai`, and its module-level EventListener makes crewai's own TracerProvider
+# the global one, so every span a test opens is exported to telemetry.crewai.com.
+# Both are gated by CREWAI_DISABLE_TELEMETRY (crewai Telemetry._is_telemetry_disabled).
+# Measured 2026-09-27 on the 446 tracing tests: 3 crewai attempts (api.scarf.sh
+# + 2 x telemetry.crewai.com) without it, 0 with it. Forced rather than
+# setdefault, like LOG_DIR below: a shell that
+# exported "false" must not reach the session. A `pytest -p` plugin that imported
+# crewai would run before this line; none exists.
+os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+
 # application.log goes to LOG_DIR (src/backend/main.py), and main.py opens it
 # at IMPORT time — test modules that import main at module level do so during
 # collection, before any fixture runs. So it is pinned here like the
