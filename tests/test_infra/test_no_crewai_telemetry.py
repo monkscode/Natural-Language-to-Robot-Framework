@@ -8,7 +8,9 @@ gated by crewai's Telemetry._is_telemetry_disabled(), which reads
 CREWAI_DISABLE_TELEMETRY; tests/conftest.py forces it to "true".
 
 crewai is imported ONLY in child processes that refuse every non-loopback DNS
-lookup and connect, so neither the check nor its control can send anything.
+lookup and every connect except to a socket the child itself opened (asyncio's
+Windows self-pipe), with inherited `*_proxy` variables removed — so neither the
+check nor its control can send anything, even through a local proxy.
 
 Referenced by: none (leaf test module).
 Depends on: tests/conftest.py (the CREWAI_DISABLE_TELEMETRY pin), crewai 1.8.1.
@@ -19,13 +21,16 @@ attempt list about crewai alone.
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
 
-# Records every DNS lookup and connect, REFUSES anything that is not loopback,
-# imports crewai, waits for its install-ping thread, then reports what crewai did.
+# Records every DNS lookup and connect, REFUSES every DNS lookup that is not
+# loopback and every connect except to a port the child itself bound (asyncio's
+# Windows self-pipe), imports crewai, waits for its install-ping thread, then
+# reports what crewai did.
 _CHILD = textwrap.dedent("""
     import json, socket, threading
     LOOPBACK = ("127.0.0.1", "::1", "localhost")
@@ -39,8 +44,14 @@ _CHILD = textwrap.dedent("""
         return _gai(host, *a, **k)
     socket.getaddrinfo = gai
     _connect = socket.socket.connect
+    own_ports = set()
+    _bind = socket.socket.bind
+    def bind(self, addr):
+        _bind(self, addr)
+        own_ports.add(self.getsockname()[1])
+    socket.socket.bind = bind
     def connect(self, addr):
-        if not (isinstance(addr, tuple) and addr[0] in LOOPBACK):
+        if not (isinstance(addr, tuple) and addr[0] in LOOPBACK and addr[1] in own_ports):
             attempts.append(str(addr))
             raise ConnectionRefusedError("refused by the test")
         return _connect(self, addr)
@@ -62,10 +73,13 @@ _CHILD = textwrap.dedent("""
 
 
 def _crewai_in_child(env: dict) -> dict:
+    # Drop every inherited *_proxy variable (including no_proxy) first, so an
+    # env-configured proxy can never carry crewai's ping out of the child.
     # LiteLLM (imported by crewai) downloads its model list from GitHub at
     # import unless told to use its bundled copy. That download is not
     # telemetry; the bundled copy keeps these attempt lists about crewai alone.
-    env = dict(env, LITELLM_LOCAL_MODEL_COST_MAP="True")
+    env = {k: v for k, v in env.items() if not k.lower().endswith("_proxy")}
+    env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     # Run outside the repo: __main__ has no __file__ for a `python -c` script,
     # so crewai's load_dotenv (crewai/llm.py:104) and litellm search upward
     # from cwd instead, and would load the repo root's .env into the child.
@@ -86,13 +100,53 @@ def test_crewai_under_the_session_env_is_silent():
     assert seen == {"attempts": [], "disabled": True, "ready": False, "global_service": None}
 
 
+def _unpinned_env() -> dict:
+    return {k: v for k, v in os.environ.items()
+            if k not in ("CREWAI_DISABLE_TELEMETRY", "OTEL_SDK_DISABLED", "CREWAI_DISABLE_TRACKING")}
+
+
 def test_the_control_without_the_pin_would_have_sent():
     """Proves the test above can fail: without the pin crewai tries api.scarf.sh
     (refused by the child's guard, so nothing is sent) and makes its own
     provider the global one."""
-    unpinned = {k: v for k, v in os.environ.items()
-                if k not in ("CREWAI_DISABLE_TELEMETRY", "OTEL_SDK_DISABLED", "CREWAI_DISABLE_TRACKING")}
-    seen = _crewai_in_child(unpinned)
+    seen = _crewai_in_child(_unpinned_env())
     assert "api.scarf.sh" in seen["attempts"]
     assert seen["ready"] is True
     assert seen["global_service"] == "crewAI-telemetry"
+
+
+def test_the_control_cannot_leave_through_a_proxy():
+    """An inherited HTTPS_PROXY cannot carry the control's install ping out of
+    the child: the ping must be refused at DNS (direct, non-proxied) exactly
+    like the plain control above, and nothing may ever reach a listener bound
+    at the proxy's address, even though the child's connect guard allows
+    loopback connects.
+
+    Honest scope: this test proves the env-proxy path only. A Windows system
+    (registry) proxy is covered by the connect guard instead (it refuses the
+    connect to the proxy's port, since that port is not one the child itself
+    bound) and is not simulated here.
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    try:
+        port = srv.getsockname()[1]
+        env = _unpinned_env()
+        for k in list(env):
+            if k.lower() in ("no_proxy", "https_proxy"):
+                del env[k]
+        env["HTTPS_PROXY"] = f"http://127.0.0.1:{port}"
+        seen = _crewai_in_child(env)
+
+        srv.settimeout(0.5)
+        try:
+            conn, _ = srv.accept()
+            conn.close()
+            reached = True
+        except socket.timeout:
+            reached = False
+        assert not reached, "nothing reached the listener"
+        assert "api.scarf.sh" in seen["attempts"]
+    finally:
+        srv.close()
