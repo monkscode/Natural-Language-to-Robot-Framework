@@ -90,9 +90,9 @@ def ensure_model_entry(model_provider: str, routed_model: str) -> None:
                     routed_model, "" if _known(routed_model) else ", and its cost reads $0",
                 )
         except Exception:
-            logger.error(
+            logger.exception(
                 "Model-list fallback failed for %s: schema enforcement and pricing for it may be off.",
-                routed_model, exc_info=True,
+                routed_model,
             )
         else:
             _checked.add(routed_model)

@@ -176,8 +176,9 @@ def test_startup_checks_the_configured_model():
                side_effect=lambda p, m: seen.append((p, m))), \
          patch.object(main.settings, "MODEL_PROVIDER", "vertex"), \
          patch.object(main.settings, "ONLINE_MODEL", "gemini-3.5-flash"):
+        startup = main.startup_event()
         with pytest.raises(RuntimeError, match="stop here"):
-            asyncio.run(main.startup_event())
+            asyncio.run(startup)
     assert seen == [("vertex", "vertex_ai/gemini-3.5-flash")]
 
 
@@ -195,7 +196,8 @@ def test_a_failing_check_never_blocks_startup(caplog):
          patch.object(main.settings, "MODEL_PROVIDER", "vertex"), \
          patch.object(main.settings, "ONLINE_MODEL", "gemini-3.5-flash"), \
          caplog.at_level(logging.WARNING):
+        startup = main.startup_event()
         with pytest.raises(RuntimeError, match="stop here"):
-            asyncio.run(main.startup_event())
+            asyncio.run(startup)
     health.assert_called_once()
     assert any("model-list check skipped" in r.getMessage() for r in caplog.records)
