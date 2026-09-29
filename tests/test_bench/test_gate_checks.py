@@ -16,14 +16,18 @@ from bench.gate_checks import (
     token_lines,
     window_line,
 )
-from bench.gate_inputs import build_slots, load_runs
+from bench.gate_inputs import PASSED, build_slots, load_runs
 from tests.test_bench.gate_fixtures import (
     ASSEMBLER_ROW,
     PLANNER_ROW,
     PROVIDER_503,
     ROOT_ROW,
     TOKENS,
+    row,
+    wf_id,
     write_bench,
+    write_capture,
+    write_csv,
 )
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -149,6 +153,62 @@ class TestSalvageLine:
         line = salvage_line(slots_of(tmp_path, capture_kw={("q06", 2): {"traces": rows}}))
         assert line.status == "FAIL" and "1 unparsed planner answers" in line.text
 
+    def test_generated_runs_with_no_traces_cannot_be_checked(self, tmp_path):
+        cap = {(q, r): {"traces": []} for q in [f"q{i:02d}" for i in range(1, 11)] for r in (1, 2, 3)}
+        slots = slots_of(tmp_path, capture_kw=cap)
+        line = salvage_line(slots)
+        assert line.status == "CANNOT"
+        assert line.text == ("0 salvage-shaped rows, 0 unparsed planner answers over 30 runs "
+                             "(30 generated runs with no planner answer, 0 other runs without one)")
+        assert len(line.details) == 30
+        for s, detail in zip(slots, line.details):
+            assert detail.startswith("no planner row in ") and s.current.workflow_id in detail
+            assert len(s.current.workflow_id) == 36   # the full id, never a prefix
+
+    def test_a_generated_run_with_no_planner_answer_cannot_be_checked(self, tmp_path):
+        rows = [ROOT_ROW, {**PLANNER_ROW, "response_text": None}, ASSEMBLER_ROW]
+        slots = slots_of(tmp_path, capture_kw={("q06", 2): {"traces": rows}})
+        line = salvage_line(slots)
+        assert line.status == "CANNOT"
+        assert line.details == [f"no planner answer in q06 r2 {wf_id('cand', 'q06', 2)}"]
+        assert "(1 generated runs with no planner answer, 0 other runs without one)" in line.text
+
+    def test_a_salvage_row_fails_even_when_another_run_is_blind(self, tmp_path):
+        salvage = [ROOT_ROW, PLANNER_ROW, {"id": "s1", "start_time_ns": 250, "prompt_text": INSTRUCTOR_1_15,
+                                           "response_text": None}, ASSEMBLER_ROW]
+        slots = slots_of(tmp_path, capture_kw={("q01", 1): {"traces": []}, ("q06", 2): {"traces": salvage}})
+        line = salvage_line(slots)
+        assert line.status == "FAIL"
+        assert f"no planner row in q01 r1 {wf_id('cand', 'q01', 1)}" in line.details
+
+    def test_a_generation_error_without_a_planner_answer_is_informational(self, tmp_path):
+        slots = slots_of(tmp_path, overrides={("q02", 1): {"generation_status": "error", "test_status": ""}},
+                         capture_kw={("q02", 1): {"code": None, "error_message": PROVIDER_503,
+                                                  "status": "error", "tokens": {}, "traces": []}})
+        line = salvage_line(slots)
+        assert (line.status, line.details) == ("PASS", [])
+        assert line.text.endswith("(0 generated runs with no planner answer, 1 other runs without one)")
+
+    def test_a_salvage_row_in_a_replaced_provider_miss_still_fails(self, tmp_path):
+        miss = {"code": None, "error_message": PROVIDER_503, "status": "error", "tokens": {},
+                "traces": [{"id": "s1", "start_time_ns": 250, "prompt_text": INSTRUCTOR_1_15,
+                            "response_text": None}]}
+        cand, _ = write_bench(tmp_path, "cand", overrides={("q03", 2): {"test_status": "",
+                                                                         "generation_status": "error"}},
+                              capture_kw={("q03", 2): miss})
+        wf = wf_id("r1", "q03", 1)
+        write_capture(tmp_path / "bench" / "runs", wf)
+        rerun = load_runs(write_csv(tmp_path / "bench" / "baselines" / "r1.csv", [row("q03", 1, wf)]),
+                          tmp_path / "bench" / "runs")
+        slots = build_slots(load_runs(cand, tmp_path / "bench" / "runs"), rerun)
+        replaced = next(s for s in slots if len(s.history) == 2)
+        assert replaced.outcome == PASSED and replaced.current.workflow_id == wf
+        line = salvage_line(slots)   # counted over every run in the slot's history, not only the current one
+        assert line.status == "FAIL"
+        assert line.details == [f"salvage row s1 [instructor (1.15 wording)] in {replaced.history[0].label}"]
+        assert line.text.startswith("1 salvage-shaped rows, 0 unparsed planner answers over 31 runs "
+                                    "(0 generated runs with no planner answer, 1 other runs without one)")
+
 
 class TestTokens:
     def test_the_same_tokens_pass_every_family(self, tmp_path):
@@ -183,7 +243,36 @@ class TestTokens:
         zero = {**TOKENS, "crewai_prompt_tokens": 0}
         cap = {("q04", r): {"tokens": zero} for r in (1, 2, 3)}
         line = token_lines(runs_of(tmp_path, "base"), slots_of(tmp_path, capture_kw=cap))[0]
-        assert "listed, not gated: q04 8,000 -> 0 (-100.0%)" in line.details
+        assert line.details == ["candidate median 0, not in the sum: q04 8,000 -> 0"]
+        assert line.text.startswith("+0.0% (limit +10%)") and line.text.endswith("over 9 queries")
+
+    def test_a_zeroed_candidate_median_is_not_summed_as_a_saving(self, tmp_path):
+        cap = {(q, r): {"tokens": {**TOKENS, "crewai_prompt_tokens": 0 if q == "q04" else 8880}}
+               for q in [f"q{i:02d}" for i in range(1, 11)] for r in (1, 2, 3)}
+        line = token_lines(runs_of(tmp_path, "base"), slots_of(tmp_path, capture_kw=cap))[0]
+        # summed, q04's zero would offset the nine +11% queries: 80,000 -> 79,920 = -0.1%, a PASS
+        assert line.status == "FAIL"
+        assert line.text.startswith("+11.0% (limit +10%)") and line.text.endswith("over 9 queries")
+        assert line.details == ["candidate median 0, not in the sum: q04 8,000 -> 0"]
+        assert not any(d.startswith("listed, not gated: q04") for d in line.details)
+
+    def test_a_family_every_candidate_zeroed_cannot_be_compared(self, tmp_path):
+        zero = {**TOKENS, "crewai_prompt_tokens": 0, "crewai_completion_tokens": 0}
+        cap = {(q, r): {"tokens": zero} for q in [f"q{i:02d}" for i in range(1, 11)] for r in (1, 2, 3)}
+        lines = token_lines(runs_of(tmp_path, "base"), slots_of(tmp_path, capture_kw=cap))
+        assert [line.status for line in lines] == ["CANNOT", "CANNOT", "PASS", "PASS"]
+        for line, before in zip(lines[:2], ("8,000", "500")):
+            assert line.text == "no query has a value on both sides"
+            assert line.details == [f"candidate median 0, not in the sum: q{i:02d} {before} -> 0"
+                                    for i in range(1, 11)]
+
+    def test_a_jumpy_query_with_a_zeroed_candidate_stays_a_jumpy_line_only(self, tmp_path):
+        jumpy = {("q01", r): {"tokens": {**TOKENS, "browser_use_prompt_tokens": v}}
+                 for r, v in ((1, 22900), (2, 35600), (3, 22900))}
+        zero = {("q01", r): {"tokens": {**TOKENS, "browser_use_prompt_tokens": 0}} for r in (1, 2, 3)}
+        line = token_lines(runs_of(tmp_path, "base", capture_kw=jumpy), slots_of(tmp_path, capture_kw=zero))[2]
+        assert line.details == [
+            "baseline runs spread 55.5% (more than 25%), not in the sum: q01 22,900..35,600 -> 0"]
 
     def test_a_baseline_median_of_zero_is_listed_not_summed(self, tmp_path):
         zero = {**TOKENS, "browser_use_completion_tokens": 0}

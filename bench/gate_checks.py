@@ -18,19 +18,23 @@ Gates (each a GateLine; PASS / FAIL / CANNOT):
   (crewai 1.8.1's own extraction — exactly what reaches the Converter: over all
   2,105 captures that leaves the 7 known 2026-08-01 salvage runs). Until W5.1
   ships, a 1.8.1 salvage row carries no workflow id, so the bench never captures
-  it; an unparsed planner answer is then the only trace of it.
+  it; an unparsed planner answer is then the only trace of it. A GENERATED run
+  with no planner row or answer makes the line CANNOT, naming the run (never
+  passed blind; owner, 2026-09-29); a generation error without one is only counted.
 - TOKENS, four families gated SEPARATELY from each run's workflow_metrics.json
   (the CSV carries only crewai + browser-use sums): the SUM of per-query medians,
   candidate vs baseline, must not grow more than crewai prompt +10%, crewai
   completion +15%, browser-use prompt +5%, browser-use completion +15% (~3x the
   same-code noise 3.2 / 4.7 / 0.5 / 4.3% measured on 3 same-code pairs). A query
   whose baseline median is 0, or that has no value on one side, is listed and left
-  out of the sum. So is a query whose OWN baseline runs spread more than 25%
+  out of the sum. So is a CANDIDATE median of 0 against a non-zero baseline: a
+  zeroed token accumulator, never a saving (owner, 2026-09-29; the false pass
+  bench/run_bench.py:warn_if_zero_crewai_tokens warns of).
+  So is a query whose OWN baseline runs spread more than 25%
   (max > 1.25 x min; owner, 2026-09-28): it cannot anchor a +5% sum (q01's
   browser-use prompt swings 22,848 -> 35,712 between baseline runs). Any single
   query moving more than 25% either way is LISTED, never
-  gated (q10 moved +52.7% on the same code; a -100% crewai move is a zeroed token
-  accumulator, the false pass bench/run_bench.py:warn_if_zero_crewai_tokens warns of).
+  gated (q10 moved +52.7% on the same code).
 REPORTED only (INFO): dollars (llm_cost_usd), the browser-use cache share, the
 median paired_pct of llm_tokens (bench_lib.compare_by_query), and the 429 window:
 429 / 503 signature lines in logs/application.log.1 + application.log (the log
@@ -73,6 +77,10 @@ LOG_FILES = ("application.log.1", "application.log")
 
 def _generated(slot: Slot) -> bool:
     return slot.current.row.get("generation_status") == "complete"
+
+
+def _generated_run(run: Run) -> bool:
+    return (run.row.get("generation_status") or "").strip() == "complete"
 
 
 def locator_line(slots: list[Slot]) -> GateLine:
@@ -179,7 +187,7 @@ def planner_state(traces: list) -> str:
 def salvage_line(slots: list[Slot]) -> GateLine:
     runs = [run for s in slots for run in s.history]
     shapes: Counter = Counter()
-    details, unparsed, no_planner = [], [], 0
+    details, unparsed, no_answer = [], [], []
     for run in runs:
         traces = _load_list(run.capture / "llm_traces.json")
         for t in _ordered(traces):
@@ -192,13 +200,22 @@ def salvage_line(slots: list[Slot]) -> GateLine:
             unparsed.append(run)
             details.append(f"unparsed planner answer in {run.label}")
         elif state != "parsed":
-            no_planner += 1
+            no_answer.append((run, state))
+    # a generated run whose planner answer the capture lost is never passed blind; a generation
+    # error (e.g. a provider miss, whose traces are often []) without one is informational
+    blind = [(run, state) for run, state in no_answer if _generated_run(run)]
+    details += [f"{state} in {run.label}" for run, state in blind]
     n_rows = sum(shapes.values())
-    text = (f"{n_rows} salvage-shaped rows, {len(unparsed)} unparsed planner answers over "
-            f"{len(runs)} runs ({no_planner} with no planner answer)")
+    text = (f"{n_rows} salvage-shaped rows, {len(unparsed)} unparsed planner answers over {len(runs)} runs "
+            f"({len(blind)} generated runs with no planner answer, {len(no_answer) - len(blind)} other runs "
+            f"without one)")
     if shapes:
         text += " — " + ", ".join(f"{k}: {v}" for k, v in sorted(shapes.items()))
-    return GateLine("SALVAGE", "FAIL" if n_rows or unparsed else "PASS", text, details)
+    if n_rows or unparsed:
+        status = "FAIL"
+    else:
+        status = "CANNOT" if blind else "PASS"
+    return GateLine("SALVAGE", status, text, details)
 
 
 def _metrics_data(run: Run) -> dict:
@@ -238,8 +255,10 @@ def token_lines(base_runs: list[Run], cand_slots: list[Slot]) -> list[GateLine]:
         every = {r.query_id for r in base_runs} | {r.query_id for r in cand_runs}
         zero = sorted(q for q in base if base[q] == 0)
         jumpy = sorted(q for q in base if base[q] != 0 and _jumpy(base_values[q]))
-        paired = sorted(q for q in base if q in cand and base[q] != 0 and q not in jumpy)
-        unpaired = sorted(every - set(paired) - set(zero) - set(jumpy))
+        comparable = [q for q in base if q in cand and base[q] != 0 and q not in jumpy]
+        cand_zero = sorted(q for q in comparable if cand[q] == 0)   # a zeroed accumulator is no saving
+        paired = sorted(q for q in comparable if cand[q] != 0)
+        unpaired = sorted(every - set(paired) - set(zero) - set(jumpy) - set(cand_zero))
         details = [f"baseline median 0, not in the sum: {q}" for q in zero]
         for q in jumpy:
             lo, hi = min(base_values[q]), max(base_values[q])
@@ -247,6 +266,7 @@ def token_lines(base_runs: list[Run], cand_slots: list[Slot]) -> list[GateLine]:
             after = f"{cand[q]:,.0f}" if q in cand else "no value"
             details.append(f"baseline runs spread {spread} (more than {JUMPY_SPREAD_PCT:g}%), "
                            f"not in the sum: {q} {lo:,.0f}..{hi:,.0f} -> {after}")
+        details += [f"candidate median 0, not in the sum: {q} {base[q]:,.0f} -> 0" for q in cand_zero]
         details += [f"no value on one side, not in the sum: {q}" for q in unpaired]
         if not paired:
             lines.append(GateLine(f"TOKENS {label}", "CANNOT", "no query has a value on both sides", details))
