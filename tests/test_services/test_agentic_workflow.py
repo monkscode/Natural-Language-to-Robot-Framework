@@ -949,7 +949,7 @@ class TestRateLimitSentenceFollowsTheRunsProvider:
 
     def test_vertex_is_not_told_to_switch_to_vertex(self, tmp_path):
         msg = self._error_message("vertex", tmp_path)
-        assert msg.startswith("Vertex AI is out of capacity or quota for this model")
+        assert msg.startswith("Vertex AI is out of capacity for this model")
         assert "switch MODEL_PROVIDER" not in msg
 
     def test_gemini_keeps_the_free_tier_advice(self, tmp_path):

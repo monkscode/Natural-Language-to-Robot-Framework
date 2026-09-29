@@ -77,16 +77,18 @@ def _rate_limited(provider: str | None = None) -> str:
     "local"). It is never read from exc.llm_provider -- LiteLLM labels Google AI
     Studio errors "vertex_ai" too -- nor from settings, because a caller may pass
     another provider for one run. Only a Google AI Studio user is told to switch
-    to Vertex; a Vertex user is told how to get more Vertex capacity; anyone else
+    to Vertex; a Vertex user is told to reserve capacity; anyone else
     gets no provider advice, because advice about the wrong provider is worse
-    than none.
+    than none. Google's Standard PayGo page says a 429 on these models is
+    shared-capacity contention, not a fixed quota, so there is no quota to request.
     """
     if provider == "vertex":
         return (
-            "Vertex AI is out of capacity or quota for this model right now (HTTP 429). "
-            "Wait a minute and try again. If it keeps happening, request more quota for "
-            "this model in the Google Cloud project that VERTEXAI_PROJECT in "
-            f"{_ENV_FILE} names."
+            "Vertex AI is out of capacity for this model right now (HTTP 429). "
+            "Wait a minute and try again. If it keeps happening, the Google Cloud "
+            f"project that VERTEXAI_PROJECT in {_ENV_FILE} names needs reserved "
+            "capacity for this model (Google's Priority PayGo or Provisioned "
+            "Throughput)."
         )
     if provider == "gemini":
         return (
