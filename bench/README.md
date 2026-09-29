@@ -139,3 +139,52 @@ mid-run, check `workflow_metrics` for strays from that time window.
 - `report.py` — median/p90 summary + baseline-vs-candidate compare
 - `baselines/` — one CSV per baseline, named `<date>-baseline.csv`
 - `runs/` — captured evidence per bench run (git-ignored)
+
+## Gating a bench
+
+`bench/gate.py` gives one verdict for a bench CSV. It compares the CSV with the one
+baseline, `bench/baselines/2026-09-24-develop-b57b683-bs-1.0.39.csv`, and reads only
+`bench/baselines/`, `bench/runs/` and `logs/` — no database, no network.
+
+```powershell
+python -m bench.gate bench/baselines/2026-10-01-what-changed.csv
+```
+
+It prints one line per gate and exits 0 when every gate passes, 1 when one fails, and 2
+when it cannot compare:
+
+| Gate | Passes when |
+|---|---|
+| PINS/INPUTS | same model/provider/optimization/dryrun pins and the same queries as the baseline, and every run's `bench/runs/<id>/` capture is present (otherwise REFUSED; a model or provider change needs a new baseline) |
+| PASS RATE | >= 96.7% after provider misses are re-run |
+| LOCATOR | every generated run has `locator_success_rate` 1.0 |
+| FLAKE | `flake_retries - dryrun_repairs` is 0 on every generated run |
+| SALVAGE | no crewai Converter (salvage) call in any run's traces, and every generated run's planner answer is captured and parses (a generated run with no planner answer in its traces makes the line CANNOT) |
+| TOKENS (x4) | crewai prompt <= +10%, crewai completion <= +15%, browser-use prompt <= +5%, browser-use completion <= +15% (sum of per-query medians vs the baseline; a query whose own baseline runs spread more than 25%, or whose candidate median is 0, is listed, not summed) |
+| HOLLOW | no hollow pass outside the registry {(q10, READ_NOT_PERFORMED), (q05, READ_LOCATOR_IS_THE_ANSWER)} (`src/backend/core/pass_quality.py`) |
+
+Reported, never gated: the verified pass rate (passes minus hollow passes), passes read by
+a numeric id, dollars, the browser-use cache share, the median paired token change, and the
+number of 429 / 503 log lines in the bench's window (it says whether timing can be trusted;
+timing is compared with `bench.report` against `2026-08-02-rule6-url-backstop.csv`).
+
+**Provider misses.** A run whose generation ended on a temporary provider failure — a 429, a
+5xx, a timeout or a connection error (its `test_runs.error_message` is one of the provider
+sentences, or a raw `litellm.RateLimitError` / `ServiceUnavailableError` /
+`InternalServerError` / `Timeout` / `APIConnectionError`) — is not a framework failure; a 400
+or a setup error is. The gate writes a
+one-query `--queries` file per missed query under `bench/private/gate-reruns/<csv stem>/`,
+prints the `run_bench.py` command for each, and exits 2 until they are re-run:
+
+```powershell
+python -m bench.gate <candidate.csv> --rerun <candidate>-rerun1-q03.csv --rerun <candidate>-rerun1-q10.csv
+```
+
+A re-run that misses on the provider again stays pending and may be re-run again; a real
+failure is never re-run.
+
+**The q10 add-on** (q10 run ten times after a planner change): write its query file with
+`python -m bench.gate --write-q10-queries <file>`, run
+`run_bench.py --queries <file> --repeats 10 --out <fresh>.csv`, then
+`python -m bench.gate --q10-addon <fresh>.csv`. It passes when at least 6 of the 10 tests
+read the titles.
