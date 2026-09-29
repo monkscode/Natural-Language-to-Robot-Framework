@@ -134,7 +134,7 @@ everything below is background on what they mean.
   you lock yourself out of your own instance with no one able to let you in.
 
 - **`VERTEXAI_PROJECT`** — the setup script prints this at the end (it is also the `project_id` field inside `credentials.json`).
-- **`VERTEXAI_LOCATION`** — where Vertex AI serves requests. Use `global` (recommended): Google routes each request to a region with capacity, so fewer runs fail with 429. A single region such as `asia-south1` (Mumbai) works only if it offers `ONLINE_MODEL`.
+- **`VERTEXAI_LOCATION`** — where Vertex AI serves requests. Use `global` (recommended) unless your data must stay in one region: Google routes each global request to a region with capacity, so fewer runs fail with 429, but global gives no data-residency guarantee. Otherwise pick a region that offers `ONLINE_MODEL`, such as `asia-south1` (Mumbai).
 - **`VERTEXAI_CREDENTIALS`** — already defaults to `credentials.json`; leave it as is. When running in Docker, `docker-compose.vertex.yml` rewrites it to the in-container path automatically.
 
 Everything else has sensible defaults. The database, internal service URLs, and inter-container networking are wired up automatically by Docker Compose — you don't need to touch them.

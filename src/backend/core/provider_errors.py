@@ -77,21 +77,22 @@ def _rate_limited(provider: str | None = None) -> str:
     "local"). It is never read from exc.llm_provider -- LiteLLM labels Google AI
     Studio errors "vertex_ai" too -- nor from settings, because a caller may pass
     another provider for one run. Only a Google AI Studio user is told to switch
-    to Vertex; a Vertex user is first told to use the global endpoint, then to
-    reserve capacity; anyone else gets no provider advice, because advice about
-    the wrong provider is worse than none. Google's Standard PayGo page says a
-    429 on these models is shared-capacity contention, not a fixed quota, so
-    there is no quota to request; Google recommends the global endpoint first.
+    to Vertex; a Vertex user is told to wait, then to use the global endpoint
+    unless their data must stay in one region; anyone else gets no provider
+    advice, because advice about the wrong provider is worse than none. Google's
+    Standard PayGo page says a 429 on these models is shared-capacity
+    contention, not a fixed quota, so there is no quota to request; Google
+    recommends the global endpoint. Google says the global endpoint gives no
+    data-residency guarantee. No paid Google product is suggested (owner: users
+    stay on free or minimal-cost tiers).
     """
     if provider == "vertex":
         return (
             "Vertex AI is out of capacity for this model right now (HTTP 429). "
             "Wait a minute and try again. If it keeps happening, set "
-            f"VERTEXAI_LOCATION in {_ENV_FILE} to global (Google then routes "
-            "requests to whichever region has capacity); if it is already global, "
-            "the Google Cloud project that VERTEXAI_PROJECT names needs reserved "
-            "capacity for this model (Google's Priority PayGo or Provisioned "
-            "Throughput)."
+            f"VERTEXAI_LOCATION in {_ENV_FILE} to global unless your data must "
+            "stay in one region (Google then routes requests to whichever region "
+            "has capacity)."
         )
     if provider == "gemini":
         return (
