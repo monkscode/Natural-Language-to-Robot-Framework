@@ -33,6 +33,7 @@ Depends on: bench/gate_inputs.py, bench/gate_checks.py, bench/gate_hollow.py.
 
 import argparse
 import sys
+import traceback
 from datetime import tzinfo
 from pathlib import Path
 
@@ -179,17 +180,29 @@ def main(argv: list[str] | None = None) -> int:
                         help="default: bench/private/gate-reruns/<candidate stem>")
     args = parser.parse_args(argv)
     if args.write_q10_queries:
-        text = {r["query_id"]: r["query"] for r in read_csv(REPO_ROOT / BASELINE_CSV)}["q10"]
-        print(f"wrote {write_query_file(args.write_q10_queries, 'q10', text)}")
-        return 0
-    if args.q10_addon:
-        lines = run_q10_addon(args.q10_addon, runs_dir=args.runs_dir)
-        print(format_report(f"q10 add-on — {args.q10_addon}", lines))
-        return exit_code(lines)
-    lines = run_gate(args.candidate, args.rerun, runs_dir=args.runs_dir,
-                     logs_dir=args.logs_dir, rerun_dir=args.rerun_dir)
-    title = (f"bench gate — candidate {args.candidate}\n"
-             f"baseline {BASELINE_CSV} (timing reference {TIMING_REFERENCE_CSV}; timing is not gated)")
+        title = f"q10 query file — {args.write_q10_queries}"
+    elif args.q10_addon:
+        title = f"q10 add-on — {args.q10_addon}"
+    else:
+        title = (f"bench gate — candidate {args.candidate}\n"
+                 f"baseline {BASELINE_CSV} (timing reference {TIMING_REFERENCE_CSV}; timing is not gated)")
+    # A crash is never a gate verdict: exit 1 would read as "a gate failed", so it exits 2.
+    try:
+        if args.write_q10_queries:
+            text = {r["query_id"]: r["query"] for r in read_csv(REPO_ROOT / BASELINE_CSV)}["q10"]
+            print(f"wrote {write_query_file(args.write_q10_queries, 'q10', text)}")
+            return 0
+        if args.q10_addon:
+            lines = run_q10_addon(args.q10_addon, runs_dir=args.runs_dir)
+        else:
+            lines = run_gate(args.candidate, args.rerun, runs_dir=args.runs_dir,
+                             logs_dir=args.logs_dir, rerun_dir=args.rerun_dir)
+    except GateRefused as exc:
+        lines = [GateLine("REFUSED", "REFUSED", str(exc))]
+    except Exception as exc:   # argparse's SystemExit and KeyboardInterrupt are not Exception
+        traceback.print_exc()
+        lines = [GateLine("REFUSED", "REFUSED", f"the gate crashed: {type(exc).__name__}: {exc} "
+                                                f"(traceback on stderr) — not a gate verdict")]
     print(format_report(title, lines))
     return exit_code(lines)
 

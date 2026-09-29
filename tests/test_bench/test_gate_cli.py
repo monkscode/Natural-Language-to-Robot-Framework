@@ -204,6 +204,27 @@ def test_write_q10_queries_writes_the_baseline_wording(tmp_path, capsys):
     assert json.loads(target.read_text(encoding="utf-8"))["queries"] == [{"id": "q10", "query": QUERIES["q10"]}]
 
 
+def test_a_crash_exits_2_with_the_traceback_on_stderr(tmp_path, capsys):
+    """A crash is not a gate verdict: exit 1 would read as "a gate failed"."""
+    write_bench(tmp_path, BASE_NAME)
+    cand, _ = write_bench(tmp_path, "cand")
+    Path(f"{cand}.meta.json").write_text("{not json", encoding="utf-8")
+    with patch("bench.gate.REPO_ROOT", tmp_path):
+        code = main([str(cand), "--logs-dir", str(tmp_path / "logs")])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "the gate crashed: JSONDecodeError" in captured.out and "not a gate verdict" in captured.out
+    assert captured.out.rstrip().endswith("CANNOT COMPARE (exit 2)")
+    assert "Traceback" in captured.err
+
+
+def test_write_q10_queries_without_a_baseline_is_refused(tmp_path, capsys):
+    target = tmp_path / "q10.json"
+    code, out = gate(tmp_path, ["--write-q10-queries", target], capsys)
+    assert code == 2 and "REFUSED" in out
+    assert not target.exists()
+
+
 def test_a_cp1252_stdout_gets_utf8_and_the_same_exit_code(tmp_path, capsys):
     """A piped run on Windows writes cp1252; a failed run's page text must neither crash nor garble."""
     write_bench(tmp_path, BASE_NAME)
