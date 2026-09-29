@@ -252,9 +252,10 @@ class TestProviderDidNotAnswer:
 
 VERTEX_RATE_LIMITED = (
     "Vertex AI is out of capacity for this model right now (HTTP 429). Wait a minute and "
-    "try again. If it keeps happening, the Google Cloud project that VERTEXAI_PROJECT in "
-    "src/backend/.env names needs reserved capacity for this model (Google's Priority "
-    "PayGo or Provisioned Throughput)."
+    "try again. If it keeps happening, set VERTEXAI_LOCATION in src/backend/.env to global "
+    "(Google then routes requests to whichever region has capacity); if it is already "
+    "global, the Google Cloud project that VERTEXAI_PROJECT names needs reserved capacity "
+    "for this model (Google's Priority PayGo or Provisioned Throughput)."
 )
 AI_STUDIO_RATE_LIMITED = (
     "The model provider rate-limited this request (quota exceeded). Wait a moment and try "
