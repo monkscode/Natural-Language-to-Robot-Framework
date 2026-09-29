@@ -194,6 +194,16 @@ async def startup_event():
     from src.backend.core.artifact_store import get_artifact_store
     get_artifact_store()
 
+    # LiteLLM's model list: if its download failed at import, keep the configured
+    # model known (schema enforcement + cost). Logs; never blocks startup.
+    try:
+        from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+        from src.backend.crew_ai.model_map_fallback import ensure_model_entry
+        ensure_model_entry(settings.MODEL_PROVIDER,
+                           resolve_model_string(settings.MODEL_PROVIDER, settings.ONLINE_MODEL))
+    except Exception as e:
+        logging.warning(f"[LLM] model-list check skipped: {e}")
+
     logging.info("Application startup complete.")
     _check_learning_health()
 

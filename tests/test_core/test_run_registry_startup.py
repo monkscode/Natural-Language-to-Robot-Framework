@@ -26,6 +26,7 @@ def _run_startup(calls, registry_side_effect):
     with (
         patch("src.backend.auth.security_posture.validate_security_posture"),
         patch("src.backend.core.artifact_store.get_artifact_store"),
+        patch("src.backend.crew_ai.model_map_fallback.ensure_model_entry"),
         patch.object(main, "_check_learning_health"),
         patch.object(main, "init_auth_db"),
         patch.object(main, "init_org_db"),
