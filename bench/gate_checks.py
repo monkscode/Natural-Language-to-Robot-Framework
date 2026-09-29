@@ -34,7 +34,9 @@ Gates (each a GateLine; PASS / FAIL / CANNOT):
   (max > 1.25 x min; owner, 2026-09-28): it cannot anchor a +5% sum (q01's
   browser-use prompt swings 22,848 -> 35,712 between baseline runs). Any single
   query moving more than 25% either way is LISTED, never
-  gated (q10 moved +52.7% on the same code).
+  gated (q10 moved +52.7% on the same code). A family whose summed medians fall
+  more than 25% below the baseline reads CANNOT: a lost measurement until shown
+  otherwise (a broken shared token accumulator drops one agent), never a PASS.
 REPORTED only (INFO): dollars (llm_cost_usd), the browser-use cache share, the
 median paired_pct of llm_tokens (bench_lib.compare_by_query), and the 429 window:
 429 / 503 signature lines in logs/application.log.1 + application.log (the log
@@ -65,6 +67,7 @@ TOKEN_FAMILIES = (  # (label, workflow_metrics data key, limit %)
 )
 LISTED_MOVE_PCT = 25.0
 JUMPY_SPREAD_PCT = 25.0   # a query's own baseline runs spread more than this -> listed, not summed
+LOST_DROP_PCT = 25.0      # a family's summed medians fall more than this -> CANNOT, a lost measurement
 PLANNER_PROMPT = "You are Test Automation Planner"
 _CONVERTER_INSTRUCTIONS = {"Ensure your final answer": "1.8.1 wording",
                            "Format your final answer": "1.15 wording"}
@@ -281,8 +284,13 @@ def token_lines(base_runs: list[Run], cand_slots: list[Slot]) -> list[GateLine]:
             move = (cand[q] - base[q]) * 100 / base[q]
             if abs(move) > LISTED_MOVE_PCT:
                 details.append(f"listed, not gated: {q} {base[q]:,.0f} -> {cand[q]:,.0f} ({move:+.1f}%)")
-        text = (f"{pct:+.1f}% (limit +{limit:g}%): sum of per-query medians {s_base:,.0f} -> "
-                f"{s_cand:,.0f} over {len(paired)} queries")
+        sums = f"sum of per-query medians {s_base:,.0f} -> {s_cand:,.0f} over {len(paired)} queries"
+        if s_cand * 100 < s_base * (100 - LOST_DROP_PCT):   # multiply first: exactly -25% is not a drop
+            lines.append(GateLine(f"TOKENS {label}", "CANNOT", (
+                f"{pct:+.1f}%: summed medians fell more than {LOST_DROP_PCT:g}% below the baseline — a lost "
+                f"measurement until shown otherwise (a genuine saving needs a new baseline): {sums}"), details))
+            continue
+        text = f"{pct:+.1f}% (limit +{limit:g}%): {sums}"
         lines.append(GateLine(f"TOKENS {label}", "PASS" if pct <= limit else "FAIL", text, details))
     return lines
 

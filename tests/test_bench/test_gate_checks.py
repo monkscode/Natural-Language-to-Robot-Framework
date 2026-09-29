@@ -242,6 +242,24 @@ class TestTokens:
         assert token_lines(base, slots_of(tmp_path, "at", capture_kw=at_limit))[2].status == "PASS"
         assert token_lines(base, slots_of(tmp_path, "over", capture_kw=over))[2].status == "FAIL"
 
+    def test_a_family_whose_summed_medians_fall_more_than_25_percent_cannot_be_compared(self, tmp_path):
+        # the shape of a broken shared _token_usage accumulator: one agent uncounted, every query 8,000 -> 4,800
+        cap = {(q, r): {"tokens": {**TOKENS, "crewai_prompt_tokens": 4800}}
+               for q in [f"q{i:02d}" for i in range(1, 11)] for r in (1, 2, 3)}
+        lines = token_lines(runs_of(tmp_path, "base"), slots_of(tmp_path, capture_kw=cap))
+        assert [line.status for line in lines] == ["CANNOT", "PASS", "PASS", "PASS"]
+        assert lines[0].text == ("-40.0%: summed medians fell more than 25% below the baseline — a lost measurement "
+                                 "until shown otherwise (a genuine saving needs a new baseline): sum of per-query "
+                                 "medians 80,000 -> 48,000 over 10 queries")
+        assert lines[0].details == [f"listed, not gated: q{i:02d} 8,000 -> 4,800 (-40.0%)" for i in range(1, 11)]
+
+    @pytest.mark.parametrize("value, pct", [(6000, "-25.0%"), (6080, "-24.0%")])
+    def test_a_drop_of_25_percent_or_less_still_passes(self, tmp_path, value, pct):
+        cap = {(q, r): {"tokens": {**TOKENS, "crewai_prompt_tokens": value}}
+               for q in [f"q{i:02d}" for i in range(1, 11)] for r in (1, 2, 3)}
+        line = token_lines(runs_of(tmp_path, "base"), slots_of(tmp_path, capture_kw=cap))[0]
+        assert line.status == "PASS" and line.text.startswith(f"{pct} (limit +10%)")
+
     def test_one_query_over_25_percent_is_listed_not_gated(self, tmp_path):
         more = {**TOKENS, "browser_use_prompt_tokens": 42000}  # q10 +40%; the sum moves +4%
         cap = {("q10", r): {"tokens": more} for r in (1, 2, 3)}
