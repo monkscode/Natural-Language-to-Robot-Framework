@@ -120,6 +120,30 @@ def test_a_broken_pin_file_never_raises(failed_download, caplog, tmp_path):
     assert "may be off" in failure[0].getMessage()
 
 
+def test_a_failed_attempt_is_retried_on_the_next_call(failed_download, caplog):
+    """A one-off failure (here: the pin file cannot be read once) must not leave the
+    model unknown for the life of the process: the next call retries."""
+    real_text = fallback.PINNED_FILE.read_text(encoding="utf-8")
+
+    class FlakyFile:
+        reads = 0
+
+        def read_text(self, encoding=None):
+            self.reads += 1
+            if self.reads == 1:
+                raise OSError("simulated transient read failure")
+            return real_text
+
+    flaky = FlakyFile()
+    with patch.object(fallback, "PINNED_FILE", flaky), \
+         caplog.at_level(logging.WARNING, logger=fallback.__name__):
+        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
+        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
+    assert flaky.reads == 2
+    assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is True
+    assert [r.levelname for r in caplog.records if r.name == fallback.__name__] == ["ERROR", "WARNING"]
+
+
 def test_the_pin_file_holds_the_three_entries():
     doc = json.loads(fallback.PINNED_FILE.read_text(encoding="utf-8"))
     assert doc["pinned_on"] == "2026-09-27"

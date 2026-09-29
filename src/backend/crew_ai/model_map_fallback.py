@@ -15,7 +15,8 @@ from LiteLLM's online list, pinned_model_entries.json) to litellm.model_cost
 ONLY when LiteLLM does not know the model, adding only missing keys, and logs a
 WARNING naming the pinned date. If the model is still not schema-capable it
 logs an ERROR. After a good download, or with a litellm that bundles the model,
-it does nothing. It never raises: a failure of its own is logged as an ERROR.
+it does nothing. It never raises: a failure of its own is logged as an ERROR and
+the attempt is retried on the next call.
 
 To add a model (a one-time step per model): copy its entries from LiteLLM's
 online list into pinned_model_entries.json, refresh the existing entries from
@@ -59,14 +60,14 @@ def ensure_model_entry(model_provider: str, routed_model: str) -> None:
     """Make routed_model known to LiteLLM if its model list lacks it.
 
     Cloud providers only; Ollama models are neither priced nor schema-enforced.
-    Runs once per model per process and is safe to call from any thread.
+    Runs once per model per process; an attempt that failed is retried on the next
+    call. Safe to call from any thread.
     """
     if model_provider not in _CLOUD_PROVIDERS:
         return
     with _lock:
         if routed_model in _checked:
             return
-        _checked.add(routed_model)
         try:
             if not _known(routed_model):
                 pinned = json.loads(PINNED_FILE.read_text(encoding="utf-8"))
@@ -93,3 +94,5 @@ def ensure_model_entry(model_provider: str, routed_model: str) -> None:
                 "Model-list fallback failed for %s: schema enforcement and pricing for it may be off.",
                 routed_model, exc_info=True,
             )
+        else:
+            _checked.add(routed_model)
