@@ -2,7 +2,7 @@
 
 Usage (repo root; reads bench/baselines, bench/runs and logs/ — no database, no network):
 
-    python -m bench.gate <candidate.csv> [--rerun <rerun.csv> ...]
+    python -m bench.gate <candidate.csv> [--rerun <r1.csv> --rerun <r2.csv> ...]
     python -m bench.gate --q10-addon <q10x10.csv>
     python -m bench.gate --write-q10-queries <path.json>
 
@@ -17,12 +17,12 @@ had nothing to measure).
 
 When provider misses await a re-run it writes one one-query --queries file per
 query under bench/private/gate-reruns/<candidate stem>/ (or --rerun-dir) and
-prints the bench/run_bench.py command for each; pass the resulting CSVs back with
---rerun, in the order they were run.
+prints the bench/run_bench.py command for each; pass each resulting CSV back with
+its own --rerun flag, in the order they were run.
 
-It replaces the per-session private copies under
-bench/private/wrongel/fix/session{3,4,5}/ (kept as evidence, no longer run).
-It lives outside bench/run_bench.py on purpose: that file carries two conflict
+It replaces the private copies bench/private/e2_gate_check.py and
+bench/private/wrongel/fix/session4/bench/gates.py (kept as evidence, no longer
+run). It lives outside bench/run_bench.py on purpose: that file carries two conflict
 hunks with the crewai-upgrade branch, and the gate must not import it (it
 imports config, psycopg and requests).
 
@@ -112,7 +112,8 @@ def run_gate(candidate_csv: Path, rerun_csvs: list[Path] | None = None, *,
     if rate.status == "PENDING":
         target = rerun_dir or REPO_ROOT / "bench" / "private" / "gate-reruns" / candidate_csv.stem
         rate.details += [f"run: {c}" for c in write_rerun_files(slots, target, candidate_csv, len(rerun_csvs))]
-        rate.details.append("then: python -m bench.gate <candidate.csv> --rerun <each re-run CSV, in order>")
+        rate.details.append("then: python -m bench.gate <candidate.csv> --rerun <r1.csv> --rerun <r2.csv> ... "
+                            "(one --rerun per re-run CSV, in the order run)")
     lines.append(rate)
     lines += [locator_line(slots), flake_line(slots), salvage_line(slots)]
     lines += token_lines(base_runs, slots)

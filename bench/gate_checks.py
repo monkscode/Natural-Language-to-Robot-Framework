@@ -24,8 +24,9 @@ Gates (each a GateLine; PASS / FAIL / CANNOT):
 - TOKENS, four families gated SEPARATELY from each run's workflow_metrics.json
   (the CSV carries only crewai + browser-use sums): the SUM of per-query medians,
   candidate vs baseline, must not grow more than crewai prompt +10%, crewai
-  completion +15%, browser-use prompt +5%, browser-use completion +15% (~3x the
-  same-code noise 3.2 / 4.7 / 0.5 / 4.3% measured on 3 same-code pairs). A query
+  completion +15%, browser-use prompt +5%, browser-use completion +15% (the
+  same-code noise measured on 3 same-code pairs is 3.2 / 4.7 / 0.5 / 4.3%, about
+  3x, 3x, 10x and 3.5x below each limit). A query
   whose baseline median is 0, or that has no value on one side, is listed and left
   out of the sum. So is a CANDIDATE median of 0 against a non-zero baseline: a
   zeroed token accumulator, never a saving (owner, 2026-09-29; the false pass
