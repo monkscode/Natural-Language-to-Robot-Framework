@@ -980,7 +980,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # them as a nested google.rpc JSON blob. Translate the ones we recognise
         # into an instruction; anything else keeps the raw text, redacted — the
         # provider quotes the failing request URL, which carries the API key.
-        setup_hint = friendly_setup_error(e) or friendly_provider_error(e)
+        setup_hint = friendly_setup_error(e, model_provider) or friendly_provider_error(e)
         message = setup_hint or f"An error occurred: {redact_secrets(str(e))}"
         yield {"status": "error", "message": message,
                "workflow_id": workflow_id}

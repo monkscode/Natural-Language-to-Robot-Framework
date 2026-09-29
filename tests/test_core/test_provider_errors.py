@@ -248,3 +248,56 @@ class TestProviderDidNotAnswer:
                               model="llama3", llm_provider="ollama_chat")
         msg = friendly_provider_error(exc)
         assert msg.startswith("Your local model did not answer.")
+
+
+VERTEX_RATE_LIMITED = (
+    "Vertex AI is out of capacity for this model right now (HTTP 429). Wait a minute and "
+    "try again. If it keeps happening, set VERTEXAI_LOCATION in src/backend/.env to global "
+    "unless your data must stay in one region (Google then routes requests to whichever "
+    "region has capacity)."
+)
+AI_STUDIO_RATE_LIMITED = (
+    "The model provider rate-limited this request (quota exceeded). Wait a moment and try "
+    "again. If it keeps happening, the free tier is likely too small for back-to-back runs "
+    "— switch MODEL_PROVIDER to vertex in src/backend/.env, or request more quota."
+)
+NEUTRAL_RATE_LIMITED = (
+    "The model provider rate-limited this request (quota exceeded). Wait a moment and try again."
+)
+
+
+class TestRateLimitSentencePerProvider:
+    """W5.1 Task 2b: the 429 sentence follows the run's own model_provider. It used to
+    tell every user, Vertex users included, to switch MODEL_PROVIDER to vertex."""
+
+    VERTEX_429 = "litellm.RateLimitError: VertexAIException - 429 Resource exhausted, quota exceeded"
+
+    def _ai_studio_429(self, quota_id):
+        body = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+             "violations": [{"quotaId": quota_id}]}]}}
+        # LiteLLM labels a Google AI Studio error "vertex_ai" too: the label is no guide.
+        return litellm.RateLimitError(message="VertexAIException - " + json.dumps(body),
+                                      llm_provider="vertex_ai", model="gemini-3.5-flash")
+
+    def test_vertex_is_never_told_to_switch_to_vertex(self):
+        assert friendly_setup_error(Exception(self.VERTEX_429), provider="vertex") == VERTEX_RATE_LIMITED
+
+    def test_gemini_per_minute_keeps_the_free_tier_advice(self):
+        exc = self._ai_studio_429("GenerateRequestsPerMinutePerProjectPerModel-FreeTier")
+        assert friendly_setup_error(exc, provider="gemini") == AI_STUDIO_RATE_LIMITED
+
+    @pytest.mark.parametrize("provider", ["gemini", "vertex", "local", None])
+    def test_a_per_day_quota_is_still_matched_first(self, provider):
+        exc = self._ai_studio_429("GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+        msg = friendly_setup_error(exc, provider=provider)
+        assert msg.startswith("The model provider's daily quota for this model is used up")
+
+    @pytest.mark.parametrize("provider", ["local", None, "something-else"])
+    def test_no_provider_advice_without_a_known_cloud_provider(self, provider):
+        assert friendly_setup_error(Exception(self.VERTEX_429), provider=provider) == NEUTRAL_RATE_LIMITED
+
+    def test_other_setup_sentences_do_not_depend_on_the_provider(self):
+        for provider in ("vertex", "gemini", "local", None):
+            msg = friendly_setup_error(Exception(AI_STUDIO_BAD_KEY), provider=provider)
+            assert "GEMINI_API_KEY" in msg

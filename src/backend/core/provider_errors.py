@@ -70,12 +70,40 @@ def _daily_quota() -> str:
     )
 
 
-def _rate_limited() -> str:
+def _rate_limited(provider: str | None = None) -> str:
+    """The per-minute rate-limit sentence for the run's provider (W5.1 Task 2b).
+
+    provider is run_agentic_workflow's model_provider ("vertex", "gemini" or
+    "local"). It is never read from exc.llm_provider -- LiteLLM labels Google AI
+    Studio errors "vertex_ai" too -- nor from settings, because a caller may pass
+    another provider for one run. Only a Google AI Studio user is told to switch
+    to Vertex; a Vertex user is told to wait, then to use the global endpoint
+    unless their data must stay in one region; anyone else gets no provider
+    advice, because advice about the wrong provider is worse than none. Google's
+    Standard PayGo page says a 429 on these models is shared-capacity
+    contention, not a fixed quota, so there is no quota to request; Google
+    recommends the global endpoint. Google says the global endpoint gives no
+    data-residency guarantee. No paid Google product is suggested (owner: users
+    stay on free or minimal-cost tiers).
+    """
+    if provider == "vertex":
+        return (
+            "Vertex AI is out of capacity for this model right now (HTTP 429). "
+            "Wait a minute and try again. If it keeps happening, set "
+            f"VERTEXAI_LOCATION in {_ENV_FILE} to global unless your data must "
+            "stay in one region (Google then routes requests to whichever region "
+            "has capacity)."
+        )
+    if provider == "gemini":
+        return (
+            "The model provider rate-limited this request (quota exceeded). Wait a "
+            "moment and try again. If it keeps happening, the free tier is likely too "
+            "small for back-to-back runs — switch MODEL_PROVIDER to vertex in "
+            f"{_ENV_FILE}, or request more quota."
+        )
     return (
         "The model provider rate-limited this request (quota exceeded). Wait a "
-        "moment and try again. If it keeps happening, the free tier is likely too "
-        "small for back-to-back runs — switch MODEL_PROVIDER to vertex in "
-        f"{_ENV_FILE}, or request more quota."
+        "moment and try again."
     )
 
 
@@ -139,16 +167,21 @@ _RULES = (
 )
 
 
-def friendly_setup_error(exc: BaseException) -> str | None:
-    """Return an actionable message for a known setup failure, else None."""
+def friendly_setup_error(exc: BaseException, provider: str | None = None) -> str | None:
+    """Return an actionable message for a known setup failure, else None.
+
+    provider is the run's model_provider ("vertex", "gemini", "local" or None);
+    only the rate-limit sentence depends on it (see _rate_limited).
+    """
     text = str(exc)
     if not text:
         return None
     for matches, build in _RULES:
         if matches(text):
+            message = build(provider) if build is _rate_limited else build()
             # The raw text is never interpolated into the reply, but redact anyway
             # so a future message that quotes context cannot leak a key.
-            return redact_secrets(build())
+            return redact_secrets(message)
     return None
 
 

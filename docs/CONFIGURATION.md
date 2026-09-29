@@ -496,7 +496,7 @@ GOOGLE_REDIRECT_URI=http://localhost:5000/auth/google/callback
 # AI Provider
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-gcp-project-id
-VERTEXAI_LOCATION=us-central1
+VERTEXAI_LOCATION=global
 ONLINE_MODEL=gemini-3.5-flash
 
 # Access — set BEFORE the first start
