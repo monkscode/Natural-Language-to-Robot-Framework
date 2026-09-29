@@ -4,16 +4,18 @@ At ``import litellm``, LiteLLM 1.75.3 downloads its model list from GitHub
 (5 s timeout) and, on ANY failure, silently loads the copy bundled in the
 package (litellm/litellm_core_utils/get_model_cost_map.py). That copy has no
 gemini-3.5-flash, so one failed download at process start turns off schema
-enforcement for the planner and the assembler (get_llm drops response_format)
-and makes the model's cost read $0 for the life of the process, with nothing
-logged.
+enforcement for the planner and the assembler (get_llm drops response_format),
+moves the system prompt into the user turn of every request, and makes the
+model's cost read $0 for the life of the process. LiteLLM logs nothing about
+the failed download; the only traces are get_llm's INFO line and a cost-lookup
+WARNING, and neither names the cause.
 
 ensure_model_entry() adds our pinned copy of the model's entries (verbatim
 from LiteLLM's online list, pinned_model_entries.json) to litellm.model_cost
 ONLY when LiteLLM does not know the model, adding only missing keys, and logs a
 WARNING naming the pinned date. If the model is still not schema-capable it
 logs an ERROR. After a good download, or with a litellm that bundles the model,
-it does nothing. It never raises.
+it does nothing. It never raises: a failure of its own is logged as an ERROR.
 
 To add a model (a one-time step per model): copy its entries from LiteLLM's
 online list into pinned_model_entries.json, refresh the existing entries from
@@ -75,9 +77,9 @@ def ensure_model_entry(model_provider: str, routed_model: str) -> None:
                     litellm.model_cost.setdefault(key, dict(entry))
                 if entries:
                     logger.warning(
-                        "LiteLLM's model list has no entry for %s: its download from GitHub "
-                        "failed when litellm was imported. Using our copy of the entry, pinned "
-                        "on %s; its prices may be out of date.",
+                        "LiteLLM's model list has no entry for %s (most likely its download from GitHub "
+                        "failed when litellm was imported). Using our copy of its entries, pinned on %s; "
+                        "their prices may be out of date.",
                         routed_model, pinned["pinned_on"],
                     )
             if not litellm.utils.supports_response_schema(model=routed_model):
@@ -87,4 +89,7 @@ def ensure_model_entry(model_provider: str, routed_model: str) -> None:
                     routed_model, "" if _known(routed_model) else ", and its cost reads $0",
                 )
         except Exception:
-            logger.warning("Model-list fallback failed for %s", routed_model, exc_info=True)
+            logger.error(
+                "Model-list fallback failed for %s: schema enforcement and pricing for it may be off.",
+                routed_model, exc_info=True,
+            )

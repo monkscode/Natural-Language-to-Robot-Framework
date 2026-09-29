@@ -11,7 +11,7 @@ Depends on: src/backend/crew_ai/model_map_fallback.py, litellm 1.75.3.
 
 import json
 import logging
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import litellm
 import pytest
@@ -115,6 +115,9 @@ def test_a_broken_pin_file_never_raises(failed_download, caplog, tmp_path):
          caplog.at_level(logging.WARNING, logger=fallback.__name__):
         fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
     assert any(r.exc_info for r in caplog.records)
+    failure = [r for r in caplog.records if r.exc_info]
+    assert [r.levelname for r in failure] == ["ERROR"]
+    assert "may be off" in failure[0].getMessage()
 
 
 def test_the_pin_file_holds_the_three_entries():
@@ -152,3 +155,17 @@ def test_startup_checks_the_configured_model():
         with pytest.raises(RuntimeError, match="stop here"):
             asyncio.run(main.startup_event())
     assert seen == [("vertex", "vertex_ai/gemini-3.5-flash")]
+
+
+def test_a_failing_check_never_blocks_startup(caplog):
+    import asyncio
+
+    from src.backend import main
+
+    health = MagicMock(side_effect=RuntimeError("stop here"))
+    with patch("src.backend.auth.security_posture.validate_security_posture"),          patch("src.backend.core.artifact_store.get_artifact_store"),          patch.object(main, "_check_learning_health", health),          patch("src.backend.crew_ai.model_map_fallback.ensure_model_entry",
+               side_effect=RuntimeError("boom")),          patch.object(main.settings, "MODEL_PROVIDER", "vertex"),          patch.object(main.settings, "ONLINE_MODEL", "gemini-3.5-flash"),          caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError, match="stop here"):
+            asyncio.run(main.startup_event())
+    health.assert_called_once()
+    assert any("model-list check skipped" in r.getMessage() for r in caplog.records)
