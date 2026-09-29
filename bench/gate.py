@@ -54,6 +54,7 @@ from bench.gate_inputs import (
     build_slots,
     check_captures,
     check_pins,
+    check_same_code,
     check_same_queries,
     load_runs,
     pass_rate_line,
@@ -96,6 +97,7 @@ def run_gate(candidate_csv: Path, rerun_csvs: list[Path] | None = None, *,
         rerun_runs = []
         for path in rerun_csvs:
             check_pins(baseline_csv, path)
+            check_same_code(candidate_csv, path)
             rerun_runs += load_runs(path, runs_dir)
         check_same_queries([r.row for r in base_runs], [r.row for r in cand_runs], candidate_csv)
         check_captures(base_runs)

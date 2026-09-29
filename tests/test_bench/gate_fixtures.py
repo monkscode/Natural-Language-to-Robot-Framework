@@ -12,6 +12,7 @@ from pathlib import Path
 from bench.bench_lib import CSV_COLUMNS
 
 PINS = {
+    "git_sha": "0123456789abcdef0123456789abcdef01234567",
     "nlrf_pins": {"optimization_enabled": False, "model_provider": "vertex",
                   "online_model": "gemini-3.5-flash", "dryrun_enabled": True},
     "browser_service": {"model_provider": "vertex", "headless": True},

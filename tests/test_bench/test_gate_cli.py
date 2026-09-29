@@ -119,6 +119,25 @@ def test_a_rerun_recorded_under_another_model_is_refused(tmp_path, capsys):
     assert code == 2 and "a new baseline is needed" in out
 
 
+def test_a_rerun_recorded_on_other_code_is_refused(tmp_path, capsys):
+    cand, wf = pending_bench(tmp_path)
+    other = "f" * 40
+    rerun = write_csv(tmp_path / "bench" / "baselines" / "r.csv", [row("q10", 1, wf)], {**PINS, "git_sha": other})
+    code, out = gate(tmp_path, [cand, "--rerun", rerun], capsys)
+    assert code == 2 and "REFUSED" in out
+    assert (f"{rerun}: re-run recorded at {other}, candidate at {PINS['git_sha']} — re-run on the "
+            f"candidate's code") in out
+
+
+def test_a_rerun_with_no_git_sha_is_refused(tmp_path, capsys):
+    cand, wf = pending_bench(tmp_path)
+    meta = {k: v for k, v in PINS.items() if k != "git_sha"}
+    rerun = write_csv(tmp_path / "bench" / "baselines" / "r.csv", [row("q10", 1, wf)], meta)
+    code, out = gate(tmp_path, [cand, "--rerun", rerun], capsys)
+    assert code == 2 and "REFUSED" in out
+    assert f"{rerun}: re-run recorded at no git_sha, candidate at {PINS['git_sha']}" in out
+
+
 def tokens_line(out: str, family: str) -> list[str]:
     return next(line for line in out.splitlines() if line.startswith(f"TOKENS {family} ")).split()
 

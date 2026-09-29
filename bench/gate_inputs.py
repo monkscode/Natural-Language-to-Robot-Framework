@@ -31,7 +31,9 @@ candidate order) of the same query whose current row is a provider miss. A re-ru
 that misses on the provider again leaves the slot a provider miss (pending — it
 may be re-run again); one that fails for any other reason makes it a real
 failure; a green one makes it a pass. A re-run row with no provider-miss slot to
-replace is refused: real failures are never re-rolled.
+replace is refused: real failures are never re-rolled. So is a re-run CSV recorded
+on other code (check_same_code: its `.meta.json` git_sha must equal the
+candidate's).
 
 Pass rate: passes / slots, rounded to one decimal as bench/report.py does (29/30
 reads 96.7% and passes the 96.7% gate). FAIL when even every pending miss passing
@@ -173,6 +175,20 @@ def check_pins(baseline_csv: Path, other_csv: Path) -> None:
         raise GateRefused(f"{other_csv}: the model or provider differs from the baseline — "
                           f"a new baseline is needed, never a comparison: {'; '.join(mismatches)}")
     raise GateRefused(f"{other_csv} was not run with the bench pins: {'; '.join(mismatches)}")
+
+
+def check_same_code(candidate_csv: Path, rerun_csv: Path) -> None:
+    """Refuse a re-run unless it was recorded on the candidate's code.
+
+    Both `.meta.json` files must carry the same non-empty `git_sha` (bench_lib.build_meta
+    records it, or None when git cannot answer): a re-run on other code would replace a
+    candidate's provider miss with another commit's result.
+    """
+    cand_sha = (load_meta(candidate_csv) or {}).get("git_sha") or ""
+    rerun_sha = (load_meta(rerun_csv) or {}).get("git_sha") or ""
+    if not cand_sha or cand_sha != rerun_sha:
+        raise GateRefused(f"{rerun_csv}: re-run recorded at {rerun_sha or 'no git_sha'}, candidate at "
+                          f"{cand_sha or 'no git_sha'} — re-run on the candidate's code")
 
 
 def check_same_queries(base_rows: list[dict], cand_rows: list[dict], cand_path: Path) -> None:
