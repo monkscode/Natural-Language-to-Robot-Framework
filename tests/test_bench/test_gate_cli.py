@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from bench.gate import exit_code, main, run_gate
 from bench.gate_inputs import BASELINE_CSV, GateLine
 from tests.test_bench.gate_fixtures import (
@@ -194,6 +196,29 @@ def test_q10_addon_exit_codes(tmp_path, capsys):
     assert gate(tmp_path, ["--q10-addon", q10_csv(tmp_path, 5)], capsys)[0] == 1
     code, out = gate(tmp_path, ["--q10-addon", q10_csv(tmp_path, 6, n=9)], capsys)
     assert code == 2 and "exactly 10 runs" in out
+
+
+@pytest.mark.parametrize("case, expected", [
+    ("another query", "off-query: ['q01 r5 "),
+    ("another wording", "off-query: ['q10 r5 "),
+    ("another model", "a new baseline is needed"),
+])
+def test_q10_addon_refusals(tmp_path, capsys, case, expected):
+    write_bench(tmp_path, BASE_NAME)
+    rows, meta = [], json.loads(json.dumps(PINS))
+    for i in range(1, 11):
+        wf = wf_id("addon", "q10", i)
+        write_capture(tmp_path / "bench" / "runs", wf, code=GOOD_TESTS["q10"])
+        rows.append(row("q10", i, wf))
+    if case == "another query":
+        rows[4] = row("q01", 5, rows[4]["workflow_id"])
+    elif case == "another wording":
+        rows[4]["query"] = QUERIES["q10"].replace("20 books", "21 books")
+    else:
+        meta["nlrf_pins"]["online_model"] = "gemini-4-flash"
+    addon = write_csv(tmp_path / "bench" / "baselines" / "q10x10.csv", rows, meta)
+    code, out = gate(tmp_path, ["--q10-addon", addon], capsys)
+    assert code == 2 and "REFUSED" in out and expected in out
 
 
 def test_write_q10_queries_writes_the_baseline_wording(tmp_path, capsys):
