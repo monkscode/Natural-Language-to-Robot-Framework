@@ -70,12 +70,34 @@ def _daily_quota() -> str:
     )
 
 
-def _rate_limited() -> str:
+def _rate_limited(provider: str | None = None) -> str:
+    """The per-minute rate-limit sentence for the run's provider (W5.1 Task 2b).
+
+    provider is run_agentic_workflow's model_provider ("vertex", "gemini" or
+    "local"). It is never read from exc.llm_provider -- LiteLLM labels Google AI
+    Studio errors "vertex_ai" too -- nor from settings, because a caller may pass
+    another provider for one run. Only a Google AI Studio user is told to switch
+    to Vertex; a Vertex user is told how to get more Vertex capacity; anyone else
+    gets no provider advice, because advice about the wrong provider is worse
+    than none.
+    """
+    if provider == "vertex":
+        return (
+            "Vertex AI is out of capacity or quota for this model right now (HTTP 429). "
+            "Wait a minute and try again. If it keeps happening, request more quota for "
+            "this model in the Google Cloud project that VERTEXAI_PROJECT in "
+            f"{_ENV_FILE} names."
+        )
+    if provider == "gemini":
+        return (
+            "The model provider rate-limited this request (quota exceeded). Wait a "
+            "moment and try again. If it keeps happening, the free tier is likely too "
+            "small for back-to-back runs — switch MODEL_PROVIDER to vertex in "
+            f"{_ENV_FILE}, or request more quota."
+        )
     return (
         "The model provider rate-limited this request (quota exceeded). Wait a "
-        "moment and try again. If it keeps happening, the free tier is likely too "
-        "small for back-to-back runs — switch MODEL_PROVIDER to vertex in "
-        f"{_ENV_FILE}, or request more quota."
+        "moment and try again."
     )
 
 
@@ -139,16 +161,21 @@ _RULES = (
 )
 
 
-def friendly_setup_error(exc: BaseException) -> str | None:
-    """Return an actionable message for a known setup failure, else None."""
+def friendly_setup_error(exc: BaseException, provider: str | None = None) -> str | None:
+    """Return an actionable message for a known setup failure, else None.
+
+    provider is the run's model_provider ("vertex", "gemini", "local" or None);
+    only the rate-limit sentence depends on it (see _rate_limited).
+    """
     text = str(exc)
     if not text:
         return None
     for matches, build in _RULES:
         if matches(text):
+            message = build(provider) if build is _rate_limited else build()
             # The raw text is never interpolated into the reply, but redact anyway
             # so a future message that quotes context cannot leak a key.
-            return redact_secrets(build())
+            return redact_secrets(message)
     return None
 
 

@@ -918,3 +918,45 @@ class TestProviderDidNotAnswerReachesTheStream:
         error = next(e for e in events if e.get("status") == "error")
         assert error["message"].startswith("The model provider did not answer.")
         assert "workflow_id" in error
+
+
+class TestRateLimitSentenceFollowsTheRunsProvider:
+    """W5.1 Task 2b: the 429 sentence comes from run_agentic_workflow's model_provider,
+    not from exc.llm_provider (LiteLLM labels Google AI Studio errors "vertex_ai" too)
+    and not from settings (a caller may pass another provider for one run)."""
+
+    def _error_message(self, provider, tmp_path):
+        import litellm
+
+        from src.backend.services import workflow_service
+
+        exc = litellm.RateLimitError(message="VertexAIException - 429 Resource exhausted, quota exceeded",
+                                     llm_provider="vertex_ai", model="gemini-3.5-flash")
+        credentials = tmp_path / "credentials.json"
+        credentials.write_text("{}", encoding="utf-8")
+        with patch("src.backend.services.workflow_service.run_crew", side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
+             patch.object(workflow_service.settings, "VERTEXAI_PROJECT", "p"), \
+             patch.object(workflow_service.settings, "VERTEXAI_LOCATION", "global"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key",
+                                     "VERTEXAI_CREDENTIALS": str(credentials)}):
+            events = list(workflow_service.run_agentic_workflow(
+                "login to github.com", provider, "gemini-3.5-flash"))
+        error = next(e for e in events if e.get("status") == "error")
+        assert "workflow_id" in error
+        return error["message"]
+
+    def test_vertex_is_not_told_to_switch_to_vertex(self, tmp_path):
+        msg = self._error_message("vertex", tmp_path)
+        assert msg.startswith("Vertex AI is out of capacity or quota for this model")
+        assert "switch MODEL_PROVIDER" not in msg
+
+    def test_gemini_keeps_the_free_tier_advice(self, tmp_path):
+        msg = self._error_message("gemini", tmp_path)
+        assert "switch MODEL_PROVIDER to vertex" in msg
+
+    def test_local_gets_no_provider_advice(self, tmp_path):
+        msg = self._error_message("local", tmp_path)
+        assert msg == ("The model provider rate-limited this request (quota exceeded). "
+                       "Wait a moment and try again.")
