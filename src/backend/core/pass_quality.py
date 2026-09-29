@@ -21,7 +21,14 @@ reported and never hollow.
 - READ_LOCATOR_IS_THE_ANSWER: a read query whose reader finds its element by a
   human-text literal (text=, has-text, aria-label, title, alt, role name) that
   the query does not contain, so the read returns the literal it searched for
-  (q05: `text="John" >> nth=0`). A bare `name=` is NOT such a literal.
+  (q05: `text="John" >> nth=0`). A bare `name=` is NOT such a literal. Only the
+  value read counts. Only the LAST element part of a `>>` / `>>>` chain is
+  searched (earlier parts are ancestors or frames; a trailing `nth=N` refines
+  the part before it): `css=table:has-text("Last Name") >> ... >> td >> nth=1`
+  reads a `td`, not "Last Name". Get Text / Get Texts count any literal kind;
+  Get Attribute / Get Property count only a title, aria-label or alt literal,
+  and only when they read that same attribute (`Get Attribute  [title="A Light
+  in the Attic"]  title` is flagged; `Get Attribute  text="X"  href` is not).
 - VERIFY_WITHOUT_ASSERTION: the query says verify / check / confirm / ensure /
   validate / assert / make sure, and the test asserts nothing.
 - EMPTY_TEST: the test only starts a browser, opens or navigates pages, logs
@@ -95,27 +102,40 @@ _ASSERTION_PREFIXES = ("wait for elements state", "wait until", "wait for condit
 # "Should Be Equal", "Length Should Be", "Element Should Be Visible", "Page Should
 # Contain", "List Should Contain Value": any keyword with the word "should".
 _SHOULD = re.compile(r"(?:^|\s)should(?:\s|$)")
-# Browser's inline assertion operators on a `Get ...` keyword. Checked on the
-# first four arguments: `Get Title  ==  X` puts the operator FIRST (no locator).
-_OPERATORS = {"==", "!=", "<", ">", "<=", ">=", "*=", "^=", "$=", "=~", "contains",
-              "not contains", "should be", "equal", "equals", "inequal",
-              "should not be", "starts", "ends", "matches", "validate", "then",
-              "not equal"}
+# Browser's inline assertion operators on a `Get ...` keyword: the member names of
+# its AssertionOperator enum (committed libdoc data/libdocs/browser.json, typedocs)
+# except `then` and `evaluate`, which return the evaluated expression and never
+# fail. A test pins this set to the libdoc. Checked on the first four arguments:
+# `Get Title  ==  X` puts the operator FIRST (no locator).
+_OPERATORS = {"==", "equal", "equals", "should be", "!=", "inequal", "should not be",
+              "<", "less than", ">", "greater than", "<=", ">=", "*=", "contains",
+              "not contains", "^=", "starts", "should start with", "$=", "ends",
+              "should end with", "matches", "validate"}
 # Keywords that neither interact, read nor assert.
 _SETUP_ONLY = {"new browser", "new context", "new page", "go to", "close browser",
                "close context", "close page", "log", "log to console",
                "set browser timeout"}
-_LOCATOR_READERS = ("get text", "get texts", "get attribute", "get property")
-_LITERALS = tuple(re.compile(p, re.IGNORECASE) for p in (
-    r"text\s*=\s*\"([^\"]{3,})\"",
-    r"text\s*=\s*'([^']{3,})'",
-    r"^text\s*=\s*([^\"'>][^>]{2,}?)\s*(?:>>|$)",
-    r"has-text\(\s*[\"']([^\"']{3,})[\"']",
-    r"aria-label\s*[*^$]?=\s*[\"']([^\"']{3,})[\"']",
-    r"\btitle\s*[*^$]?=\s*[\"']([^\"']{3,})[\"']",
-    r"\balt\s*[*^$]?=\s*[\"']([^\"']{3,})[\"']",
-    r"^role=\w+\[name\s*=\s*[\"']([^\"']{3,})[\"']",
-))
+_TEXT_READERS = ("get text", "get texts")
+_LOCATOR_READERS = (*_TEXT_READERS, "get attribute", "get property")
+# The literal kinds that are an attribute of the element itself. Get Attribute /
+# Get Property returns such a literal only when it reads that same attribute.
+_ATTRIBUTE_LITERALS = {name: re.compile(p, re.IGNORECASE) for name, p in (
+    ("aria-label", r"aria-label\s*[*^$]?=\s*[\"']([^\"']{3,})[\"']"),
+    ("title", r"\btitle\s*[*^$]?=\s*[\"']([^\"']{3,})[\"']"),
+    ("alt", r"\balt\s*[*^$]?=\s*[\"']([^\"']{3,})[\"']"),
+)}
+_LITERALS = (
+    *(re.compile(p, re.IGNORECASE) for p in (
+        r"text\s*=\s*\"([^\"]{3,})\"",
+        r"text\s*=\s*'([^']{3,})'",
+        r"^text\s*=\s*([^\"'>][^>]{2,}?)\s*(?:>>|$)",
+        r"has-text\(\s*[\"']([^\"']{3,})[\"']",
+    )),
+    *_ATTRIBUTE_LITERALS.values(),
+    re.compile(r"^role=\w+\[name\s*=\s*[\"']([^\"']{3,})[\"']", re.IGNORECASE),
+)
+_CHAIN_SPLIT = re.compile(r">>>?")
+_NTH_PART = re.compile(r"nth\s*=\s*-?\d+")
 _NUMERIC_ID = re.compile(r"(?:^id=|#|\[id=[\"']?)(\d{4,})")
 _ID_FORMS = tuple(re.compile(p) for p in (
     r"(?:css=)?#([\w-]+)",
@@ -258,10 +278,39 @@ def _select_check_cannot_fail(variables: dict[str, str], stmts: list[_Statement]
     return None
 
 
-def _locator_literals(locator: str, query: str) -> list[str]:
+def _locator_literals(locator: str, query: str,
+                      patterns: tuple[re.Pattern[str], ...] = _LITERALS) -> list[str]:
     lowered = query.lower()
-    found = [m.group(1).strip() for rx in _LITERALS for m in rx.finditer(locator)]
+    found = [m.group(1).strip() for rx in patterns for m in rx.finditer(locator)]
     return [lit for lit in found if lit and lit.lower() not in lowered]
+
+
+def _element_part(locator: str) -> str:
+    """The part of a `>>` / `>>>` chain that finds the element read.
+
+    Earlier parts are ancestors or frames. A trailing `nth=N` refines the part
+    before it, so it is skipped: `text="John" >> nth=0` -> `text="John"`.
+    """
+    parts = [p.strip() for p in _CHAIN_SPLIT.split(locator) if p.strip()]
+    while len(parts) > 1 and _NTH_PART.fullmatch(parts[-1]):
+        parts.pop()
+    return parts[-1] if parts else locator
+
+
+def _answer_literals(stmt: _Statement, locator: str, query: str) -> list[str]:
+    """The literals `stmt` reads back as its value, absent from the query.
+
+    Get Text / Get Texts return the element's text, so any literal kind counts.
+    Get Attribute / Get Property count only when they read the literal's own
+    attribute: `Get Attribute  [title="X"]  title` returns X, `... href` does not.
+    """
+    part = _element_part(locator)
+    if stmt.keyword in _TEXT_READERS:
+        return _locator_literals(part, query)
+    attribute = stmt.args[1].strip().lower() if len(stmt.args) > 1 else ""
+    if attribute not in _ATTRIBUTE_LITERALS:
+        return []
+    return _locator_literals(part, query, (_ATTRIBUTE_LITERALS[attribute],))
 
 
 def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]:
@@ -288,7 +337,7 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
             if stmt.keyword not in _LOCATOR_READERS or not stmt.args:
                 continue
             locator = _resolve(stmt.args[0], variables)
-            literals = _locator_literals(locator, query)
+            literals = _answer_literals(stmt, locator, query)
             if literals:
                 found.setdefault(READ_LOCATOR_IS_THE_ANSWER, literals[0][:40])
             if _NUMERIC_ID.search(locator):

@@ -5,10 +5,12 @@ mirrors is named); no bench data is committed. The corpus replay that shows the
 same verdicts on the real captures is bench/private/gate/pass_quality_corpus_replay.py.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
+import src.backend.core.pass_quality as pass_quality
 from src.backend.core.pass_quality import (
     EMPTY_TEST,
     FRAGILE_NUMERIC_ID,
@@ -166,6 +168,37 @@ class TestReadLocatorIsTheAnswer:
                          "    Should Be Equal    ${t}    John\n")
         assert shapes(code, "Go to the tables page and verify the first row shows a name") == set()
 
+    def test_reading_the_literals_own_attribute_is_flagged(self):  # mirrors f40300ac-f9d0-47f6-81e3-f2b95c8a2b8c
+        code = robot("${url}        https://books.toscrape.com\n"
+                     "${book_title_locator}    [title=\"A Light in the Attic\"]\n",
+                     "    New Page    ${url}\n"
+                     "    ${titles}=    Get Attribute    ${book_title_locator}    title\n"
+                     "    Should Be True    len(${titles}) == 20\n")
+        assert check_pass_quality(code, Q10) == [Finding(READ_LOCATOR_IS_THE_ANSWER, "A Light in the Attic")]
+
+    def test_reading_another_attribute_of_a_text_located_element_is_not_flagged(self):
+        code = robot("", "    New Page    https://shop.example.com\n"
+                         "    ${link}=    Get Attribute    text=\"Nike Air Max\"    href\n")
+        assert shapes(code, "Open the shop and get the link of the first product") == set()
+
+    def test_reading_the_value_of_an_aria_label_located_input_is_not_flagged(self):
+        code = robot("", "    New Page    https://www.amazon.in\n"
+                         "    Fill Text    css=input[aria-label=\"Search Amazon\"]    shoes\n"
+                         "    ${v}=    Get Property    css=input[aria-label=\"Search Amazon\"]    value\n")
+        query = "Open amazon, type shoes in the search box and get the typed value"
+        assert shapes(code, query) == set()
+
+    def test_a_literal_on_an_ancestor_part_of_a_chain_is_not_flagged(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/tables\n"
+                         "    ${t}=    Get Text    css=table:has-text(\"Last Name\") >> tbody tr >> nth=0"
+                         " >> td >> nth=1\n")
+        assert shapes(code, Q05) == set()
+
+    def test_a_literal_on_the_frame_part_is_not_flagged(self):
+        code = robot("", "    New Page    https://editor.example.com\n"
+                         "    ${t}=    Get Text    css=iframe[title=\"Rich Text Area\"] >>> p\n")
+        assert shapes(code, "Open the editor page and get the paragraph text") == set()
+
 
 class TestVerifyWithoutAssertion:
     SAUCE = ("${username_locator}    css=#user-name\n${password_locator}    css=input[type='password']\n"
@@ -196,6 +229,32 @@ class TestVerifyWithoutAssertion:
                          "    ${titles}=    Get Texts    css=h3 a\n"
                          "    Length Should Be    ${titles}    20\n")
         assert shapes(code, Q10) == set()
+
+    def test_a_then_expression_is_not_an_assertion(self):
+        # `then` returns the evaluated expression and never fails.
+        code = robot("", "    New Page    https://example.com\n"
+                         "    ${h}=    Get Text    css=h1    then    value.strip()\n"
+                         "    Log    ${h}\n")
+        assert shapes(code, "Open https://example.com and verify the heading text") == {
+            VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_word_operator_is_an_assertion(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    Get Element Count    css=h3 a    greater than    0\n")
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(code, "Open the page and verify there are books")
+
+    def test_should_start_with_is_an_assertion(self):
+        code = robot("", "    New Page    https://example.com\n"
+                         "    Get Text    css=h1    should start with    Welcome\n")
+        assert shapes(code, "Open the page and verify the heading starts with Welcome") == set()
+
+    def test_operators_match_browsers_assertion_operator_enum(self):
+        # Drift guard: the committed libdoc is the authority. `then` and `evaluate`
+        # are excluded because they return the evaluated expression and never fail.
+        libdoc = json.loads((REPO_ROOT / "data" / "libdocs" / "browser.json").read_text(encoding="utf-8"))
+        enum = next(t for t in libdoc["typedocs"] if t["name"] == "AssertionOperator")
+        can_fail = {m["name"] for m in enum["members"]} - {"then", "evaluate"}
+        assert set(pass_quality._OPERATORS) == can_fail
 
 
 class TestEmptyTest:
