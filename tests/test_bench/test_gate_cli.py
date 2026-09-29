@@ -16,6 +16,7 @@ from tests.test_bench.gate_fixtures import (
     PROVIDER_503,
     QUERIES,
     SELECT_BLIND_Q08,
+    TOKENS,
     row,
     wf_id,
     write_bench,
@@ -116,6 +117,34 @@ def test_a_rerun_recorded_under_another_model_is_refused(tmp_path, capsys):
     rerun = write_csv(tmp_path / "bench" / "baselines" / "r.csv", [row("q10", 1, wf)], meta)
     code, out = gate(tmp_path, [cand, "--rerun", rerun], capsys)
     assert code == 2 and "a new baseline is needed" in out
+
+
+def tokens_line(out: str, family: str) -> list[str]:
+    return next(line for line in out.splitlines() if line.startswith(f"TOKENS {family} ")).split()
+
+
+def test_a_token_fail_waits_as_pending_while_a_provider_miss_awaits_its_rerun(tmp_path, capsys):
+    """Tokens are the one gate a re-run can flip from FAIL to PASS, so a token FAIL waits with the pass rate."""
+    write_bench(tmp_path, BASE_NAME)
+    cap = {(q, r): {"tokens": {**TOKENS, "crewai_prompt_tokens": 8760}}   # +9.5% on nine queries
+           for q in QUERIES if q != "q03" for r in (1, 2, 3)}
+    cap[("q03", 2)] = {"tokens": {**TOKENS, "crewai_prompt_tokens": 12000}}
+    cap[("q03", 3)] = {"code": None, "error_message": PROVIDER_503, "status": "error", "tokens": {}, "traces": []}
+    cand, _ = write_bench(tmp_path, "cand", capture_kw=cap,
+                          overrides={("q03", 3): {"test_status": "", "generation_status": "error"}})
+    code, out = gate(tmp_path, [cand, "--rerun-dir", tmp_path / "reruns"], capsys)
+    # q03's median is 10,000 while r3 is missing: 80,000 -> 88,840 = +11.1%, over the +10% limit
+    assert code == 2, out
+    assert tokens_line(out, "crewai prompt")[3:5] == ["PENDING", "+11.1%"]
+    assert "- provisional: 1 provider miss(es) await a re-run" in out
+    wf = wf_id("rerun", "q03", 1)
+    write_capture(tmp_path / "bench" / "runs", wf)   # 8,000, like q03 r1
+    rerun = write_csv(tmp_path / "bench" / "baselines" / "cand-rerun1-q03.csv", [row("q03", 1, wf)])
+    code, out = gate(tmp_path, [cand, "--rerun", rerun], capsys)
+    # q03's median is 8,000 again: 80,000 -> 86,840 = +8.6%
+    assert code == 0, out
+    assert tokens_line(out, "crewai prompt")[3:5] == ["PASS", "+8.6%"]
+    assert "provisional" not in out
 
 
 def test_the_same_rerun_file_given_twice_is_refused(tmp_path, capsys):

@@ -47,6 +47,7 @@ from bench.gate_checks import (
 from bench.gate_hollow import Q10_ADDON_RUNS, hollow_lines, q10_addon_line
 from bench.gate_inputs import (
     BASELINE_CSV,
+    PROVIDER_MISS,
     TIMING_REFERENCE_CSV,
     GateLine,
     GateRefused,
@@ -112,6 +113,13 @@ def run_gate(candidate_csv: Path, rerun_csvs: list[Path] | None = None, *,
     lines.append(rate)
     lines += [locator_line(slots), flake_line(slots), salvage_line(slots)]
     lines += token_lines(base_runs, slots)
+    if rate.status == "PENDING":
+        # Tokens are the one gate a re-run can flip from FAIL to PASS: a token FAIL waits with the pass rate.
+        misses = sum(s.outcome == PROVIDER_MISS for s in slots)
+        for line in lines:
+            if line.name.startswith("TOKENS ") and line.status == "FAIL":
+                line.status = "PENDING"
+                line.details.append(f"provisional: {misses} provider miss(es) await a re-run")
     lines += hollow_lines(slots)
     lines += reported_cost_lines(base_runs, slots)
     # The bench's own window: re-runs come later and would stretch it over idle time.
