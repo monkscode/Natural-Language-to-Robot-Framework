@@ -163,8 +163,14 @@ def test_a_failing_check_never_blocks_startup(caplog):
     from src.backend import main
 
     health = MagicMock(side_effect=RuntimeError("stop here"))
-    with patch("src.backend.auth.security_posture.validate_security_posture"),          patch("src.backend.core.artifact_store.get_artifact_store"),          patch.object(main, "_check_learning_health", health),          patch("src.backend.crew_ai.model_map_fallback.ensure_model_entry",
-               side_effect=RuntimeError("boom")),          patch.object(main.settings, "MODEL_PROVIDER", "vertex"),          patch.object(main.settings, "ONLINE_MODEL", "gemini-3.5-flash"),          caplog.at_level(logging.WARNING):
+    with patch("src.backend.auth.security_posture.validate_security_posture"), \
+         patch("src.backend.core.artifact_store.get_artifact_store"), \
+         patch.object(main, "_check_learning_health", health), \
+         patch("src.backend.crew_ai.model_map_fallback.ensure_model_entry",
+               side_effect=RuntimeError("boom")), \
+         patch.object(main.settings, "MODEL_PROVIDER", "vertex"), \
+         patch.object(main.settings, "ONLINE_MODEL", "gemini-3.5-flash"), \
+         caplog.at_level(logging.WARNING):
         with pytest.raises(RuntimeError, match="stop here"):
             asyncio.run(main.startup_event())
     health.assert_called_once()
