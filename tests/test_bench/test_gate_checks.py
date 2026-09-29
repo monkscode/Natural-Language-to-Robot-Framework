@@ -133,6 +133,16 @@ class TestPlannerState:
         text = 'Final Answer: {"steps": [{"step_description": "Open", "keyword": "New Page"}]}'
         assert planner_state([{**PLANNER_ROW, "response_text": text}]) == "parsed"
 
+    def test_a_raw_newline_inside_a_string_parses_like_crewai_does(self):
+        # crewai 1.8.1 parses the whole answer with json.loads(strict=False), which takes a raw control character
+        text = '{"steps": ["line one\nline two"]}'   # a real newline inside the string, not the \n escape
+        assert planner_state([{**PLANNER_ROW, "response_text": text}]) == "parsed"
+
+    def test_a_raw_newline_that_only_the_span_can_reach_is_unparsed_like_crewai(self):
+        # crewai validates the {...} span with pydantic model_validate_json, which rejects a raw control character
+        text = 'Final Answer: {"steps": ["line one\nline two"]}'
+        assert planner_state([{**PLANNER_ROW, "response_text": text}]) == "UNPARSED"
+
     def test_no_planner_row_and_no_answer(self):
         assert planner_state([ROOT_ROW]) == "no planner row"
         assert planner_state([{**PLANNER_ROW, "response_text": None}]) == "no planner answer"

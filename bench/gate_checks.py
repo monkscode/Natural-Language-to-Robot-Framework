@@ -158,9 +158,9 @@ def _is_planner(trace: dict) -> bool:
     return first is not None and first[0] == "system" and first[1].startswith(PLANNER_PROMPT)
 
 
-def _steps_object(text: str) -> bool:
+def _steps_object(text: str, *, strict: bool = True) -> bool:
     try:
-        answer = json.loads(text)
+        answer = json.loads(text, strict=strict)
     except ValueError:
         return False
     return isinstance(answer, dict) and isinstance(answer.get("steps"), list)
@@ -169,9 +169,12 @@ def _steps_object(text: str) -> bool:
 def planner_state(traces: list) -> str:
     """'parsed' | 'UNPARSED' | 'no planner answer' | 'no planner row' (see module doc).
 
-    'parsed' mirrors crewai 1.8.1's own export (converter.handle_partial_json): the
-    answer is JSON, or its greedy {...} span is (a pre-schema "Final Answer: {...}"
-    answer never reached the Converter). UNPARSED is exactly what reaches it.
+    'parsed' mirrors crewai 1.8.1's own parse (converter.convert_to_model, then
+    handle_partial_json): the whole answer is JSON under json.loads(strict=False),
+    which takes a raw control character inside a string, or its greedy {...} span
+    is strict JSON — crewai validates the span with pydantic model_validate_json,
+    which rejects one (a pre-schema "Final Answer: {...}" answer never reached the
+    Converter). UNPARSED is exactly what reaches it.
     """
     planner = [t for t in _ordered(traces) if _is_planner(t)]
     if not planner:
@@ -181,7 +184,8 @@ def planner_state(traces: list) -> str:
         return "no planner answer"
     text = answered[-1]["response_text"]
     span = _JSON_SPAN.search(text)
-    return "parsed" if _steps_object(text) or (span and _steps_object(span.group(1))) else "UNPARSED"
+    parsed = _steps_object(text, strict=False) or (span and _steps_object(span.group(1)))
+    return "parsed" if parsed else "UNPARSED"
 
 
 def salvage_line(slots: list[Slot]) -> GateLine:
