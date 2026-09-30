@@ -1173,7 +1173,10 @@ def _proves_a_field(step: _Step) -> bool:
         if any(a.startswith(("@{", "&{")) for a in step.args):
             return False  # an expanded list or dict may carry `clear`
         rest = step.args[1:]  # `clear=` may be named before the text
-        return len(rest) <= 2 and not any(re.sub(r"[\s_]", "", a.lower()).startswith("clear=") for a in rest)
+        # Robot resolves an argument name at run time (`${n}=`, `cl\ear=`): deny every name but these.
+        return len(rest) <= 2 and not any(
+            "=" in a and a.split("=", 1)[0] not in ("txt", "secret", "delay") for a in rest
+        )
     return True
 
 
@@ -1214,7 +1217,9 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     correct test fails. Only after a typing step on the same element (same
     resolution rules as `rewrite_select_text_reads`) that proves the element is
     a field: Fill Text, Fill Secret, Clear Text, and Type Text / Type Secret
-    unless `clear` is switched off. The named form `attribute=value` becomes
+    unless an argument could switch `clear` off (a third argument after the
+    text; a cell holding `=` not named `txt`, `secret` or `delay`; an
+    expanded `@{…}` / `&{…}`). The named form `attribute=value` becomes
     `property=value` (swapping only the keyword would ask for a property
     literally named "attribute=value", which dryrun cannot catch); inline
     assertion arguments keep their positions. Nothing else: an element nothing
