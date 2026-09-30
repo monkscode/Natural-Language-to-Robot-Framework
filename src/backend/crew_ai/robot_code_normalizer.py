@@ -652,15 +652,18 @@ _UNFOLLOWED_MARKERS = frozenset({
     "BREAK", "CONTINUE", "RETURN", "GROUP",
 })
 
-# A file where a content cell anywhere names one of these setters (compared
+# A file where a content cell anywhere names one of these keywords (compared
 # lower-cased without spaces or underscores, anywhere in the cell), or is
 # exactly `VAR` (Robot only recognizes it in upper case), is left alone as a
-# whole by both rewrites: they set a variable beyond the line they sit on — as
-# a step, as a wrapper's argument, in the file's own keyword, in another test,
-# in a setup, or as a Python call inside `Evaluate` — so no test-by-test
-# reading can tell which element a locator variable names when a read runs.
+# whole by both rewrites. The scoped setters and `Import Variables` / `Import
+# Resource` set variables beyond the line they sit on, and `Set Selector
+# Prefix` changes the element every later selector names, in later tests too —
+# as a step, as a wrapper's argument, in the file's own keyword, in another
+# test, in a setup, or as a Python call inside `Evaluate` — so no test-by-test
+# reading can tell which element a locator names when a read runs.
 _SCOPED_SETTERS = ("settestvariable", "settaskvariable", "setsuitevariable",
-                   "setglobalvariable", "setlocalvariable")
+                   "setglobalvariable", "setlocalvariable",
+                   "importvariables", "importresource", "setselectorprefix")
 
 _BROWSER_PREFIXES = frozenset({"", "browser"})
 _BUILTIN_PREFIXES = frozenset({"", "builtin"})
@@ -673,6 +676,10 @@ _ANY_VARIABLE_RE = re.compile(r"[$@&%]\{")
 # inside an evaluated expression (`Should Be True    $x == 'a'`).
 _VARIABLE_REF_RE = re.compile(r"[$@&%]\{([^{}]*)\}")
 _EXPRESSION_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+# A variable reference inside another one (`${a${b}}`): a name Robot computes at run time.
+_NESTED_VARIABLE_RE = re.compile(r"[$@&%]\{[^{}]*[$@&%]\{")
+# A *** Variables *** entry's name cell with a plain name: `${x}`, `@{x}`, `&{x}`, `${x: str}`, `${x}=`.
+_VARIABLE_ENTRY_RE = re.compile(r"([$@&])\{([^{}]+)\}\s*=?")
 # A leading assignment cell, capturing the variable name.
 _ASSIGNED_NAME_RE = re.compile(r"[$@&]\{([^}]+)\}")
 # `id=x` and `css=#x` name the same element when x is a plain CSS identifier (no
@@ -707,7 +714,11 @@ def _canon_locator(value: str | None) -> str | None:
 def _mentions_variable(text: str, canon: str) -> bool:
     """True when `text` refers to the variable `canon` in any form Robot reads:
     `${x}`, `@{x}`, `&{x}`, `${x}[0]`, `${x.attr}`, `${ X }` or `$x` in an
-    expression. Over-matching only makes a rewrite skip, never fire."""
+    expression — and whenever it holds a name built from another variable
+    (`${x${EMPTY}}`), which may resolve to `x`. Over-matching only makes a
+    rewrite skip, never fire."""
+    if _NESTED_VARIABLE_RE.search(text):
+        return True
     for ref in _VARIABLE_REF_RE.findall(text):
         if canon in (_canon_variable(ref), _canon_variable(re.split(r"[.\[]", ref, maxsplit=1)[0])):
             return True
@@ -778,8 +789,9 @@ def _parse_step(line_no: int, line: str, eol: str) -> _Step | None:
     """One indented test-body line as a _Step, or None when this reader cannot
     read it as one: no separator before its first cell (Robot reads a line
     indented by one space as a NEW test), no keyword after its assignments
-    (`${x}=` alone, its keyword on the next `...` line), or a typed assignment
-    (`${x: str}=`: Robot assigns `${x}`)."""
+    (`${x}=` alone, its keyword on the next `...` line), a typed assignment
+    (`${x: str}=`: Robot assigns `${x}`), or a nested or item assignment
+    target (`${a${b}}=`, `${x}[0]=`: Robot assigns, it never calls a keyword)."""
     parts = _CELL_SPLIT_RE.split(line)
     cells = _content_cells(parts)
     # parts[0] is empty only for a properly indented line.
@@ -796,6 +808,8 @@ def _parse_step(line_no: int, line: str, eol: str) -> _Step | None:
     if first == len(cells):
         return None
     head = parts[cells[first]].strip()
+    if re.match(r"[$@&%]\{", head):
+        return None  # a nested or item assignment target: Robot assigns it, so its name is not a keyword
     setting = head.startswith("[") and head.endswith("]")
     return _Step(
         line_no=line_no, parts=parts, eol=eol, assigns=assigns,
@@ -823,7 +837,7 @@ def _read_variable(line: str, variables: dict[str, str | None], last: str | None
         if last is not None:
             variables[last] = None  # a value continued on a `...` line is not one plain literal
         return last
-    match = re.fullmatch(r"([$@&])\{([^{}]+)\}\s*=?", cells[0])
+    match = _VARIABLE_ENTRY_RE.fullmatch(cells[0])
     if not match:
         return None
     name = _canon_variable(match.group(2).split(":", 1)[0])
@@ -843,8 +857,11 @@ def _parse_suite(robot_code: str) -> _Suite | None:
     """Read the suite as a top-to-bottom list of tests, or None when this reader
     cannot be trusted with the file: a pipe-separated line, a template, a line
     break Robot honours that a "\\n" split does not (`_OTHER_LINEBREAK_CHARS`),
-    or — on any line of any section — a scoped setter or `VAR`
-    (`_SCOPED_SETTERS`). A test is read but marked not followable when it holds
+    a *** Variables *** entry whose name holds another variable (`${a${b}}`:
+    Robot defines a name this reader cannot compute), or — on any line of any
+    section — a scoped setter, `Import Variables`, `Import Resource`, `Set
+    Selector Prefix` or `VAR` (`_SCOPED_SETTERS`). A test is read but marked
+    not followable when it holds
     a control structure or `[Template]`, when its name line carries more than
     the name or a `...` line continues its name line (Robot runs that as the
     test's first step), when an unindented `...` line follows (Robot continues
@@ -882,6 +899,8 @@ def _parse_suite(robot_code: str) -> _Suite | None:
             if _canon_keyword(_CELL_SPLIT_RE.split(stripped)[0]) in ("test template", "task template"):
                 return None
         elif section in _VARIABLE_SECTIONS:
+            if re.match(r"[$@&]\{", content[0]) and not _VARIABLE_ENTRY_RE.fullmatch(content[0]):
+                return None  # a name built from another variable: which name Robot defines is unknown here
             last_variable = _read_variable(line, variables, last_variable)
         elif section in _TEST_SECTIONS:
             if not line[:1].isspace():
@@ -1129,13 +1148,16 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     select or deselect in between that this reader cannot follow (behind a
     wrapper, spelled without spaces, on an element it cannot name, or on another
     element not named by a plain `id=`), a locator that *** Variables ***
-    defines as a list, a dict or a typed value, a test with a control
-    structure, a template, a step on its name line or a line this reader cannot
-    read as a step, and whole files that define their own `Get Text` / `Get
-    Selected Options` / `Select Options By` / `Set Variable` / `Should Contain`
-    / `Log`, catch errors (TRY, or own keywords under an error-catching
-    wrapper), use pipe-separated lines, or hold a scoped `Set … Variable` or
-    `VAR` anywhere. Idempotent.
+    defines as a list, a dict or a typed value, a later line holding a name
+    built from another variable (`${selected_${EMPTY}option}`), a test with a
+    control structure, a template, a step on its name line or a line this
+    reader cannot read as a step (a nested or item assignment target among
+    them), and whole files that define their own `Get Text` / `Get Selected
+    Options` / `Select Options By` / `Set Variable` / `Should Contain` / `Log`,
+    catch errors (TRY, or own keywords under an error-catching wrapper), use
+    pipe-separated lines, name a *** Variables *** entry through another
+    variable, or hold a scoped `Set … Variable`, `Import Variables`, `Import
+    Resource`, `Set Selector Prefix` or `VAR` anywhere. Idempotent.
 
     Covers the generation path and every dryrun repair round (both run
     `extract_and_normalize_robot_code`); pasted code and re-runs of stored code
@@ -1217,9 +1239,10 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     correct test fails. Only after a typing step on the same element (same
     resolution rules as `rewrite_select_text_reads`) that proves the element is
     a field: Fill Text, Fill Secret, Clear Text, and Type Text / Type Secret
-    unless an argument could switch `clear` off (a third argument after the
-    text; a cell holding `=` not named `txt`, `secret` or `delay`; an
-    expanded `@{…}` / `&{…}`). The named form `attribute=value` becomes
+    unless an argument could switch `clear` off (a second argument after the
+    text, `clear` by position; any cell after the locator holding `=` whose
+    name before the first `=` is not `txt`, `secret` or `delay`; an expanded
+    `@{…}` / `&{…}`). The named form `attribute=value` becomes
     `property=value` (swapping only the keyword would ask for a property
     literally named "attribute=value", which dryrun cannot catch); inline
     assertion arguments keep their positions. Nothing else: an element nothing
@@ -1228,10 +1251,12 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     an int), a read in another test, a `...` continuation, a locator that
     *** Variables *** defines as a list, a dict or a typed value, a test with a
     control structure, a template, a step on its name line or a line the reader
-    cannot read as a step, and whole files that define their own `Get Attribute`
-    / `Get Property` / typing keyword / `Set Variable`, catch errors, use
-    pipe-separated lines, or hold a scoped `Set … Variable` or `VAR` anywhere.
-    Idempotent.
+    cannot read as a step (a nested or item assignment target among them), and
+    whole files that define their own `Get Attribute` / `Get Property` / typing
+    keyword / `Set Variable`, catch errors, use pipe-separated lines, name a
+    *** Variables *** entry through another variable, or hold a scoped `Set …
+    Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
+    `VAR` anywhere. Idempotent.
     """
     if not robot_code:
         return robot_code

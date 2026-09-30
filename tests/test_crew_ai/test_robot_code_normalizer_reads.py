@@ -248,6 +248,9 @@ _NAME_LINE = "Generated Test\n"
 _REPOINT = "${get_text_locator}=    Set Variable    id=other"
 _LOCATOR_ENTRY = "${get_text_locator}    css=#dropdown\n"
 _OWN_SET_VARIABLE = "\n\n*** Keywords ***\nSet Variable\n    [Arguments]    ${x}\n    RETURN    id=other\n"
+_IMPORT_VARIABLES = "Import Variables    ${CURDIR}/v.py"
+_IMPORT_RESOURCE = "Import Resource    ${CURDIR}/res.resource"
+_SELECTOR_PREFIX = "Set Selector Prefix    iframe#f >>>"
 _CANNOT_TRUST = [
     ("a typed assignment", _suite(_SELECT, "${get_text_locator: str}=    Set Variable    id=other", _READ, _CHECK),
      "${get_text_locator: str}=    Set Variable    id=other", "Log    x"),
@@ -301,6 +304,32 @@ _CANNOT_TRUST = [
      "${selected_option}[0]", "${selected_option}"),
     ("a Log of an expression over the value", _suite(_SELECT, _READ, "Log    ${{ ${selected_option} }}", _CHECK),
      "${{ ${selected_option} }}", "${selected_option}"),
+    # A run-time import, a selector prefix, or a variable name built from another variable (owner, 2026-09-30:
+    # "Close all six"): Robot 7.4.2 sends the read elsewhere, or uses its value, where this reader cannot see.
+    ("Import Variables between select and read", _suite(_SELECT, _IMPORT_VARIABLES, _READ, _CHECK),
+     _IMPORT_VARIABLES, "Log    x"),
+    ("Import Variables in a Suite Setup", _suite(_SELECT, _READ, _CHECK).replace(
+        "Library    Collections\n", "Library    Collections\nSuite Setup    " + _IMPORT_VARIABLES + "\n"),
+     _IMPORT_VARIABLES, "Log    x"),
+    ("Import Variables in an earlier test", _suite(_SELECT, _READ, _CHECK).replace(
+        "*** Test Cases ***\n", "*** Test Cases ***\nEarlier Test\n    " + _IMPORT_VARIABLES + "\n\n"),
+     _IMPORT_VARIABLES, "Log    x"),
+    ("Import Resource between select and read", _suite(_SELECT, _IMPORT_RESOURCE, _READ, _CHECK),
+     _IMPORT_RESOURCE, "Log    x"),
+    ("Set Selector Prefix between select and read", _suite(_SELECT, _SELECTOR_PREFIX, _READ, _CHECK),
+     _SELECTOR_PREFIX, "Log    x"),
+    ("Set Selector Prefix in the file's own keyword", _suite(
+        _SELECT, "Into Frame", _READ, _CHECK, tail="\n\n*** Keywords ***\nInto Frame\n    " + _SELECTOR_PREFIX + "\n"),
+     _SELECTOR_PREFIX, "Log    x"),
+    ("a nested name as an assignment target", _suite(
+        _SELECT, "${get_text${EMPTY}_locator}=    Set Variable    id=nested", _READ, _CHECK),
+     "${get_text${EMPTY}_locator}=", "${other_locator}="),
+    ("a nested name first in Variables", _suite(_SELECT, _READ, _CHECK).replace(
+        _LOCATOR_ENTRY, "${get_text${EMPTY}_locator}    id=nested_first\n" + _LOCATOR_ENTRY),
+     "${get_text${EMPTY}_locator}    id=nested_first\n", "${other_locator}    id=nested_first\n"),
+    ("a nested name as a later use of the value", _suite(
+        _SELECT, _READ, _CHECK, "Should Be Equal    ${selected_${EMPTY}option}    Option 2"),
+     "${selected_${EMPTY}option}", "${other_value}"),
 ]
 _CANNOT_TRUST_IDS = [case[0] for case in _CANNOT_TRUST]
 
@@ -558,6 +587,17 @@ _N1_CANNOT_TRUST = [
     ("the file's own Set Variable keyword", _n1(
         _TYPE, "${customer_city_locator}=    Set Variable    id=customer.address.city", _ATTR, _USE,
         tail=_OWN_SET_VARIABLE), "\nSet Variable\n", "\nMy Helper\n"),
+    # As for q08 (owner, 2026-09-30: "Close all six").
+    ("Import Variables between the typing and the read", _n1(_TYPE, _IMPORT_VARIABLES, _ATTR, _USE),
+     _IMPORT_VARIABLES, "Log    x"),
+    ("Set Selector Prefix between the typing and the read", _n1(_TYPE, _SELECTOR_PREFIX, _ATTR, _USE),
+     _SELECTOR_PREFIX, "Log    x"),
+    ("a nested name as an assignment target", _n1(
+        _TYPE, "${customer_city${EMPTY}_locator}=    Set Variable    id=other", _ATTR, _USE),
+     "${customer_city${EMPTY}_locator}=", "${other_locator}="),
+    ("a nested name first in Variables", _n1(_TYPE, _ATTR, _USE).replace(
+        _N1_ENTRY, "${customer_city${EMPTY}_locator}    id=other\n" + _N1_ENTRY),
+     "${customer_city${EMPTY}_locator}    id=other\n", "${other_locator}    id=other\n"),
 ]
 _N1_CANNOT_TRUST_IDS = [case[0] for case in _N1_CANNOT_TRUST]
 
