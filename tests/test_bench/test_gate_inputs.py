@@ -404,3 +404,4 @@ def test_rerun_files_are_one_query_files_with_the_right_repeat_count(tmp_path):
         {"id": "q07", "query": QUERIES["q07"]}]
     assert [c.split("--repeats ")[1].split(" ")[0] for c in commands] == ["2", "1"]
     assert commands[0].endswith("--out bench/baselines/cand-rerun1-q07.csv")
+    assert all(c.startswith("venv/Scripts/python.exe -m bench.run_bench --queries ") for c in commands)

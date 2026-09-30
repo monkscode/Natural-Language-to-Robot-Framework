@@ -339,6 +339,6 @@ def write_rerun_files(slots: list[Slot], rerun_dir: Path, candidate_csv: Path,
                     if s.current.query_id == qid and s.outcome == PROVIDER_MISS)
         path = write_query_file(rerun_dir / f"{qid}.json", qid, text)
         out = candidate_csv.with_name(f"{candidate_csv.stem}-rerun{reruns_given + 1}-{qid}.csv")
-        commands.append(f"PYTHONPATH=. venv/Scripts/python.exe bench/run_bench.py "
+        commands.append(f"venv/Scripts/python.exe -m bench.run_bench "
                         f"--queries {path.as_posix()} --repeats {count} --out {out.as_posix()}")
     return commands
