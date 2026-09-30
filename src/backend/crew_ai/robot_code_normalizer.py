@@ -676,8 +676,9 @@ _ANY_VARIABLE_RE = re.compile(r"[$@&%]\{")
 # inside an evaluated expression (`Should Be True    $x == 'a'`).
 _VARIABLE_REF_RE = re.compile(r"[$@&%]\{([^{}]*)\}")
 _EXPRESSION_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
-# A variable reference inside another one (`${a${b}}`): a name Robot computes at run time.
-_NESTED_VARIABLE_RE = re.compile(r"[$@&%]\{[^{}]*[$@&%]\{")
+# A variable reference inside another one (`${a${b}}`, or `$a${b}` in an expression): a name Robot computes at
+# run time.
+_NESTED_VARIABLE_RE = re.compile(r"[$@&%]\{[^{}]*[$@&%]\{|\$\w*[$@&%]\{")
 # A *** Variables *** entry's name cell with a plain name: `${x}`, `@{x}`, `&{x}`, `${x: str}`, `${x}=`.
 _VARIABLE_ENTRY_RE = re.compile(r"([$@&])\{([^{}]+)\}\s*=?")
 # A leading assignment cell, capturing the variable name.
@@ -867,7 +868,8 @@ def _parse_suite(robot_code: str) -> _Suite | None:
     test's first step), when an unindented `...` line follows (Robot continues
     the previous step with it: it starts no test), or when any other body line
     is not a step this reader can read (`_parse_step`: an assignment-only line,
-    a typed assignment, a line Robot reads as a new test)."""
+    a typed assignment, a nested or item assignment target, a line Robot reads
+    as a new test)."""
     if any(c in robot_code.replace("\r\n", "\n") for c in _OTHER_LINEBREAK_CHARS):
         return None
     lines = robot_code.split("\n")

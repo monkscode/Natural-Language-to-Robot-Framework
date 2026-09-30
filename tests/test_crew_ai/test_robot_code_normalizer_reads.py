@@ -330,6 +330,21 @@ _CANNOT_TRUST = [
     ("a nested name as a later use of the value", _suite(
         _SELECT, _READ, _CHECK, "Should Be Equal    ${selected_${EMPTY}option}    Option 2"),
      "${selected_${EMPTY}option}", "${other_value}"),
+    # The same later use through Robot's `$name` expression syntax (Robot 7.4.2: each passes before the rewrite and
+    # fails after it). The control names another variable the same way and IS rewritten.
+    ("a nested name in an expression", _suite(
+        _SELECT, _READ, _CHECK, "Should Be True    len($selected_${EMPTY}option) > 5"),
+     "$selected_${EMPTY}option", "$other_value"),
+    ("a nested name read by Get Variable Value", _suite(
+        _SELECT, _READ, _CHECK, "${t}=    Get Variable Value    $selected_${EMPTY}option",
+        "Should Be True    len($t) > 5"),
+     "$selected_${EMPTY}option", "$other_value"),
+    ("a nested name in an inline expression", _suite(
+        _SELECT, _READ, _CHECK, "Should Be True    ${{ len($selected_${EMPTY}option) > 5 }}"),
+     "$selected_${EMPTY}option", "$other_value"),
+    ("an expression name that starts with another variable", _suite(
+        _SELECT, _READ, _CHECK, "Should Be True    len($${EMPTY}selected_option) > 5"),
+     "$${EMPTY}selected_option", "$other_value"),
 ]
 _CANNOT_TRUST_IDS = [case[0] for case in _CANNOT_TRUST]
 
