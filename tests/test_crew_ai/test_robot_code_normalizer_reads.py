@@ -473,6 +473,11 @@ _AFTER_THE_READ = [
     ("L1 with a byte-order mark before the language line",
      "\N{ZERO WIDTH NO-BREAK SPACE}" + _FI + _with_setting(f"Testin Alasajo    {_RF_VAR_USE}"),
      _with_setting(f"Testin Alasajo    {_RF_VAR_USE}")),
+    # Robot also honours the setting on a `...` line as the file's first data line (it drops the `...`; RF 7.4.2:
+    # preflight/fw6-rereview/ctl_rf742.out, G1).
+    ("G1 a language setting on a continuation line",
+     "...    " + _FI + _with_setting(f"Testin Alasajo    {_RF_VAR_USE}"),
+     _with_setting(f"Testin Alasajo    {_RF_VAR_USE}")),
     ("L2 a translated [Teardown] at the top of the test",
      _FI + _suite(f"[Alasajo]    {_RF_VAR_USE}", _SELECT, _READ, _CHECK),
      _suite(f"[Alasajo]    {_RF_VAR_USE}", _SELECT, _READ, _CHECK)),
