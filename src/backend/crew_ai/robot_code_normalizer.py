@@ -676,9 +676,8 @@ _ANY_VARIABLE_RE = re.compile(r"[$@&%]\{")
 # inside an evaluated expression (`Should Be True    $x == 'a'`).
 _VARIABLE_REF_RE = re.compile(r"[$@&%]\{([^{}]*)\}")
 _EXPRESSION_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
-# A variable reference inside another one (`${a${b}}`, or `$a${b}` in an expression): a name Robot computes at
-# run time.
-_NESTED_VARIABLE_RE = re.compile(r"[$@&%]\{[^{}]*[$@&%]\{|\$\w*[$@&%]\{")
+# A variable reference inside another one (`${a${b}}`): a name Robot computes at run time.
+_NESTED_VARIABLE_RE = re.compile(r"[$@&%]\{[^{}]*[$@&%]\{")
 # A *** Variables *** entry's name cell with a plain name: `${x}`, `@{x}`, `&{x}`, `${x: str}`, `${x}=`.
 _VARIABLE_ENTRY_RE = re.compile(r"([$@&])\{([^{}]+)\}\s*=?")
 # A leading assignment cell, capturing the variable name.
@@ -715,8 +714,8 @@ def _canon_locator(value: str | None) -> str | None:
 def _mentions_variable(text: str, canon: str) -> bool:
     """True when `text` refers to the variable `canon` in any form Robot reads:
     `${x}`, `@{x}`, `&{x}`, `${x}[0]`, `${x.attr}`, `${ X }` or `$x` in an
-    expression — and whenever it holds a name built from another variable
-    (`${x${EMPTY}}`), which may resolve to `x`. Over-matching only makes a
+    expression — and whenever it holds a variable nested inside another
+    (`${x${EMPTY}}`), whose name may resolve to `x`. Over-matching only makes a
     rewrite skip, never fire."""
     if _NESTED_VARIABLE_RE.search(text):
         return True
@@ -1004,6 +1003,8 @@ _CONTAINS_OPERATORS = frozenset({"contains", "*="})
 _SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "Set Variable", "Should Contain", "Log")
 # The keywords that change a <select>'s selection, compared lower-cased without spaces or underscores.
 _SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
+# A `$` that starts no variable, or an escaped `\${`: Robot can build a variable name from it at run time.
+_BARE_OR_ESCAPED_DOLLAR_RE = re.compile(r"\$(?!\{)|\\\$\{")
 
 
 def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: str,
@@ -1150,16 +1151,20 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     select or deselect in between that this reader cannot follow (behind a
     wrapper, spelled without spaces, on an element it cannot name, or on another
     element not named by a plain `id=`), a locator that *** Variables ***
-    defines as a list, a dict or a typed value, a later line holding a name
-    built from another variable (`${selected_${EMPTY}option}`), a test with a
-    control structure, a template, a step on its name line or a line this
+    defines as a list, a dict or a typed value, a later line holding a
+    variable nested inside another (`${selected_${EMPTY}option}`), a test with
+    a control structure, a template, a step on its name line or a line this
     reader cannot read as a step (a nested or item assignment target among
     them), and whole files that define their own `Get Text` / `Get Selected
     Options` / `Select Options By` / `Set Variable` / `Should Contain` / `Log`,
     catch errors (TRY, or own keywords under an error-catching wrapper), use
     pipe-separated lines, name a *** Variables *** entry through another
-    variable, or hold a scoped `Set … Variable`, `Import Variables`, `Import
-    Resource`, `Set Selector Prefix` or `VAR` anywhere. Idempotent.
+    variable, hold a scoped `Set … Variable`, `Import Variables`, `Import
+    Resource`, `Set Selector Prefix` or `VAR` anywhere, or hold anywhere a `$`
+    that starts no variable (a `$name` expression, a lone `$`, a price) or an
+    escaped `\\${`: Robot can build the read's variable name from either at run
+    time. A name Python computes without any `$` (`chr(36)` inside `${{ }}` or
+    `Evaluate`) is not seen. Idempotent.
 
     Covers the generation path and every dryrun repair round (both run
     `extract_and_normalize_robot_code`); pasted code and re-runs of stored code
@@ -1170,6 +1175,8 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     squashed = re.sub(r"[\s_]", "", robot_code.lower())
     if "selectoptionsby" not in squashed or "gettext" not in squashed:
         return robot_code
+    if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code):
+        return robot_code  # Robot can build a variable name at run time from any `$` the reader cannot follow
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code

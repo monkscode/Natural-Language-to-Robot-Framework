@@ -331,22 +331,60 @@ _CANNOT_TRUST = [
         _SELECT, _READ, _CHECK, "Should Be Equal    ${selected_${EMPTY}option}    Option 2"),
      "${selected_${EMPTY}option}", "${other_value}"),
     # The same later use through Robot's `$name` expression syntax (Robot 7.4.2: each passes before the rewrite and
-    # fails after it). The control names another variable the same way and IS rewritten.
+    # fails after it). The file is left alone for its `$` that starts no variable (see _BARE_DOLLAR); the control
+    # replaces the expression line(s) with `Log    x` and IS rewritten.
     ("a nested name in an expression", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    len($selected_${EMPTY}option) > 5"),
-     "$selected_${EMPTY}option", "$other_value"),
+     "Should Be True    len($selected_${EMPTY}option) > 5", "Log    x"),
     ("a nested name read by Get Variable Value", _suite(
         _SELECT, _READ, _CHECK, "${t}=    Get Variable Value    $selected_${EMPTY}option",
         "Should Be True    len($t) > 5"),
-     "$selected_${EMPTY}option", "$other_value"),
+     "${t}=    Get Variable Value    $selected_${EMPTY}option\n    Should Be True    len($t) > 5", "Log    x"),
     ("a nested name in an inline expression", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    ${{ len($selected_${EMPTY}option) > 5 }}"),
-     "$selected_${EMPTY}option", "$other_value"),
+     "Should Be True    ${{ len($selected_${EMPTY}option) > 5 }}", "Log    x"),
     ("an expression name that starts with another variable", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    len($${EMPTY}selected_option) > 5"),
-     "$${EMPTY}selected_option", "$other_value"),
+     "Should Be True    len($${EMPTY}selected_option) > 5", "Log    x"),
 ]
 _CANNOT_TRUST_IDS = [case[0] for case in _CANNOT_TRUST]
+
+# A `$` that starts no variable, or an escaped `\${`, anywhere in the file (owner, 2026-09-30: "One broad rule"):
+# Robot can build the read's variable name from it at run time, out of the reader's sight (Robot 7.4.2: V1-V3, P1 and
+# P2 each pass before the rewrite and fail after it). (label, the file, the control): the control is the same file
+# with every such `$` taken out, and IS rewritten.
+_P1 = _suite("${n}=    Set Variable    $selected_option", _SELECT, _READ, _CHECK,
+             "${t}=    Get Variable Value    ${n}", "Should Be True    len($t) > 5")
+_ESCAPED = _suite("${n}=    Set Variable    \\${selected_option}", _SELECT, _READ, _CHECK,
+                  "${t}=    Get Variable Value    ${n}", "Should Be True    len($t) > 5")
+_P2 = _suite(_SELECT, _READ, _CHECK, "Should Be True    len(${n_var}) > 5").replace(
+    _LOCATOR_ENTRY, _LOCATOR_ENTRY + "${n_var}    $selected_option\n")
+_BARE_DOLLAR = [
+    ("V1 a name prefix set to $selected", _suite(
+        "${p}=    Set Variable    $selected", _SELECT, _READ, _CHECK, "Should Be True    len(${p}_option) > 5"),
+     _suite("${p}=    Set Variable    selected", _SELECT, _READ, _CHECK, "Should Be True    len(${p}_option) > 5")),
+    ("V2 a lone $ set as a variable", _suite(
+        "${d}=    Set Variable    $", _SELECT, _READ, _CHECK, "Should Be True    len(${d}selected_option) > 5"),
+     _suite("${d}=    Set Variable    x", _SELECT, _READ, _CHECK, "Should Be True    len(${d}selected_option) > 5")),
+    ("V3 a $ from an inline expression", _suite(
+        _SELECT, _READ, _CHECK, "Should Be True    len(${{'$'}}selected_option) > 5"),
+     _suite(_SELECT, _READ, _CHECK, "Should Be True    len(${{'x'}}selected_option) > 5")),
+    ("P1 a pointer set before the read", _P1, _P1.replace("    $selected_option", "    other_value").replace(
+        "Should Be True    len($t) > 5", "Log    x")),
+    ("P2 a pointer in Variables", _P2, _P2.replace("    $selected_option", "    other_value")),
+    ("a pointer built by Catenate", _suite(
+        "${n}=    Catenate    SEPARATOR=    $    selected_option", _SELECT, _READ, _CHECK,
+        "Should Be True    len(${n}) > 5"),
+     _suite("${n}=    Catenate    SEPARATOR=    x    selected_option", _SELECT, _READ, _CHECK,
+            "Should Be True    len(${n}) > 5")),
+    ("an escaped pointer", _ESCAPED, _ESCAPED.replace("    \\${selected_option}", "    other_value").replace(
+        "Should Be True    len($t) > 5", "Log    x")),
+    # The accepted cost: a q08 test in a file that also holds a bare `$` gets no fix.
+    ("accepted cost: a price in another test", _suite(
+        _SELECT, _READ, _CHECK, tail="\n\nOther Test\n    Log    Price: $5\n"),
+     _suite(_SELECT, _READ, _CHECK, tail="\n\nOther Test\n    Log    Price: 5\n")),
+]
+_BARE_DOLLAR_IDS = [case[0] for case in _BARE_DOLLAR]
 
 
 class TestSelectReadLeftAlone:
@@ -489,6 +527,15 @@ class TestSelectReadLeftAlone:
     @pytest.mark.parametrize("label, source, blocking, neutral", _CANNOT_TRUST, ids=_CANNOT_TRUST_IDS)
     def test_control_the_same_file_without_the_blocking_text_is_rewritten(self, label, source, blocking, neutral):
         control = source.replace(blocking, neutral)
+        assert control != source, label
+        assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
+
+    @pytest.mark.parametrize("label, source, control", _BARE_DOLLAR, ids=_BARE_DOLLAR_IDS)
+    def test_a_dollar_that_starts_no_variable_leaves_the_file_alone(self, label, source, control):
+        assert rewrite_select_text_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, control", _BARE_DOLLAR, ids=_BARE_DOLLAR_IDS)
+    def test_control_the_same_file_without_that_dollar_is_rewritten(self, label, source, control):
         assert control != source, label
         assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
 
