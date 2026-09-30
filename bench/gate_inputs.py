@@ -20,8 +20,10 @@ counters, because a failed generation writes NO workflow_metrics row
 provider failure is a miss (owner, 2026-09-28): 429, 5xx / ServiceUnavailable, a
 timeout or a connection error. A miss is a row whose generation_status is "error"
 and whose message starts with one of PROVIDER_MISS_PREFIXES (the W5 / W5.1
-sentences, each a temporary cause) or whose FIRST named LiteLLM class is in
-TEMPORARY_LITELLM_ERRORS. Anything else — a 400, any other status, a setup
+sentences, each a temporary cause) or whose message STARTS with a LiteLLM class
+in TEMPORARY_LITELLM_ERRORS ("An error occurred: litellm.<Class>" or
+"litellm.<Class>"); a class named later in the text does not count.
+Anything else — a 400, any other status, a setup
 error — stays a real failure.
 
 Re-runs. run_bench.py has no subset flag, so for every query with a pending miss
