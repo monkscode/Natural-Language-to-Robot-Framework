@@ -18,6 +18,7 @@ import pytest
 from src.backend.crew_ai.robot_code_normalizer import (
     _scan_file_guard,
     rewrite_select_text_reads,
+    rewrite_typed_value_reads,
 )
 
 # ---------------------------------------------------------------------------
@@ -483,3 +484,207 @@ class TestSelectReadIdempotentAndLogged:
         with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
             rewrite_select_text_reads(_suite(_SELECT, "${t}=    Get Text    id=other", "Log    ${t}"))
         assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
+# rewrite_typed_value_reads (N1)
+# ---------------------------------------------------------------------------
+
+_N1_HEAD = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "Library    BuiltIn\n"
+    "Library    Collections\n"
+    "\n"
+    "*** Variables ***\n"
+    "${browser}    chromium\n"
+    "${headless}    True\n"
+    "${customer_first_name_locator}    id=customer.firstName\n"
+    "${customer_last_name_locator}    id=customer.lastName\n"
+    "${customer_city_locator}    id=customer.address.city\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Parabank Registration Test\n"
+    "    New Browser    ${browser}    headless=${headless}\n"
+    "    New Context    viewport={'width': 1920, 'height': 1080}\n"
+    "    New Page    https://parabank.parasoft.com/parabank/register.htm\n"
+)
+
+
+def _n1(*body: str, tail: str = "") -> str:
+    return _N1_HEAD + "".join(f"    {line}\n" for line in body) + "    Close Browser" + tail
+
+
+_NAMES = ("Fill Text    ${customer_first_name_locator}    John",
+          "Fill Text    ${customer_last_name_locator}    Smith")
+_TYPE = "Fill Text    ${customer_city_locator}    NewYork"
+_ATTR = "${city_value}=    Get Attribute    ${customer_city_locator}    value"
+_PROP = "${city_value}=    Get Property    ${customer_city_locator}    value"
+_USE = "Should Be True    '${city_value}' == 'NewYork'"
+
+# Rule 2 for N1: the typed field's locator re-pointed between the typing and the read: (label, the file). The
+# control is the same file with the setter text replaced by a neutral `Log    x`, and IS rewritten.
+_N1_SETTER = "Set Test Variable    ${customer_city_locator}    id=other"
+_N1_SETTER_ANYWHERE = [
+    ("a wrapper argument", _n1(_TYPE, "Run Keyword If    True    " + _N1_SETTER, _ATTR, _USE)),
+    ("the file's own keyword", _n1(_TYPE, "Pick", _ATTR, _USE,
+                                   tail="\n\n*** Keywords ***\nPick\n    " + _N1_SETTER + "\n")),
+]
+_N1_SETTER_IDS = [case[0] for case in _N1_SETTER_ANYWHERE]
+
+# The shared reader's rules and N1's own-keyword guard, as for q08 (owner, 2026-09-30: "Close the class"): (label,
+# the file, the blocking text, its neutral replacement). The control is the same file with the blocking text
+# replaced, and IS rewritten.
+_N1_NAME_LINE = "Parabank Registration Test\n"
+_N1_REPOINT = "${customer_city_locator}=    Set Variable    id=other"
+_N1_ENTRY = "${customer_city_locator}    id=customer.address.city\n"
+_N1_CANNOT_TRUST = [
+    ("a typed assignment", _n1(_TYPE, "${customer_city_locator: str}=    Set Variable    id=other", _ATTR, _USE),
+     "${customer_city_locator: str}=    Set Variable    id=other", "Log    x"),
+    ("a step on the test-name line", _n1(_TYPE, _ATTR, _USE).replace(
+        _N1_NAME_LINE, "Parabank Registration Test    " + _N1_REPOINT + "\n"),
+     "Parabank Registration Test    " + _N1_REPOINT + "\n", _N1_NAME_LINE),
+    ("an indented continuation of the test-name line", _n1(_TYPE, _ATTR, _USE).replace(
+        _N1_NAME_LINE, _N1_NAME_LINE + "    ...    " + _N1_REPOINT + "\n"),
+     "    ...    " + _N1_REPOINT + "\n", "    Log    x\n"),
+    ("a bare continuation line at column 0", _n1("Log    x", _TYPE, _ATTR, _USE).replace(
+        "    Log    x\n", "...\n"), "\n...\n", "\n    Log    x\n"),
+    ("a line indented by one space starts a new test", _n1(_TYPE, "Log    x", _ATTR, _USE).replace(
+        "    Log    x\n", " Second Test    " + _N1_REPOINT + "\n"),
+     " Second Test    " + _N1_REPOINT + "\n", "    Log    x\n"),
+    ("a list of the same name first in Variables", _n1(_TYPE, _ATTR, _USE).replace(
+        _N1_ENTRY, "@{customer_city_locator}    id=other\n" + _N1_ENTRY),
+     "@{customer_city_locator}    id=other\n", "@{other_locator}    id=other\n"),
+    ("the file's own Set Variable keyword", _n1(
+        _TYPE, "${customer_city_locator}=    Set Variable    id=customer.address.city", _ATTR, _USE,
+        tail=_OWN_SET_VARIABLE), "\nSet Variable\n", "\nMy Helper\n"),
+]
+_N1_CANNOT_TRUST_IDS = [case[0] for case in _N1_CANNOT_TRUST]
+
+
+class TestTypedValueRewritten:
+    def test_the_corpus_shape(self):
+        """Bench run 8adaa3c8-ab51-4f78-8f69-38f161ba8360, byte for byte."""
+        assert rewrite_typed_value_reads(_n1(*_NAMES, _TYPE, _ATTR, _USE)) == _n1(*_NAMES, _TYPE, _PROP, _USE)
+
+    @pytest.mark.parametrize("typing", [
+        "Fill Text    ${customer_city_locator}    NewYork",
+        "Fill Secret    ${customer_city_locator}    $secret",
+        "Clear Text    ${customer_city_locator}",
+        "Type Text    ${customer_city_locator}    NewYork",
+        "Type Text    ${customer_city_locator}    NewYork    delay=10 ms",
+        "Type Secret    ${customer_city_locator}    $secret",
+        "Browser.Fill Text    ${customer_city_locator}    NewYork",
+    ])
+    def test_each_typing_keyword_that_proves_a_field(self, typing):
+        assert rewrite_typed_value_reads(_n1(typing, _ATTR, _USE)) == _n1(typing, _PROP, _USE)
+
+    def test_the_named_form_renames_the_argument(self):
+        attr = "${city_value}=    Get Attribute    ${customer_city_locator}    attribute=value"
+        prop = "${city_value}=    Get Property    ${customer_city_locator}    property=value"
+        assert rewrite_typed_value_reads(_n1(_TYPE, attr, _USE)) == _n1(_TYPE, prop, _USE)
+
+    def test_inline_assertion_arguments_keep_their_positions(self):
+        attr = "Get Attribute    ${customer_city_locator}    value    ==    NewYork"
+        prop = "Get Property    ${customer_city_locator}    value    ==    NewYork"
+        assert rewrite_typed_value_reads(_n1(_TYPE, attr)) == _n1(_TYPE, prop)
+
+    def test_the_browser_prefix_is_kept(self):
+        attr = "${city_value}=    Browser.Get Attribute    ${customer_city_locator}    value"
+        prop = "${city_value}=    Browser.Get Property    ${customer_city_locator}    value"
+        assert rewrite_typed_value_reads(_n1(_TYPE, attr, _USE)) == _n1(_TYPE, prop, _USE)
+
+    @pytest.mark.parametrize("typed, read", [("id=city", "css=#city"), ("css=#city", "id=city"),
+                                             ("id=city", "id=city")])
+    def test_the_same_element_in_every_spelling(self, typed, read):
+        typing = f"Fill Text    {typed}    NewYork"
+        attr = f"${{v}}=    Get Attribute    {read}    value"
+        prop = f"${{v}}=    Get Property    {read}    value"
+        assert rewrite_typed_value_reads(_n1(typing, attr)) == _n1(typing, prop)
+
+    def test_idempotent_and_logged(self, caplog):
+        with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
+            once = rewrite_typed_value_reads(_n1(_TYPE, _ATTR, _USE))
+        assert [r.getMessage() for r in caplog.records] == [
+            "Typed value normalizer: rewrote 1 Get Attribute … value line(s) to Get Property"]
+        assert rewrite_typed_value_reads(once) == once
+
+
+class TestTypedValueLeftAlone:
+    @pytest.mark.parametrize("label, body", [
+        ("a prefilled field the test never typed into", (_ATTR, _USE)),
+        ("typed into a different element", (_NAMES[0], _ATTR, _USE)),
+        ("the read before the typing", (_ATTR, _TYPE, _USE)),
+        ("Press Keys types into anything", ("Press Keys    ${customer_city_locator}    a", _ATTR)),
+        ("Type Text with clear switched off", ("Type Text    ${customer_city_locator}    x    clear=False", _ATTR)),
+        ("Type Text with clear given by position", ("Type Text    ${customer_city_locator}    x    0    False", _ATTR)),
+        ("Keyboard Input names no element", ("Click    ${customer_city_locator}", "Keyboard Input    type    x", _ATTR)),
+        ("Input Text is SeleniumLibrary's, not Browser's", ("Input Text    ${customer_city_locator}    x", _ATTR)),
+        ("another attribute", (_TYPE, "${t}=    Get Attribute    ${customer_city_locator}    title")),
+        ("an upper-case attribute name", (_TYPE, "${t}=    Get Attribute    ${customer_city_locator}    VALUE")),
+        ("a dotted id is not a CSS id", ("Fill Text    id=customer.address.city    x",
+                                        "${v}=    Get Attribute    css=#customer.address.city    value")),
+        ("a continuation on the read line", (_TYPE, _ATTR, "...    ==    NewYork")),
+        ("a continuation on the typing line", ("Type Text    ${customer_city_locator}    x", "...    clear=False", _ATTR)),
+        ("a non-Browser typing keyword", ("Other.Fill Text    ${customer_city_locator}    x", _ATTR)),
+        ("an IF block in the test", (_TYPE, "IF    True", "    Log    x", "END", _ATTR)),
+    ])
+    def test_left_alone(self, label, body):
+        source = _n1(*body)
+        assert rewrite_typed_value_reads(source) == source, label
+
+    def test_a_read_in_another_test_is_left_alone(self):
+        source = _n1(_TYPE, tail=f"\n\nSecond Test\n    {_ATTR}\n    {_USE}\n")
+        assert rewrite_typed_value_reads(source) == source
+
+    @pytest.mark.parametrize("definition", ["Get Attribute", "Get Property", "Fill Text", "get_attribute"])
+    def test_a_file_defining_the_keyword_itself_is_left_alone(self, definition):
+        source = _n1(_TYPE, _ATTR, _USE,
+                     tail=f"\n\n*** Keywords ***\n{definition}\n    [Arguments]    @{{a}}\n    Log    own\n")
+        assert rewrite_typed_value_reads(source) == source
+
+    def test_try_in_another_test_of_the_file(self):
+        source = _n1(_TYPE, _ATTR, _USE, tail=_OTHER_TEST_WITH_TRY)
+        assert rewrite_typed_value_reads(source) == source
+
+    def test_control_the_same_file_without_try_is_rewritten(self):
+        source = _n1(_TYPE, _ATTR, _USE, tail="\n\nOther Test\n    Click    id=x\n")
+        assert rewrite_typed_value_reads(source) == source.replace(_ATTR, _PROP)
+
+    def test_control_an_unrelated_own_keyword_does_not_block(self):
+        source = _n1(_TYPE, _ATTR, _USE, tail="\n\n*** Keywords ***\nMy Helper\n    Log    own\n")
+        assert rewrite_typed_value_reads(source) == source.replace(_ATTR, _PROP)
+
+    def test_an_assignment_only_line_leaves_the_test_alone(self):
+        # As for q08: Robot joins the two lines into one statement that re-points the read's locator (Rule 1).
+        source = _n1(_TYPE, "Click    id=go", "${customer_city_locator}=", "...    Set Variable    id=other",
+                     _ATTR, _USE)
+        assert rewrite_typed_value_reads(source) == source
+
+    def test_control_the_same_test_without_the_split_assignment_is_rewritten(self):
+        source = _n1(_TYPE, "Click    id=go", "Log    x", _ATTR, _USE)
+        assert rewrite_typed_value_reads(source) == source.replace(_ATTR, _PROP)
+
+    @pytest.mark.parametrize("label, source", _N1_SETTER_ANYWHERE, ids=_N1_SETTER_IDS)
+    def test_a_scoped_setter_or_var_anywhere_leaves_the_file_alone(self, label, source):
+        assert rewrite_typed_value_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source", _N1_SETTER_ANYWHERE, ids=_N1_SETTER_IDS)
+    def test_control_the_same_file_with_a_neutral_step_is_rewritten(self, label, source):
+        control = source.replace(_N1_SETTER, "Log    x")
+        assert control != source, label
+        assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_CANNOT_TRUST, ids=_N1_CANNOT_TRUST_IDS)
+    def test_what_the_reader_cannot_trust_is_left_alone(self, label, source, blocking, neutral):
+        assert rewrite_typed_value_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_CANNOT_TRUST, ids=_N1_CANNOT_TRUST_IDS)
+    def test_control_the_same_file_without_the_blocking_text_is_rewritten(self, label, source, blocking, neutral):
+        control = source.replace(blocking, neutral)
+        assert control != source, label
+        assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
+
+    def test_empty_and_none(self):
+        assert rewrite_typed_value_reads("") == ""
+        assert rewrite_typed_value_reads(None) is None

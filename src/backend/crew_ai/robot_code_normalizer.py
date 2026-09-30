@@ -32,9 +32,10 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies four smaller deterministic rules defined
+The same cleanup step also applies five smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
-`rewrite_visibility_checks_to_wait` and `rewrite_select_text_reads`.
+`rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads` and
+`rewrite_typed_value_reads`.
 
 Referenced by:
     src.backend.services.dryrun_service.extract_and_normalize_robot_code
@@ -1151,6 +1152,90 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     return _apply_rewrites(
         robot_code, suite, _select_read_rewrites(suite), _SELECT_READ_GUARD,
         "Select read normalizer", "Get Text line(s) on a select", "Get Selected Options",
+    )
+
+
+# Keywords that write a field's value AND fail on an element that is not a field
+# (measured, Browser 19.14.2: each raises "Element is not an <input>, <textarea>,
+# <select> or [contenteditable]" on a <div value>, <li value> or custom element).
+# Type Text / Type Secret only fail there because they clear the field first; with
+# `clear` switched off they type into anything, as `Press Keys` does — so neither
+# counts as proof that the element is a field.
+_TYPING_KEYWORDS = frozenset({"fill text", "fill secret", "clear text", "type text", "type secret"})
+# Set Variable: the shared reader trusts BuiltIn's meaning of it (_follow).
+_TYPED_READ_GUARD = ("Get Attribute", "Get Property", "Fill Text", "Fill Secret", "Clear Text",
+                     "Type Text", "Type Secret", "Set Variable")
+
+
+def _proves_a_field(step: _Step) -> bool:
+    """True when the typing step could only have succeeded on a field."""
+    if step.keyword in ("type text", "type secret"):
+        extra = step.args[2:]
+        return len(extra) <= 1 and not any(re.sub(r"[\s_]", "", a.lower()).startswith("clear=") for a in extra)
+    return True
+
+
+def _typed_value_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number -> rewritten line, for every Get Attribute read the typed-value rule accepts."""
+    rewrites = {}
+    for test in suite.tests:
+        if not test.followable:
+            continue
+        resolved = _follow(test, suite.variables)
+        typed: set[str] = set()
+        for i, step in enumerate(test.steps):
+            args = resolved[i]
+            if step.setting or step.prefix not in _BROWSER_PREFIXES or step.continued or not args:
+                continue
+            if step.keyword in _TYPING_KEYWORDS:
+                locator = _canon_locator(args[0])
+                if locator is not None and _proves_a_field(step):
+                    typed.add(locator)
+                continue
+            if (step.keyword == "get attribute" and len(step.args) >= 2
+                    and step.args[1] in ("value", "attribute=value")
+                    and _canon_locator(args[0]) in typed):
+                rewrites[step.line_no] = _rebuild(
+                    step, "Get Property",
+                    replace_second_arg="property=value" if step.args[1] == "attribute=value" else None,
+                )
+    return rewrites
+
+
+def rewrite_typed_value_reads(robot_code: str) -> str:
+    """Rewrite `Get Attribute    <L>    value` to `Get Property    <L>    value`
+    when the same test typed into <L> earlier — a read that cannot see the typing.
+
+    The `value` ATTRIBUTE is the field's initial value; what the test typed
+    lives in the `value` PROPERTY. So after `Fill Text    <L>    NewYork`,
+    `Get Attribute    <L>    value` returns '' (or the prefilled default) and a
+    correct test fails. Only after a typing step on the same element (same
+    resolution rules as `rewrite_select_text_reads`) that proves the element is
+    a field: Fill Text, Fill Secret, Clear Text, and Type Text / Type Secret
+    unless `clear` is switched off. The named form `attribute=value` becomes
+    `property=value` (swapping only the keyword would ask for a property
+    literally named "attribute=value", which dryrun cannot catch); inline
+    assertion arguments keep their positions. Nothing else: an element nothing
+    typed into (`<div value>`, `<li value>`, custom elements, `<option>`, a
+    prefilled field the test never typed into — there the property is None or
+    an int), a read in another test, a `...` continuation, a locator that
+    *** Variables *** defines as a list, a dict or a typed value, a test with a
+    control structure, a template, a step on its name line or a line the reader
+    cannot read as a step, and whole files that define their own `Get Attribute`
+    / `Get Property` / typing keyword / `Set Variable`, catch errors, use
+    pipe-separated lines, or hold a scoped `Set … Variable` or `VAR` anywhere.
+    Idempotent.
+    """
+    if not robot_code:
+        return robot_code
+    if "getattribute" not in re.sub(r"[\s_]", "", robot_code.lower()):
+        return robot_code
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _typed_value_rewrites(suite), _TYPED_READ_GUARD,
+        "Typed value normalizer", "Get Attribute … value line(s)", "Get Property",
     )
 
 
