@@ -11,10 +11,13 @@ vacuously has a control that proves the same file WITHOUT the blocking detail
 is rewritten.
 """
 
+import logging
+
 import pytest
 
 from src.backend.crew_ai.robot_code_normalizer import (
     _scan_file_guard,
+    rewrite_select_text_reads,
 )
 
 # ---------------------------------------------------------------------------
@@ -83,3 +86,325 @@ class TestScanFileGuard:
     def test_a_rare_linebreak_makes_section_state_unsafe(self):
         code = _suite(_SELECT, "Log    a\x1cb")
         assert _scan_file_guard(code, ("gettext",)).unsafe_section_state is True
+
+
+# ---------------------------------------------------------------------------
+# rewrite_select_text_reads — rewritten
+# ---------------------------------------------------------------------------
+
+class TestSelectReadRewritten:
+    def test_the_corpus_shape(self):
+        """Bench run 0ee28976-9924-4385-90ae-6a7259235cb2, byte for byte."""
+        source = _suite(_SELECT, _READ, _CHECK)
+        assert rewrite_select_text_reads(source) == _suite(_SELECT, _READ_NEW, _CHECK)
+
+    @pytest.mark.parametrize("attribute, value", [("label", "Option 2"), ("value", "2"), ("text", "Option 2"),
+                                                  ("LABEL", "Option 2")])
+    def test_the_select_attribute_is_carried_over(self, attribute, value):
+        select = f"Select Options By    ${{dropdown_locator}}    {attribute}    {value}"
+        check = f"Should Contain    ${{selected_option}}    {value}"
+        expected = f"${{selected_option}}=    Get Selected Options    ${{get_text_locator}}    {attribute}"
+        assert rewrite_select_text_reads(_suite(select, _READ, check)) == _suite(select, expected, check)
+
+    def test_a_multi_select_checks_membership_of_each_value(self):
+        select = "Select Options By    id=multi    value    a    c"
+        read = "${chosen}=    Get Text    css=#multi"
+        checks = ("Should Contain    ${chosen}    a", "Should Contain    ${chosen}    c")
+        expected = "${chosen}=    Get Selected Options    css=#multi    value"
+        assert rewrite_select_text_reads(_suite(select, read, *checks)) == _suite(select, expected, *checks)
+
+    @pytest.mark.parametrize("select_locator, read_locator", [
+        ("id=dropdown", "css=#dropdown"),
+        ("css=#dropdown", "id=dropdown"),
+        ("id=dropdown", "id=dropdown"),
+        ("${dropdown_locator}", "css=#dropdown"),
+        ("xpath=//select[@id='dropdown']", "xpath=//select[@id='dropdown']"),
+    ])
+    def test_the_same_element_in_every_spelling(self, select_locator, read_locator):
+        select = f"Select Options By    {select_locator}    label    Option 2"
+        read = f"${{selected_option}}=    Get Text    {read_locator}"
+        expected = f"${{selected_option}}=    Get Selected Options    {read_locator}    label"
+        assert rewrite_select_text_reads(_suite(select, read, _CHECK)) == _suite(select, expected, _CHECK)
+
+    def test_a_variable_assigned_earlier_in_the_test_resolves(self):
+        body = ("${sel}=    Set Variable    id=dropdown", "Select Options By    ${sel}    label    Option 2",
+                _READ, _CHECK)
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(*body[:2], _READ_NEW, _CHECK)
+
+    def test_variable_names_compare_as_robot_compares_them(self):
+        check = "Should Contain    ${Selected Option}    Option 2"
+        assert rewrite_select_text_reads(_suite(_SELECT, _READ, check)) == _suite(_SELECT, _READ_NEW, check)
+
+    def test_a_variables_entry_written_with_an_equals_sign_resolves(self):
+        source = _suite(_SELECT, _READ, _CHECK).replace("${dropdown_locator}    id=", "${dropdown_locator}=    id=")
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    def test_the_browser_prefix_is_kept(self):
+        read = "${selected_option}=    Browser.Get Text    ${get_text_locator}"
+        expected = "${selected_option}=    Browser.Get Selected Options    ${get_text_locator}    label"
+        assert rewrite_select_text_reads(_suite(_SELECT, read, _CHECK)) == _suite(_SELECT, expected, _CHECK)
+
+    def test_builtin_prefixed_uses_and_a_log_are_allowed(self):
+        body = (_SELECT, _READ, "Log    Selected: ${selected_option}",
+                "BuiltIn.Should Contain    ${selected_option}    Option 2")
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, *body[2:])
+
+    @pytest.mark.parametrize("operator", ["contains", "*=", "Contains"])
+    def test_the_inline_assertion_form(self, operator):
+        read = f"Get Text    ${{get_text_locator}}    {operator}    Option 2"
+        expected = f"Get Selected Options    ${{get_text_locator}}    label    {operator}    Option 2"
+        assert rewrite_select_text_reads(_suite(_SELECT, read)) == _suite(_SELECT, expected)
+
+    def test_a_second_read_of_the_same_select_is_rewritten_too(self):
+        body = (_SELECT, _READ, _CHECK, "${again}=    Get Text    id=dropdown", "Should Contain    ${again}    Option 2")
+        expected = (_SELECT, _READ_NEW, _CHECK, "${again}=    Get Selected Options    id=dropdown    label",
+                    "Should Contain    ${again}    Option 2")
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(*expected)
+
+    def test_a_reused_variable_name_for_the_second_read(self):
+        body = (_SELECT, _READ, _CHECK, _READ, _CHECK)
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, _CHECK, _READ_NEW, _CHECK)
+
+    def test_two_selects_in_one_test_each_keep_their_attribute(self):
+        body = ("Select Options By    id=size    value    m", "Select Options By    id=colour    label    Red",
+                "${s}=    Get Text    css=#size", "Should Contain    ${s}    m",
+                "${c}=    Get Text    css=#colour", "Should Contain    ${c}    Red")
+        expected = (body[0], body[1], "${s}=    Get Selected Options    css=#size    value", body[3],
+                    "${c}=    Get Selected Options    css=#colour    label", body[5])
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(*expected)
+
+    def test_the_latest_select_on_the_element_decides(self):
+        body = ("Select Options By    id=dropdown    label    Option 1", _SELECT, _READ, _CHECK)
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(body[0], _SELECT, _READ_NEW, _CHECK)
+
+    def test_a_page_change_between_select_and_read_is_still_rewritten(self):
+        # Review Focus 2: the check now reads the real selection; a page that dropped
+        # the choice fails, which is the honest verdict for "verify Option 2 is selected".
+        body = (_SELECT, "Click    id=submit", "Reload", _READ, _CHECK)
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(*body[:3], _READ_NEW, _CHECK)
+
+    def test_a_trailing_comment_stays_after_the_new_cell(self):
+        read = "${selected_option}=    Get Text    ${get_text_locator}    # read it back"
+        expected = "${selected_option}=    Get Selected Options    ${get_text_locator}    label    # read it back"
+        assert rewrite_select_text_reads(_suite(_SELECT, read, _CHECK)) == _suite(_SELECT, expected, _CHECK)
+
+    def test_crlf_line_endings_survive(self):
+        source = _suite(_SELECT, _READ, _CHECK).replace("\n", "\r\n")
+        assert rewrite_select_text_reads(source) == _suite(_SELECT, _READ_NEW, _CHECK).replace("\n", "\r\n")
+
+    def test_tab_separated_cells_keep_their_separator(self):
+        read = "${selected_option}=\tGet Text\t${get_text_locator}"
+        expected = "${selected_option}=\tGet Selected Options\t${get_text_locator}\tlabel"
+        assert rewrite_select_text_reads(_suite(_SELECT, read, _CHECK)) == _suite(_SELECT, expected, _CHECK)
+
+    def test_a_test_named_like_the_keyword_does_not_block(self):
+        # #113's rule: a test name is not a keyword definition.
+        source = _suite(_SELECT, _READ, _CHECK, tail="\n\nGet Text\n    Log    a test, not a keyword\n")
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    def test_an_unrelated_own_keyword_does_not_block(self):
+        source = _suite(_SELECT, _READ, _CHECK, tail="\n\n*** Keywords ***\nMy Helper\n    Log    own\n")
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    def test_a_reassignment_after_the_check_ends_the_scan(self):
+        body = (_SELECT, _READ, _CHECK, "${selected_option}=    Set Variable    other",
+                "Should Be Equal    ${selected_option}    other")
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, *body[2:])
+
+
+# ---------------------------------------------------------------------------
+# rewrite_select_text_reads — left alone
+# ---------------------------------------------------------------------------
+
+# Where a scoped setter or `VAR` re-points the read's locator variable out of a test-by-test reading's sight (each
+# position re-points it in Robot 7.4.2 — planning evidence): (label, the file, the setter text). The control is the
+# same file with the setter text replaced by a neutral `Log    x`, and IS rewritten.
+_SET_TEST = "Set Test Variable    ${get_text_locator}    id=other"
+_SET_SUITE = "Set Suite Variable    ${get_text_locator}    id=other"
+_VAR_SUITE = "VAR    ${get_text_locator}    id=other    scope=SUITE"
+_SQUASHED = "SetTestVariable    ${get_text_locator}    id=other"
+_SETTER_ANYWHERE = [
+    ("a wrapper argument", _suite(_SELECT, "Run Keyword If    True    " + _SET_TEST, _READ, _CHECK), _SET_TEST),
+    ("the file's own keyword", _suite(_SELECT, "Pick", _READ, _CHECK,
+                                      tail="\n\n*** Keywords ***\nPick\n    " + _SET_TEST + "\n"), _SET_TEST),
+    ("an earlier test's Set Suite Variable", _suite(_SELECT, _READ, _CHECK).replace(
+        "*** Test Cases ***\n", "*** Test Cases ***\nPoint Elsewhere\n    " + _SET_SUITE + "\n\n"), _SET_SUITE),
+    ("an earlier test's VAR with scope=SUITE", _suite(_SELECT, _READ, _CHECK).replace(
+        "*** Test Cases ***\n", "*** Test Cases ***\nPoint Elsewhere\n    " + _VAR_SUITE + "\n\n"), _VAR_SUITE),
+    ("a Suite Setup in Settings", _suite(_SELECT, _READ, _CHECK).replace(
+        "Library    Collections\n", "Library    Collections\nSuite Setup    " + _SET_SUITE + "\n"), _SET_SUITE),
+    ("the test's own Setup setting", _suite("[Setup]    " + _SET_TEST, _SELECT, _READ, _CHECK), _SET_TEST),
+    ("SetTestVariable without spaces as the step", _suite(_SELECT, _SQUASHED, _READ, _CHECK), _SQUASHED),
+]
+_SETTER_IDS = [case[0] for case in _SETTER_ANYWHERE]
+
+
+class TestSelectReadLeftAlone:
+    @pytest.mark.parametrize("label, body", [
+        ("select by index", ("Select Options By    ${dropdown_locator}    index    2", _READ,
+                             "Should Contain    ${selected_option}    2")),
+        ("custom dropdown: no Select Options By", ("Click    css=.react-select", "Click    text=Option 2",
+                                                   "${selected_option}=    Get Text    css=.react-select", _CHECK)),
+        ("Get Text on the selected <option> itself", (
+            _SELECT, "${selected_option}=    Get Text    css=#dropdown option[selected]", _CHECK)),
+        ("an xpath read of an id-selected select", (
+            _SELECT, "${selected_option}=    Get Text    xpath=//select[@id='dropdown']", _CHECK)),
+        ("Should Be Equal already fails loudly", (_SELECT, _READ, "Should Be Equal    ${selected_option}    Option 2")),
+        ("any other use of the variable", (_SELECT, _READ, "Should Be True    '${selected_option}' != ''", _CHECK)),
+        ("an expression use", (_SELECT, _READ, _CHECK, "Should Be True    $selected_option")),
+        ("an item use", (_SELECT, _READ, _CHECK, "Log    ${selected_option}[0]",
+                         "Should Be Empty    ${selected_option}[0]")),
+        ("Should Contain with an extra argument", (
+            _SELECT, _READ, "Should Contain    ${selected_option}    Option 2    ignore_case=True")),
+        ("Log To Console is not Log", (_SELECT, _READ, _CHECK, "Log To Console    ${selected_option}")),
+        ("presence query: V is not the selected value", (
+            _SELECT, _READ, "Should Contain    ${selected_option}    Option 1")),
+        ("one of two checks names another value", (
+            _SELECT, _READ, _CHECK, "Should Contain    ${selected_option}    Option 1")),
+        ("a different element", (_SELECT, "${selected_option}=    Get Text    id=result", _CHECK)),
+        ("the read before the select", (_READ, _SELECT, _CHECK)),
+        ("Log only: the 50dcf346 shape", (_SELECT, "${selected_text}=    Get Text    ${get_text_locator}",
+                                          "Log    Retrieved: ${selected_text}")),
+        ("no use at all", (_SELECT, _READ)),
+        ("inline == fails loudly already", (_SELECT, "Get Text    ${get_text_locator}    ==    Option 2")),
+        ("inline form with an assignment", (
+            _SELECT, "${t}=    Get Text    ${get_text_locator}    contains    Option 2",
+            "Should Contain    ${t}    Option 2")),
+        ("inline form naming another value", (_SELECT, "Get Text    ${get_text_locator}    contains    Option 1")),
+        ("inline form with a message argument", (
+            _SELECT, "Get Text    ${get_text_locator}    contains    Option 2    msg")),
+        ("a non-Browser library prefix", (
+            _SELECT, "${selected_option}=    Other.Get Text    ${get_text_locator}", _CHECK)),
+        ("a select value that is only known at run time", (
+            "${wanted}=    Get Text    id=label", "Select Options By    ${dropdown_locator}    label    ${wanted}",
+            _READ, "Should Contain    ${selected_option}    ${wanted}")),
+        ("a select on an element that cannot be named", (
+            _SELECT, "Select Options By    ${unknown}    label    Option 1", _READ, _CHECK)),
+        ("the locator variable redefined between select and read", (
+            "Select Options By    ${get_text_locator}    label    Option 2",
+            "${get_text_locator}=    Set Variable    id=other", _READ, _CHECK)),
+        ("the locator variable made unknown between select and read", (
+            _SELECT, "Set Test Variable    ${get_text_locator}    id=other", _READ, _CHECK)),
+        ("a [Teardown] at the top uses the variable", (
+            "[Teardown]    Should Be Equal    ${selected_option}    Option 2", _SELECT, _READ, _CHECK)),
+        ("an IF block in the test", (_SELECT, "IF    True", "    Log    x", "END", _READ, _CHECK)),
+        ("a FOR loop in the test", (_SELECT, "FOR    ${i}    IN    a", "    Log    ${i}", "END", _READ, _CHECK)),
+        ("a VAR statement in the test", ("VAR    ${x}    1", _SELECT, _READ, _CHECK)),
+        ("a [Template] test", ("[Template]    Log", _SELECT, _READ, _CHECK)),
+    ])
+    def test_left_alone(self, label, body):
+        source = _suite(*body)
+        assert rewrite_select_text_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, body", [
+        ("continuation on the select line", (_SELECT, "...    Option 1", _READ, _CHECK)),
+        ("continuation on the read line", (_SELECT, _READ, "...    contains    Option 2", _CHECK)),
+        ("continuation on the check line", (_SELECT, _READ, _CHECK, "...    ignore_case=True")),
+        ("the variable only on a continuation line", (
+            _SELECT, _READ, _CHECK, "Should Be Equal", "...    ${selected_option}    x")),
+    ])
+    def test_a_continuation_line_is_never_followed(self, label, body):
+        # docs/TODO.md rows 18 and 22: the line model does not follow `...` lines — inherited, not fixed.
+        # Each first line is complete on its own, so only the continuation rule can leave the file alone
+        # (a first line missing its value, locator or expected text is skipped for that reason instead,
+        # and would pass even if the rule followed continuations — proved by mutation in the planning dry run).
+        source = _suite(*body)
+        assert rewrite_select_text_reads(source) == source, label
+
+    def test_a_read_in_another_test_is_left_alone(self):
+        source = _suite(_SELECT, tail=f"\n\nSecond Test\n    {_READ}\n    {_CHECK}\n")
+        assert rewrite_select_text_reads(source) == source
+
+    @pytest.mark.parametrize("definition", [
+        "Get Text", "get_text", "GetText", "Get ${what}", "Get Selected Options", "Select Options By",
+    ])
+    def test_a_file_defining_the_keyword_itself_is_left_alone(self, definition):
+        source = _suite(_SELECT, _READ, _CHECK,
+                        tail=f"\n\n*** Keywords ***\n{definition}\n    [Arguments]    @{{a}}\n    Log    own\n")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_a_settings_section_teardown_using_the_variable(self):
+        source = _suite(_SELECT, _READ, _CHECK).replace(
+            "Library    Collections\n", "Library    Collections\nTest Teardown    Log    ${selected_option}\n")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_a_test_template_in_settings(self):
+        source = _suite(_SELECT, _READ, _CHECK).replace(
+            "Library    Collections\n", "Library    Collections\nTest Template    Log\n")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_try_in_another_test_of_the_file(self):
+        source = _suite(_SELECT, _READ, _CHECK, tail=_OTHER_TEST_WITH_TRY)
+        assert rewrite_select_text_reads(source) == source
+
+    def test_control_the_same_file_without_try_is_rewritten(self):
+        source = _suite(_SELECT, _READ, _CHECK, tail="\n\nOther Test\n    Click    id=x\n")
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    def test_own_keyword_under_an_error_catching_wrapper(self):
+        source = _suite("Run Keyword And Return Status    Pick", _SELECT, _READ, _CHECK,
+                        tail="\n\n*** Keywords ***\nPick\n    Click    id=x\n")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_control_the_same_file_without_the_wrapper_is_rewritten(self):
+        source = _suite("Pick", _SELECT, _READ, _CHECK, tail="\n\n*** Keywords ***\nPick\n    Click    id=x\n")
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    def test_an_assignment_only_line_leaves_the_test_alone(self):
+        # Robot joins `${x}=` and the `...` line under it into ONE statement that re-points the read's locator
+        # (Robot 7.4.2, planning evidence); the reader holds no step for an assignment-only line (Rule 1).
+        source = _suite(_SELECT, "Click    id=go", "${get_text_locator}=", "...    Set Variable    id=other",
+                        _READ, _CHECK)
+        assert rewrite_select_text_reads(source) == source
+
+    def test_control_the_same_test_without_the_split_assignment_is_rewritten(self):
+        source = _suite(_SELECT, "Click    id=go", "Log    x", _READ, _CHECK)
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    @pytest.mark.parametrize("label, source, setter", _SETTER_ANYWHERE, ids=_SETTER_IDS)
+    def test_a_scoped_setter_or_var_anywhere_leaves_the_file_alone(self, label, source, setter):
+        # Rule 2: the whole file is left alone, silently, as for a pipe-separated line.
+        assert rewrite_select_text_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, setter", _SETTER_ANYWHERE, ids=_SETTER_IDS)
+    def test_control_the_same_file_with_a_neutral_step_is_rewritten(self, label, source, setter):
+        control = source.replace(setter, "Log    x")
+        assert control != source, label
+        assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
+
+    def test_a_pipe_separated_line_anywhere(self):
+        source = _suite(_SELECT, _READ, _CHECK).replace("${headless}    True", "| ${headless} | True |")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_a_rare_linebreak_anywhere(self):
+        source = _suite(_SELECT, _READ, _CHECK, "Log    a\x1cb")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_empty_and_none(self):
+        assert rewrite_select_text_reads("") == ""
+        assert rewrite_select_text_reads(None) is None
+
+
+class TestSelectReadIdempotentAndLogged:
+    def test_a_second_pass_changes_nothing(self):
+        once = rewrite_select_text_reads(_suite(_SELECT, _READ, _CHECK))
+        assert once != _suite(_SELECT, _READ, _CHECK)
+        assert rewrite_select_text_reads(once) == once
+
+    def test_one_info_line_per_fired_rewrite(self, caplog):
+        with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
+            rewrite_select_text_reads(_suite(_SELECT, _READ, _CHECK))
+        assert [r.getMessage() for r in caplog.records] == [
+            "Select read normalizer: rewrote 1 Get Text line(s) on a select to Get Selected Options"]
+
+    def test_a_guarded_file_says_why_it_was_left_alone(self, caplog):
+        source = _suite(_SELECT, _READ, _CHECK, tail="\n\n*** Keywords ***\nGet Text\n    Log    own\n")
+        with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
+            rewrite_select_text_reads(source)
+        assert "left 1 Get Text line(s) on a select unchanged" in caplog.text
+        assert "(Get Text)" in caplog.text
+
+    def test_nothing_is_logged_when_nothing_fires(self, caplog):
+        with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
+            rewrite_select_text_reads(_suite(_SELECT, "${t}=    Get Text    id=other", "Log    ${t}"))
+        assert caplog.records == []
