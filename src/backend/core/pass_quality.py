@@ -136,7 +136,7 @@ _LITERALS = (
 )
 _CHAIN_SPLIT = re.compile(r">>>?")
 _NTH_PART = re.compile(r"nth\s*=\s*-?\d+")
-_NUMERIC_ID = re.compile(r"(?:^id=|#|\[id=[\"']?)(\d{4,})")
+_NUMERIC_ID = re.compile(r"(?:(?:^id=)|#|\[id=[\"']?)(\d{4,})")
 _ID_FORMS = tuple(re.compile(p) for p in (
     r"(?:css=)?#([\w-]+)",
     r"(?:css=)?select#([\w-]+)",
