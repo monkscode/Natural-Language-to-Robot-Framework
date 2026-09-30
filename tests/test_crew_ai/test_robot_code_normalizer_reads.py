@@ -469,6 +469,10 @@ _AFTER_THE_READ = [
     # same file without the `language:` line.
     ("L1 a translated Test Teardown", _FI + _with_setting(f"Testin Alasajo    {_RF_VAR_USE}"),
      _with_setting(f"Testin Alasajo    {_RF_VAR_USE}")),
+    # Robot strips a leading byte-order mark before it reads the first line, so the `language:` line still counts.
+    ("L1 with a byte-order mark before the language line",
+     "\N{ZERO WIDTH NO-BREAK SPACE}" + _FI + _with_setting(f"Testin Alasajo    {_RF_VAR_USE}"),
+     _with_setting(f"Testin Alasajo    {_RF_VAR_USE}")),
     ("L2 a translated [Teardown] at the top of the test",
      _FI + _suite(f"[Alasajo]    {_RF_VAR_USE}", _SELECT, _READ, _CHECK),
      _suite(f"[Alasajo]    {_RF_VAR_USE}", _SELECT, _READ, _CHECK)),

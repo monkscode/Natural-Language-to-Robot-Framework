@@ -1011,7 +1011,7 @@ _SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
 # A `$` that starts no variable, or an escaped `\${`: Robot can build a variable name from it at run time.
 _BARE_OR_ESCAPED_DOLLAR_RE = re.compile(r"\$(?!\{)|\\\$\{")
 # A `language:` line makes Robot accept translated settings and headers (e.g. a teardown) the reader cannot see.
-_LANGUAGE_LINE_RE = re.compile(r"^[^\S\n]*language:", re.IGNORECASE | re.MULTILINE)
+_LANGUAGE_LINE_RE = re.compile(r"^\N{ZERO WIDTH NO-BREAK SPACE}?[^\S\n]*language:", re.IGNORECASE | re.MULTILINE)
 # Browser's close keywords, compared lower-cased without spaces: allowed after a rewritten read.
 _CLOSE_KEYWORDS = frozenset({"closebrowser", "closecontext", "closepage"})
 # A character that can name or build a variable: a cell without one is literal text.
