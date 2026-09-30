@@ -1170,8 +1170,10 @@ _TYPED_READ_GUARD = ("Get Attribute", "Get Property", "Fill Text", "Fill Secret"
 def _proves_a_field(step: _Step) -> bool:
     """True when the typing step could only have succeeded on a field."""
     if step.keyword in ("type text", "type secret"):
-        extra = step.args[2:]
-        return len(extra) <= 1 and not any(re.sub(r"[\s_]", "", a.lower()).startswith("clear=") for a in extra)
+        if any(a.startswith(("@{", "&{")) for a in step.args):
+            return False  # an expanded list or dict may carry `clear`
+        rest = step.args[1:]  # `clear=` may be named before the text
+        return len(rest) <= 2 and not any(re.sub(r"[\s_]", "", a.lower()).startswith("clear=") for a in rest)
     return True
 
 
