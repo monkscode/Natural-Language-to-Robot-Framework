@@ -712,11 +712,14 @@ def _canon_locator(value: str | None) -> str | None:
 
 
 def _mentions_variable(text: str, canon: str) -> bool:
-    """True when `text` refers to the variable `canon` in any form Robot reads:
-    `${x}`, `@{x}`, `&{x}`, `${x}[0]`, `${x.attr}`, `${ X }` or `$x` in an
-    expression — and whenever it holds a variable nested inside another
-    (`${x${EMPTY}}`), whose name may resolve to `x`. Over-matching only makes a
-    rewrite skip, never fire."""
+    """True when `text` holds a braced reference whose name compares equal to
+    `canon` — `${x}`, `@{x}`, `&{x}`, `%{x}`, also `${x}[0]`, `${x.attr}` or
+    `${ X }` — or `$x` in an expression, and whenever it holds a variable
+    nested inside another (`${x${EMPTY}}`), whose name may resolve to `x`. It
+    does not see a name Robot builds from text (`@x`, `RF_VAR_x`, `\\x24x`,
+    `${vars}[x]`); the select rewrite allows only its check, a Log and a close
+    after the read for that reason. Over-matching only makes a rewrite skip,
+    never fire."""
     if _NESTED_VARIABLE_RE.search(text):
         return True
     for ref in _VARIABLE_REF_RE.findall(text):
@@ -998,62 +1001,82 @@ def _apply_rewrites(robot_code: str, suite: _Suite, rewrites: dict[int, str],
 
 _SELECT_ATTRIBUTES = frozenset({"label", "value", "text"})
 _CONTAINS_OPERATORS = frozenset({"contains", "*="})
-# Get Text / Get Selected Options / Select Options By are the rewrite's own evidence; Set Variable, Should Contain
-# and Log are the keywords whose BuiltIn meaning the reader relies on (_follow, the use check).
-_SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "Set Variable", "Should Contain", "Log")
+# Get Text / Get Selected Options / Select Options By are the rewrite's own evidence; Set Variable, Should Contain,
+# Log and the three close keywords are the keywords whose library meaning the reader relies on (_follow, the steps
+# allowed after the read).
+_SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "Set Variable", "Should Contain", "Log",
+                      "Close Browser", "Close Context", "Close Page")
 # The keywords that change a <select>'s selection, compared lower-cased without spaces or underscores.
 _SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
 # A `$` that starts no variable, or an escaped `\${`: Robot can build a variable name from it at run time.
 _BARE_OR_ESCAPED_DOLLAR_RE = re.compile(r"\$(?!\{)|\\\$\{")
+# Browser's close keywords, compared lower-cased without spaces: allowed after a rewritten read.
+_CLOSE_KEYWORDS = frozenset({"closebrowser", "closecontext", "closepage"})
+# A character that can name or build a variable: a cell without one is literal text.
+_NOT_LITERAL_RE = re.compile(r"[$@&%\\{}]")
 
 
 def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: str,
                               values: frozenset[str], resolved: list[list[str | None]]) -> bool:
-    """True when every later mention of `${name}` is `Should Contain ${name} V`
-    with V a selected value, or a `Log` of the bare `${name}`, and at least one
-    is the Should Contain.
+    """True when only allowed steps run after the read and at least one is the
+    check `Should Contain ${name} V` with V a selected value.
 
-    Mentions are looked for on every line of the test after the read (a `...`
-    line too), on the test's own [Setting] lines wherever they sit ([Teardown]
-    runs last), and in the Settings section (a Test Teardown sees the test's
-    variables). A later line that only re-assigns `${name}` ends the scan.
+    Every line of the test after the read must be that check, a `Log` of the
+    bare `${name}` whose other cells are literal, or Browser's `Close Browser`
+    / `Close Context` / `Close Page` with literal arguments (none of
+    `$ @ & % \\ { }`); a `...` line never is, and blank and comment lines hold
+    no step.
+    Anything else — another keyword, an assignment, a second read, a [Setting]
+    line — leaves the read alone: Robot can reach `${name}` through a name it
+    builds at run time (`@name`, `RF_VAR_name`, `\\x24name`, `Get Variables`),
+    which no reading of the text follows. A teardown runs after the read too,
+    so the test may hold no [Teardown] and the Settings section no Test, Task
+    or Suite Teardown. The test's [Setting] lines before the read and the
+    Settings section may not mention `${name}` either.
     """
     by_line = {step.line_no: (step, resolved[i]) for i, step in enumerate(test.steps)}
     read_line = test.steps[read_at].line_no
     checked = False
 
     def allowed(line_no: int) -> str:
-        """'skip' (no mention), 'check', 'log', 'reassign' or 'no'."""
+        """'skip' (no mention), 'check', 'log' or 'no'."""
         content = _line_content(suite.lines[line_no])
         if not _mentions_variable(content, name):
             return "skip"
         step, args = by_line.get(line_no, (None, None))
-        if step is None or step.setting or step.continued:
-            return "no"
-        if step.assigns == [name] and not any(_mentions_variable(a, name) for a in step.args):
-            return "reassign"
-        if step.assigns:
+        if step is None or step.setting or step.continued or step.assigns:
             return "no"
         if step.keyword == "log" and step.prefix in _BUILTIN_PREFIXES:
             # Only the bare `${name}`, outside any other `{…}`: `${x.upper()}`, `${x}[0]`, `$x`, `@{x}` or
-            # `${{ … }}` would work on the list the rewrite returns, not on the text Get Text returned.
+            # `${{ … }}` would work on the list the rewrite returns, not on the text Get Text returned. Its other
+            # cells must be literal: `level=${{ … RF_VAR_x … }}` would evaluate the list too.
             rest = re.sub(r"\$\{([^{}]*)\}(?!\[)", lambda m: "" if (
                 _canon_variable(m.group(1)) == name
                 and m.string.count("{", 0, m.start()) == m.string.count("}", 0, m.start())) else m.group(0), content)
-            return "no" if _mentions_variable(rest, name) else "log"
+            return "no" if _mentions_variable(rest, name) or _NOT_LITERAL_RE.search(rest) else "log"
         target = _SCALAR_CELL_RE.fullmatch(step.args[0]) if step.args else None
         if (step.keyword == "should contain" and step.prefix in _BUILTIN_PREFIXES and len(step.args) == 2
                 and target and _canon_variable(target.group(1)) == name and args[1] in values):
             return "check"
         return "no"
 
+    def closes(line_no: int) -> bool:
+        """True for Browser's Close Browser / Close Context / Close Page with literal arguments only."""
+        step = by_line.get(line_no, (None, None))[0]
+        return (step is not None and not step.setting and not step.continued and not step.assigns
+                and step.keyword.replace(" ", "") in _CLOSE_KEYWORDS and step.prefix in _BROWSER_PREFIXES
+                and not any(_NOT_LITERAL_RE.search(arg) for arg in step.args))
+
     for line_no in (no for no in test.line_nos if no > read_line):
         verdict = allowed(line_no)
-        if verdict == "reassign":
-            break  # a fresh value: later mentions are about it, not about this read
-        if verdict == "no":
+        if verdict == "no" or (verdict == "skip" and not closes(line_no)):
             return False
         checked = checked or verdict == "check"
+    if any(s.setting and "teardown" in re.sub(r"[\s_\[\]]", "", s.keyword) for s in test.steps):
+        return False  # a [Teardown] runs after the read, wherever it sits
+    if any("teardown" in re.sub(r"[\s_]", "", _CELL_SPLIT_RE.split(suite.lines[no].strip())[0].lower())
+           for no in suite.settings_line_nos):
+        return False  # so does a Test, Task or Suite Teardown
     elsewhere = [s.line_no for s in test.steps if s.setting and s.line_no < read_line] + suite.settings_line_nos
     if any(allowed(line_no) != "skip" for line_no in elsewhere):
         return False
@@ -1140,31 +1163,39 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     `Select Options By    <L>    label|value|text    <V>...` targets the same
     element — the same text once `${var}`s are resolved (from *** Variables ***
     or an earlier `Set Variable`), with `id=x` and `css=#x` equal — and
-    every later mention of `${x}` is `Should Contain    ${x}    <V>` (V one of
-    the selected values; at least one such line) or a `Log` of the bare
-    `${x}`. Also the inline form `Get Text    <L>    contains|*=    <V>`.
-    `<attr>` is the attribute the select used; the `Browser.` prefix is kept.
+    after the read the test runs only `Should Contain    ${x}    <V>` (V one of
+    the selected values; at least one such line), a `Log` of the bare `${x}`
+    whose other cells are literal, and Browser's `Close Browser` / `Close
+    Context` / `Close Page` with literal arguments (blank and comment lines
+    between are fine), and no teardown: Robot can reach `${x}` through a name
+    it builds at run time (`@x`, `RF_VAR_x`, `\\x24x`, `Get Variables`, a name a
+    keyword or Python computes), so no other step may follow the read. Also
+    the inline form `Get Text    <L>    contains|*=    <V>`, which assigns
+    nothing a later step could reach. `<attr>` is the attribute the select
+    used; the `Browser.` prefix is kept.
     Nothing else: `index` selects, custom dropdowns (no `Select Options By`), a
-    read of the selected `<option>` itself, `Should Be Equal` or any other use
-    of `${x}`, a V that is not selected (a "still listed" check), a different
-    element, a `...` continuation on either line, a read before the select, a
-    select or deselect in between that this reader cannot follow (behind a
-    wrapper, spelled without spaces, on an element it cannot name, or on another
-    element not named by a plain `id=`), a locator that *** Variables ***
-    defines as a list, a dict or a typed value, a later line holding a
-    variable nested inside another (`${selected_${EMPTY}option}`), a test with
-    a control structure, a template, a step on its name line or a line this
-    reader cannot read as a step (a nested or item assignment target among
-    them), and whole files that define their own `Get Text` / `Get Selected
-    Options` / `Select Options By` / `Set Variable` / `Should Contain` / `Log`,
-    catch errors (TRY, or own keywords under an error-catching wrapper), use
-    pipe-separated lines, name a *** Variables *** entry through another
-    variable, hold a scoped `Set … Variable`, `Import Variables`, `Import
-    Resource`, `Set Selector Prefix` or `VAR` anywhere, or hold anywhere a `$`
-    that starts no variable (a `$name` expression, a lone `$`, a price) or an
-    escaped `\\${`: Robot can build the read's variable name from either at run
-    time. A name Python computes without any `$` (`chr(36)` inside `${{ }}` or
-    `Evaluate`) is not seen. Idempotent.
+    read of the selected `<option>` itself, `Should Be Equal` or any other step
+    after the read (a second read, a `Click`: such a test gets no fix), a
+    [Teardown] in the test or a Test, Task or Suite Teardown in Settings, a V
+    that is not selected (a "still listed" check), a different element, a `...`
+    continuation on either line, a read before the select, a select or
+    deselect in between that this reader cannot follow (behind a wrapper,
+    spelled without spaces, on an element it cannot name, or on another element
+    not named by a plain `id=`), a locator that *** Variables *** defines as a
+    list, a dict or a typed value, a test with a control structure, a template,
+    a step on its name line or a line this reader cannot read as a step (a
+    nested or item assignment target among them), and whole files that define
+    their own `Get Text` / `Get Selected Options` / `Select Options By` / `Set
+    Variable` / `Should Contain` / `Log` / `Close Browser` / `Close Context` /
+    `Close Page`, catch errors (TRY, or own keywords under an error-catching
+    wrapper), use pipe-separated lines, name a *** Variables *** entry through
+    another variable, hold a scoped `Set … Variable`, `Import Variables`,
+    `Import Resource`, `Set Selector Prefix` or `VAR` anywhere, or hold
+    anywhere a `$` that starts no variable (a `$name` expression, a lone `$`, a
+    price) or an escaped `\\${`: Robot can build a variable name from either at
+    run time. Not seen: code that runs after the read without a step in the
+    file — a listener or library hook from outside the file, or one that Python
+    run before the read sets up. Idempotent.
 
     Covers the generation path and every dryrun repair round (both run
     `extract_and_normalize_robot_code`); pasted code and re-runs of stored code

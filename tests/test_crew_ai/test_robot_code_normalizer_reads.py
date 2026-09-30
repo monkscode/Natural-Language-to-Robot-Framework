@@ -56,6 +56,9 @@ _SELECT = "Select Options By    ${dropdown_locator}    label    Option 2"
 _READ = "${selected_option}=    Get Text    ${get_text_locator}"
 _READ_NEW = "${selected_option}=    Get Selected Options    ${get_text_locator}    label"
 _CHECK = "Should Contain    ${selected_option}    Option 2"
+# A step allowed after the read (only the check, a Log of the bare value or a close may follow it): the controls'
+# neutral replacement for a later use of the value.
+_ALLOWED = "Log    ${selected_option}"
 _OTHER_TEST_WITH_TRY = (
     "\n\nOther Test\n    TRY\n        Click    id=x\n    EXCEPT\n        Log    no\n    END\n"
 )
@@ -156,23 +159,34 @@ class TestSelectReadRewritten:
         expected = f"Get Selected Options    ${{get_text_locator}}    label    {operator}    Option 2"
         assert rewrite_select_text_reads(_suite(_SELECT, read)) == _suite(_SELECT, expected)
 
-    def test_a_second_read_of_the_same_select_is_rewritten_too(self):
+    def test_a_second_read_leaves_the_first_read_alone(self):
+        # Only the check, a Log of the value or a close may follow a rewritten read: a second read is none of them.
         body = (_SELECT, _READ, _CHECK, "${again}=    Get Text    id=dropdown", "Should Contain    ${again}    Option 2")
-        expected = (_SELECT, _READ_NEW, _CHECK, "${again}=    Get Selected Options    id=dropdown    label",
+        expected = (_SELECT, _READ, _CHECK, "${again}=    Get Selected Options    id=dropdown    label",
                     "Should Contain    ${again}    Option 2")
         assert rewrite_select_text_reads(_suite(*body)) == _suite(*expected)
 
     def test_a_reused_variable_name_for_the_second_read(self):
         body = (_SELECT, _READ, _CHECK, _READ, _CHECK)
-        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, _CHECK, _READ_NEW, _CHECK)
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ, _CHECK, _READ_NEW, _CHECK)
 
-    def test_two_selects_in_one_test_each_keep_their_attribute(self):
+    def test_two_selects_in_one_test_the_last_read_keeps_its_own_attribute(self):
         body = ("Select Options By    id=size    value    m", "Select Options By    id=colour    label    Red",
                 "${s}=    Get Text    css=#size", "Should Contain    ${s}    m",
                 "${c}=    Get Text    css=#colour", "Should Contain    ${c}    Red")
-        expected = (body[0], body[1], "${s}=    Get Selected Options    css=#size    value", body[3],
-                    "${c}=    Get Selected Options    css=#colour    label", body[5])
+        expected = (*body[:4], "${c}=    Get Selected Options    css=#colour    label", body[5])
         assert rewrite_select_text_reads(_suite(*body)) == _suite(*expected)
+
+    @pytest.mark.parametrize("label, body", [
+        ("the check, then Close Browser", (_SELECT, _READ, _CHECK)),
+        ("the check, a Log of the value, then Close Browser", (_SELECT, _READ, _CHECK, _ALLOWED)),
+        ("comment and blank lines between", (_SELECT, _READ, "# verify the selection", "", _CHECK, "# done")),
+        ("Close Page and Close Context with literal arguments, prefixed or not", (
+            _SELECT, _READ, _CHECK, "Close Page    CURRENT", "Browser.Close Context    ALL", "Close Browser    ALL")),
+    ])
+    def test_only_allowed_steps_after_the_read(self, label, body):
+        source = _suite(*body)
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW), label
 
     def test_the_latest_select_on_the_element_decides(self):
         body = ("Select Options By    id=dropdown    label    Option 1", _SELECT, _READ, _CHECK)
@@ -206,11 +220,6 @@ class TestSelectReadRewritten:
     def test_an_unrelated_own_keyword_does_not_block(self):
         source = _suite(_SELECT, _READ, _CHECK, tail="\n\n*** Keywords ***\nMy Helper\n    Log    own\n")
         assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
-
-    def test_a_reassignment_after_the_check_ends_the_scan(self):
-        body = (_SELECT, _READ, _CHECK, "${selected_option}=    Set Variable    other",
-                "Should Be Equal    ${selected_option}    other")
-        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, *body[2:])
 
 
 # ---------------------------------------------------------------------------
@@ -327,32 +336,34 @@ _CANNOT_TRUST = [
     ("a nested name first in Variables", _suite(_SELECT, _READ, _CHECK).replace(
         _LOCATOR_ENTRY, "${get_text${EMPTY}_locator}    id=nested_first\n" + _LOCATOR_ENTRY),
      "${get_text${EMPTY}_locator}    id=nested_first\n", "${other_locator}    id=nested_first\n"),
+    # A later use of the value is also not allowed after the read (see _AFTER_THE_READ): the control replaces the
+    # whole later line(s) with an allowed step.
     ("a nested name as a later use of the value", _suite(
         _SELECT, _READ, _CHECK, "Should Be Equal    ${selected_${EMPTY}option}    Option 2"),
-     "${selected_${EMPTY}option}", "${other_value}"),
+     "Should Be Equal    ${selected_${EMPTY}option}    Option 2", _ALLOWED),
     # The same later use through Robot's `$name` expression syntax (Robot 7.4.2: each passes before the rewrite and
-    # fails after it). The file is left alone for its `$` that starts no variable (see _BARE_DOLLAR); the control
-    # replaces the expression line(s) with `Log    x` and IS rewritten.
+    # fails after it). The file is left alone for its `$` that starts no variable (see _BARE_DOLLAR).
     ("a nested name in an expression", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    len($selected_${EMPTY}option) > 5"),
-     "Should Be True    len($selected_${EMPTY}option) > 5", "Log    x"),
+     "Should Be True    len($selected_${EMPTY}option) > 5", _ALLOWED),
     ("a nested name read by Get Variable Value", _suite(
         _SELECT, _READ, _CHECK, "${t}=    Get Variable Value    $selected_${EMPTY}option",
         "Should Be True    len($t) > 5"),
-     "${t}=    Get Variable Value    $selected_${EMPTY}option\n    Should Be True    len($t) > 5", "Log    x"),
+     "${t}=    Get Variable Value    $selected_${EMPTY}option\n    Should Be True    len($t) > 5", _ALLOWED),
     ("a nested name in an inline expression", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    ${{ len($selected_${EMPTY}option) > 5 }}"),
-     "Should Be True    ${{ len($selected_${EMPTY}option) > 5 }}", "Log    x"),
+     "Should Be True    ${{ len($selected_${EMPTY}option) > 5 }}", _ALLOWED),
     ("an expression name that starts with another variable", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    len($${EMPTY}selected_option) > 5"),
-     "Should Be True    len($${EMPTY}selected_option) > 5", "Log    x"),
+     "Should Be True    len($${EMPTY}selected_option) > 5", _ALLOWED),
 ]
 _CANNOT_TRUST_IDS = [case[0] for case in _CANNOT_TRUST]
 
 # A `$` that starts no variable, or an escaped `\${`, anywhere in the file (owner, 2026-09-30: "One broad rule"):
 # Robot can build the read's variable name from it at run time, out of the reader's sight (Robot 7.4.2: V1-V3, P1 and
 # P2 each pass before the rewrite and fail after it). (label, the file, the control): the control is the same file
-# with every such `$` taken out, and IS rewritten.
+# with every such `$` taken out and its later use of the value replaced by an allowed step, and IS rewritten.
+_POINTER_USE = "${t}=    Get Variable Value    ${n}\n    Should Be True    len($t) > 5"
 _P1 = _suite("${n}=    Set Variable    $selected_option", _SELECT, _READ, _CHECK,
              "${t}=    Get Variable Value    ${n}", "Should Be True    len($t) > 5")
 _ESCAPED = _suite("${n}=    Set Variable    \\${selected_option}", _SELECT, _READ, _CHECK,
@@ -362,29 +373,96 @@ _P2 = _suite(_SELECT, _READ, _CHECK, "Should Be True    len(${n_var}) > 5").repl
 _BARE_DOLLAR = [
     ("V1 a name prefix set to $selected", _suite(
         "${p}=    Set Variable    $selected", _SELECT, _READ, _CHECK, "Should Be True    len(${p}_option) > 5"),
-     _suite("${p}=    Set Variable    selected", _SELECT, _READ, _CHECK, "Should Be True    len(${p}_option) > 5")),
+     _suite("${p}=    Set Variable    selected", _SELECT, _READ, _CHECK, _ALLOWED)),
     ("V2 a lone $ set as a variable", _suite(
         "${d}=    Set Variable    $", _SELECT, _READ, _CHECK, "Should Be True    len(${d}selected_option) > 5"),
-     _suite("${d}=    Set Variable    x", _SELECT, _READ, _CHECK, "Should Be True    len(${d}selected_option) > 5")),
+     _suite("${d}=    Set Variable    x", _SELECT, _READ, _CHECK, _ALLOWED)),
     ("V3 a $ from an inline expression", _suite(
         _SELECT, _READ, _CHECK, "Should Be True    len(${{'$'}}selected_option) > 5"),
-     _suite(_SELECT, _READ, _CHECK, "Should Be True    len(${{'x'}}selected_option) > 5")),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
     ("P1 a pointer set before the read", _P1, _P1.replace("    $selected_option", "    other_value").replace(
-        "Should Be True    len($t) > 5", "Log    x")),
-    ("P2 a pointer in Variables", _P2, _P2.replace("    $selected_option", "    other_value")),
+        _POINTER_USE, _ALLOWED)),
+    ("P2 a pointer in Variables", _P2, _P2.replace("    $selected_option", "    other_value").replace(
+        "Should Be True    len(${n_var}) > 5", _ALLOWED)),
     ("a pointer built by Catenate", _suite(
         "${n}=    Catenate    SEPARATOR=    $    selected_option", _SELECT, _READ, _CHECK,
         "Should Be True    len(${n}) > 5"),
-     _suite("${n}=    Catenate    SEPARATOR=    x    selected_option", _SELECT, _READ, _CHECK,
-            "Should Be True    len(${n}) > 5")),
+     _suite("${n}=    Catenate    SEPARATOR=    x    selected_option", _SELECT, _READ, _CHECK, _ALLOWED)),
     ("an escaped pointer", _ESCAPED, _ESCAPED.replace("    \\${selected_option}", "    other_value").replace(
-        "Should Be True    len($t) > 5", "Log    x")),
+        _POINTER_USE, _ALLOWED)),
+    # Only the escaped `\${` alternative catches this file: the escape sits BEFORE the read, and only allowed steps
+    # follow the read.
+    ("an escaped ${ before the read", _suite("Log    \\${literal}", _SELECT, _READ, _CHECK),
+     _suite(_SELECT, _READ, _CHECK)),
     # The accepted cost: a q08 test in a file that also holds a bare `$` gets no fix.
     ("accepted cost: a price in another test", _suite(
         _SELECT, _READ, _CHECK, tail="\n\nOther Test\n    Log    Price: $5\n"),
      _suite(_SELECT, _READ, _CHECK, tail="\n\nOther Test\n    Log    Price: 5\n")),
 ]
 _BARE_DOLLAR_IDS = [case[0] for case in _BARE_DOLLAR]
+
+
+def _with_setting(line: str) -> str:
+    """The q08 file with one more line in its Settings section."""
+    return _suite(_SELECT, _READ, _CHECK).replace("Library    Collections\n", f"Library    Collections\n{line}\n")
+
+
+# After the read only its check, a `Log` of the bare value with literal other cells, and Browser's Close Browser /
+# Close Context / Close Page with literal arguments may run (owner, 2026-09-30: "Allowlist after read"): Robot can
+# reach the read's variable by a name built at run time in ways no text scan follows. Each later use below passes
+# before the rewrite and fails after it (RF 7.3.2: final-fix-wave-rereview3.md X1, X8, Y1-Y3 and X11, and
+# preflight/fw4-probes for the Log level and the own Close Browser); a teardown runs after the read too. (label, the
+# file, the control): the control is the same file with only allowed steps after the read, and IS rewritten.
+_OWN_CLOSE_BROWSER = "\n\n*** Keywords ***\nClose Browser\n    Log    own\n"
+_AFTER_THE_READ = [
+    ("an escaped $ builds the name", _suite(
+        "${p}=    Set Variable    \\x24selected", _SELECT, _READ, _CHECK, "Should Be True    len(${p}_option) > 5"),
+     _suite("${p}=    Set Variable    \\x24selected", _SELECT, _READ, _CHECK, _ALLOWED)),
+    ("Get Variable Value of @selected_option", _suite(
+        _SELECT, _READ, _CHECK, "${t}=    Get Variable Value    @selected_option",
+        "Should Be Equal    ${t}    ${None}"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("RF_VAR_ in an expression", _suite(
+        _SELECT, _READ, _CHECK, "Should Be True    len(RF_VAR_selected_option) > 5"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("RF_VAR_ in an inline expression", _suite(
+        _SELECT, _READ, _CHECK, "Should Be True    ${{ len(RF_VAR_selected_option) > 5 }}"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("Get Variables", _suite(
+        _SELECT, _READ, _CHECK, "${all}=    Get Variables    no_decoration=True",
+        "Should Contain    ${all}[selected_option]    Option 1"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("a name built by Convert To Bytes 36 int", _suite(
+        _SELECT, _READ, _CHECK, "${b}=    Convert To Bytes    36    int", "${s}=    Convert To String    ${b}",
+        "${n}=    Catenate    SEPARATOR=    ${s}    selected_option", "${t}=    Get Variable Value    ${n}",
+        "Should Contain    ${t}    Option 1"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("accepted cost: a Click after the check", _suite(_SELECT, _READ, _CHECK, "Click    id=submit"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("an assignment after the check", _suite(
+        _SELECT, _READ, _CHECK, "${selected_option}=    Set Variable    other",
+        "Should Be Equal    ${selected_option}    other"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("a Log with an inline expression in another cell", _suite(
+        _SELECT, _READ, _CHECK,
+        "Log    ${selected_option}    level=${{ 'INFO' if len(RF_VAR_selected_option) > 5 else 'BAD' }}"),
+     _suite(_SELECT, _READ, _CHECK, "Log    ${selected_option}    level=INFO")),
+    ("Close Browser with a variable argument", _suite(_SELECT, _READ, _CHECK, "Close Browser    ${browser}"),
+     _suite(_SELECT, _READ, _CHECK, "Close Browser    ALL")),
+    ("the file's own Close Browser keyword", _suite(_SELECT, _READ, _CHECK, tail=_OWN_CLOSE_BROWSER),
+     _suite(_SELECT, _READ, _CHECK, tail=_OWN_CLOSE_BROWSER.replace("\nClose Browser\n", "\nMy Helper\n"))),
+    ("a [Teardown] at the top of the test", _suite("[Teardown]    Close Browser", _SELECT, _READ, _CHECK),
+     _suite("[Setup]    Close Browser", _SELECT, _READ, _CHECK)),
+    ("a [Teardown] at the end of the test", _suite(_SELECT, _READ, _CHECK, "[Teardown]    Close Browser"),
+     _suite(_SELECT, _READ, _CHECK, _ALLOWED)),
+    ("a Test Teardown in Settings", _with_setting("Test Teardown    Close Browser"),
+     _with_setting("Test Setup    Close Browser")),
+    ("a Task Teardown in Settings", _with_setting("Task Teardown    Close Browser"),
+     _with_setting("Task Setup    Close Browser")),
+    ("a Suite Teardown in Settings", _with_setting("Suite Teardown    Close Browser"),
+     _with_setting("Suite Setup    Close Browser")),
+]
+_AFTER_THE_READ_IDS = [case[0] for case in _AFTER_THE_READ]
 
 
 class TestSelectReadLeftAlone:
@@ -536,6 +614,15 @@ class TestSelectReadLeftAlone:
 
     @pytest.mark.parametrize("label, source, control", _BARE_DOLLAR, ids=_BARE_DOLLAR_IDS)
     def test_control_the_same_file_without_that_dollar_is_rewritten(self, label, source, control):
+        assert control != source, label
+        assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
+
+    @pytest.mark.parametrize("label, source, control", _AFTER_THE_READ, ids=_AFTER_THE_READ_IDS)
+    def test_anything_not_allowed_after_the_read_leaves_it_alone(self, label, source, control):
+        assert rewrite_select_text_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, control", _AFTER_THE_READ, ids=_AFTER_THE_READ_IDS)
+    def test_control_only_allowed_steps_after_the_read_is_rewritten(self, label, source, control):
         assert control != source, label
         assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
 
