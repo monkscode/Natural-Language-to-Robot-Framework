@@ -47,6 +47,8 @@ from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     normalize_robot_code,
+    rewrite_select_text_reads,
+    rewrite_typed_value_reads,
     rewrite_visibility_checks_to_wait,
     strip_redundant_css_prefix,
 )
@@ -86,7 +88,8 @@ def extract_and_normalize_robot_code(task_output) -> str:
       Strategy 3 — raw JSON {"code": "..."} → code, else raw output as-is
       then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
-            rewrite_visibility_checks_to_wait → ensure_browser_timeout.
+            rewrite_visibility_checks_to_wait → rewrite_select_text_reads →
+            rewrite_typed_value_reads → ensure_browser_timeout.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -181,6 +184,15 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # after the trailing-JSON strip so a last-line check is not hidden behind a
     # leaked `"}`.
     robot_code = rewrite_visibility_checks_to_wait(robot_code)
+
+    # Two reads that cannot see what the test just did to the element (see
+    # robot_code_normalizer): `Get Text` on a <select> the test just set returns
+    # every option, so its Should Contain cannot fail (q08); `Get Attribute …
+    # value` after typing returns the initial value, not the typed one (N1).
+    # Same place as the visibility rewrite, for the same reason: every repair
+    # round passes through here too.
+    robot_code = rewrite_select_text_reads(robot_code)
+    robot_code = rewrite_typed_value_reads(robot_code)
 
     # Step 4: Raise the Browser Library timeout ceiling off its 10s import default.
     # Runs here, after the Settings block is resolved, so BOTH the generation path
