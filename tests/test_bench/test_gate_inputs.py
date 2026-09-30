@@ -260,6 +260,10 @@ class TestClassify:
         # the FIRST class named decides: a 400 whose text mentions an earlier timeout stays a 400
         "An error occurred: litellm.BadRequestError: VertexAIException - bad request (an earlier try "
         "hit litellm.Timeout)",
+        # a temporary class named only in the tail is not the error's class (PR #119 review)
+        'An error occurred: VertexAIException - {"error": {"code": 400, "status": "INVALID_ARGUMENT"}} '
+        '(an earlier try hit litellm.Timeout)',
+        "Failed to generate valid Robot Framework code: upstream said litellm.RateLimitError once",
     ])
     def test_other_generation_errors_stay_real_failures(self, tmp_path, message):
         r, capture = gen_error(tmp_path, message)

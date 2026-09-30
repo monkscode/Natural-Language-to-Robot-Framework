@@ -75,15 +75,16 @@ PROVIDER_MISS_PREFIXES = (
     "Vertex AI is out of capacity",                       # 429: vertex (W5.1 Task 2b, ba1242d)
     "The model provider's daily quota for this model is used up",  # per-day 429
 )
-# A raw "An error occurred: litellm.<Class>: ..." counts only when its FIRST named
-# class is temporary: "litellm.ContextWindowExceededError: litellm.BadRequestError: ..."
+# A raw message counts only when it STARTS "An error occurred: litellm.<Class>: ..." (or
+# "litellm.<Class>: ...") and that first class is temporary; a class named later in the
+# text does not count: "litellm.ContextWindowExceededError: litellm.BadRequestError: ..."
 # is a 400. LiteLLM 1.75.3 maps a Vertex/Gemini 429 to RateLimitError, 503 to
 # ServiceUnavailableError, 500 to InternalServerError, 408 to Timeout and every
 # status it cannot map (502, 504, ...) to APIConnectionError; 400/403 become
 # BadRequestError, 401 AuthenticationError, 404 NotFoundError.
 TEMPORARY_LITELLM_ERRORS = frozenset({"RateLimitError", "ServiceUnavailableError",
                                       "InternalServerError", "Timeout", "APIConnectionError"})
-_LITELLM_CLASS = re.compile(r"\blitellm\.(?:exceptions\.)?(Timeout|[A-Z][A-Za-z]*Error)\b")
+_LITELLM_CLASS = re.compile(r"(?:An error occurred: )?litellm\.(?:exceptions\.)?(Timeout|[A-Z][A-Za-z]*Error)\b")
 _MODEL_PIN_KEYS = ("model_provider", "online_model", "browser_service.model_provider")
 
 PASSED = "passed"
@@ -261,7 +262,7 @@ def is_provider_message(message: str) -> bool:
     """True for a temporary provider failure (see PROVIDER_MISS_PREFIXES, TEMPORARY_LITELLM_ERRORS)."""
     if message.startswith(PROVIDER_MISS_PREFIXES):
         return True
-    raw = _LITELLM_CLASS.search(message)
+    raw = _LITELLM_CLASS.match(message)
     return raw is not None and raw.group(1) in TEMPORARY_LITELLM_ERRORS
 
 
