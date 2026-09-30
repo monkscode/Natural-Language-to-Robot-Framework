@@ -774,7 +774,11 @@ def _line_content(line: str) -> str:
 
 
 def _parse_step(line_no: int, line: str, eol: str) -> _Step | None:
-    """One indented test-body line as a _Step, or None when it holds no step."""
+    """One indented test-body line as a _Step, or None when this reader cannot
+    read it as one: no separator before its first cell (Robot reads a line
+    indented by one space as a NEW test), no keyword after its assignments
+    (`${x}=` alone, its keyword on the next `...` line), or a typed assignment
+    (`${x: str}=`: Robot assigns `${x}`)."""
     parts = _CELL_SPLIT_RE.split(line)
     cells = _content_cells(parts)
     # parts[0] is empty only for a properly indented line.
@@ -783,7 +787,10 @@ def _parse_step(line_no: int, line: str, eol: str) -> _Step | None:
     first = 0
     assigns = []
     while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
-        assigns.append(_canon_variable(_ASSIGNED_NAME_RE.match(parts[cells[first]]).group(1)))
+        name = _ASSIGNED_NAME_RE.match(parts[cells[first]]).group(1)
+        if ":" in name:
+            return None  # a typed assignment: Robot strips the type, so `${x: str}=` re-points `${x}`
+        assigns.append(_canon_variable(name))
         first += 1
     if first == len(cells):
         return None
@@ -802,7 +809,11 @@ def _parse_step(line_no: int, line: str, eol: str) -> _Step | None:
 
 
 def _read_variable(line: str, variables: dict[str, str | None], last: str | None) -> str | None:
-    """Record one *** Variables *** line; return the scalar it defined (for `...`)."""
+    """Record one *** Variables *** line; return the base name it defined (for `...`).
+
+    A list (`@{x}`), a dict (`&{x}`) or a typed value (`${x: str}`) makes the
+    base name `x` unknown, and so does any later definition of it: Robot keeps
+    the first of `${x}` / `@{x}`, and `${x}` then names that list."""
     parts = _CELL_SPLIT_RE.split(line)
     cells = [parts[i].strip() for i in _content_cells(parts)]
     if not cells:
@@ -811,13 +822,13 @@ def _read_variable(line: str, variables: dict[str, str | None], last: str | None
         if last is not None:
             variables[last] = None  # a value continued on a `...` line is not one plain literal
         return last
-    match = re.fullmatch(r"\$\{([^{}]+)\}\s*=?", cells[0])
+    match = re.fullmatch(r"([$@&])\{([^{}]+)\}\s*=?", cells[0])
     if not match:
         return None
-    name = _canon_variable(match.group(1))
+    name = _canon_variable(match.group(2).split(":", 1)[0])
     values = cells[1:]
-    if name in variables:
-        variables[name] = None  # defined twice: which one Robot keeps is not this module's call
+    if name in variables or match.group(1) != "$" or ":" in match.group(2):
+        variables[name] = None  # defined twice, or not one plain scalar: which value `${x}` has is unknown
     elif not values:
         variables[name] = ""
     elif len(values) == 1 and not _ANY_VARIABLE_RE.search(values[0]) and "\\" not in values[0]:
@@ -832,9 +843,13 @@ def _parse_suite(robot_code: str) -> _Suite | None:
     cannot be trusted with the file: a pipe-separated line, a template, a line
     break Robot honours that a "\\n" split does not (`_OTHER_LINEBREAK_CHARS`),
     or — on any line of any section — a scoped setter or `VAR`
-    (`_SCOPED_SETTERS`). A test holding a control structure, `[Template]` or an
-    assignment-only line (`${x}=` alone, its keyword on the next `...` line) is
-    read but marked not followable."""
+    (`_SCOPED_SETTERS`). A test is read but marked not followable when it holds
+    a control structure or `[Template]`, when its name line carries more than
+    the name or a `...` line continues its name line (Robot runs that as the
+    test's first step), when an unindented `...` line follows (Robot continues
+    the previous step with it: it starts no test), or when any other body line
+    is not a step this reader can read (`_parse_step`: an assignment-only line,
+    a typed assignment, a line Robot reads as a new test)."""
     if any(c in robot_code.replace("\r\n", "\n") for c in _OTHER_LINEBREAK_CHARS):
         return None
     lines = robot_code.split("\n")
@@ -869,8 +884,14 @@ def _parse_suite(robot_code: str) -> _Suite | None:
             last_variable = _read_variable(line, variables, last_variable)
         elif section in _TEST_SECTIONS:
             if not line[:1].isspace():
+                if content[0] == "...":
+                    if current is not None:
+                        current.followable = False  # Robot continues the previous step with it, even unindented
+                    continue
                 current = _Test(steps=[], line_nos=[])
                 tests.append(current)
+                if len(content) > 1:
+                    current.followable = False  # Robot runs the rest of a test-name line as its first step
                 continue
             if current is None:
                 continue
@@ -878,11 +899,12 @@ def _parse_suite(robot_code: str) -> _Suite | None:
             if stripped.startswith("..."):
                 if current.steps:
                     current.steps[-1].continued = True
+                else:
+                    current.followable = False  # it continues the test-name line: Robot runs it as the first step
                 continue
             step = _parse_step(line_no, line, eol)
             if step is None:
-                if _ASSIGN_PREFIX_RE.match(_CELL_SPLIT_RE.split(stripped)[0]):
-                    current.followable = False  # `${x}=` alone: Robot takes its keyword from the next `...` line
+                current.followable = False  # a line this reader cannot read as a step (see _parse_step)
                 continue
             if (step.keyword == "[template]"
                     or (step.keyword_idx is not None and step.parts[step.keyword_idx].strip() in _UNFOLLOWED_MARKERS)):
@@ -955,13 +977,18 @@ def _apply_rewrites(robot_code: str, suite: _Suite, rewrites: dict[int, str],
 
 _SELECT_ATTRIBUTES = frozenset({"label", "value", "text"})
 _CONTAINS_OPERATORS = frozenset({"contains", "*="})
-_SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By")
+# Get Text / Get Selected Options / Select Options By are the rewrite's own evidence; Set Variable, Should Contain
+# and Log are the keywords whose BuiltIn meaning the reader relies on (_follow, the use check).
+_SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "Set Variable", "Should Contain", "Log")
+# The keywords that change a <select>'s selection, compared lower-cased without spaces or underscores.
+_SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
 
 
 def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: str,
                               values: frozenset[str], resolved: list[list[str | None]]) -> bool:
     """True when every later mention of `${name}` is `Should Contain ${name} V`
-    with V a selected value, or a `Log`, and at least one is the Should Contain.
+    with V a selected value, or a `Log` of the bare `${name}`, and at least one
+    is the Should Contain.
 
     Mentions are looked for on every line of the test after the read (a `...`
     line too), on the test's own [Setting] lines wherever they sit ([Teardown]
@@ -974,7 +1001,8 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
 
     def allowed(line_no: int) -> str:
         """'skip' (no mention), 'check', 'log', 'reassign' or 'no'."""
-        if not _mentions_variable(_line_content(suite.lines[line_no]), name):
+        content = _line_content(suite.lines[line_no])
+        if not _mentions_variable(content, name):
             return "skip"
         step, args = by_line.get(line_no, (None, None))
         if step is None or step.setting or step.continued:
@@ -984,7 +1012,12 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
         if step.assigns:
             return "no"
         if step.keyword == "log" and step.prefix in _BUILTIN_PREFIXES:
-            return "log"
+            # Only the bare `${name}`, outside any other `{…}`: `${x.upper()}`, `${x}[0]`, `$x`, `@{x}` or
+            # `${{ … }}` would work on the list the rewrite returns, not on the text Get Text returned.
+            rest = re.sub(r"\$\{([^{}]*)\}(?!\[)", lambda m: "" if (
+                _canon_variable(m.group(1)) == name
+                and m.string.count("{", 0, m.start()) == m.string.count("}", 0, m.start())) else m.group(0), content)
+            return "no" if _mentions_variable(rest, name) else "log"
         target = _SCALAR_CELL_RE.fullmatch(step.args[0]) if step.args else None
         if (step.keyword == "should contain" and step.prefix in _BUILTIN_PREFIXES and len(step.args) == 2
                 and target and _canon_variable(target.group(1)) == name and args[1] in values):
@@ -1004,6 +1037,43 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
     return checked
 
 
+def _update_selected(step: _Step, args: list[str | None],
+                     selected: dict[str, tuple[str, frozenset[str]]]) -> bool:
+    """Apply a step that may change a selection to `selected` (canonical locator
+    -> the select's attribute and values); True when the step is one.
+
+    A select or deselect this reader cannot follow forgets every selection: one
+    named as another step's argument (`Run Keyword    Select Options By …`), one
+    spelled without spaces (`SelectOptionsBy`), another library's, or one on an
+    element it cannot name. A select or deselect on element L also forgets every
+    other selection unless both are plain `id=` locators with different ids: an
+    xpath or css spelling may name the same element.
+    """
+    if any(name in re.sub(r"[\s_]", "", arg.lower()) for arg in step.args for name in _SELECTION_CHANGES):
+        selected.clear()
+        return True
+    if step.keyword.replace(" ", "") not in _SELECTION_CHANGES:
+        return False
+    locator = _canon_locator(args[0]) if args else None
+    if (step.keyword not in ("select options by", "deselect options") or step.prefix not in _BROWSER_PREFIXES
+            or locator is None):
+        selected.clear()  # a select the reader cannot follow may have changed any of them
+        return True
+    for other in [key for key in selected if key != locator]:
+        if not (_ID_LOCATOR_RE.fullmatch(other) and _ID_LOCATOR_RE.fullmatch(locator)):
+            del selected[other]
+    if step.keyword == "deselect options":
+        selected.pop(locator, None)
+        return True
+    attribute = step.args[1] if len(step.args) > 1 else ""
+    values = args[2:]
+    if step.continued or attribute.lower() not in _SELECT_ATTRIBUTES or not values or None in values:
+        selected.pop(locator, None)
+    else:
+        selected[locator] = (attribute, frozenset(values))
+    return True
+
+
 def _select_read_rewrites(suite: _Suite) -> dict[int, str]:
     """line number -> rewritten line, for every Get Text read the select rule accepts."""
     rewrites = {}
@@ -1014,19 +1084,7 @@ def _select_read_rewrites(suite: _Suite) -> dict[int, str]:
         selected: dict[str, tuple[str, frozenset[str]]] = {}
         for i, step in enumerate(test.steps):
             args = resolved[i]
-            if step.setting:
-                continue
-            if step.keyword == "select options by":
-                locator = _canon_locator(args[0]) if args else None
-                if locator is None or step.prefix not in _BROWSER_PREFIXES:
-                    selected.clear()  # a select on an element we cannot name may be any of them
-                    continue
-                attribute = step.args[1] if len(step.args) > 1 else ""
-                values = args[2:]
-                if step.continued or attribute.lower() not in _SELECT_ATTRIBUTES or not values or None in values:
-                    selected.pop(locator, None)
-                else:
-                    selected[locator] = (attribute, frozenset(values))
+            if step.setting or _update_selected(step, args, selected):
                 continue
             if step.keyword != "get text" or step.prefix not in _BROWSER_PREFIXES or step.continued or not args:
                 continue
@@ -1060,18 +1118,23 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     element — the same text once `${var}`s are resolved (from *** Variables ***
     or an earlier `Set Variable`), with `id=x` and `css=#x` equal — and
     every later mention of `${x}` is `Should Contain    ${x}    <V>` (V one of
-    the selected values; at least one such line) or a `Log`. Also the inline
-    form `Get Text    <L>    contains|*=    <V>`. `<attr>` is the attribute the
-    select used; the `Browser.` prefix is kept. Nothing else: `index` selects,
-    custom dropdowns (no `Select Options By`), a read of the selected `<option>`
-    itself, `Should Be Equal` or any other use of `${x}`, a V that is not
-    selected (a "still listed" check), a different element, a `...`
-    continuation on either line, a read before the select, a test with a
-    control structure, template or assignment-only line, and whole files that
-    define their own `Get Text` / `Get Selected Options` / `Select Options By`,
-    catch errors (TRY, or own keywords under an error-catching wrapper), use
-    pipe-separated lines, or hold a scoped `Set … Variable` or `VAR` anywhere.
-    Idempotent.
+    the selected values; at least one such line) or a `Log` of the bare
+    `${x}`. Also the inline form `Get Text    <L>    contains|*=    <V>`.
+    `<attr>` is the attribute the select used; the `Browser.` prefix is kept.
+    Nothing else: `index` selects, custom dropdowns (no `Select Options By`), a
+    read of the selected `<option>` itself, `Should Be Equal` or any other use
+    of `${x}`, a V that is not selected (a "still listed" check), a different
+    element, a `...` continuation on either line, a read before the select, a
+    select or deselect in between that this reader cannot follow (behind a
+    wrapper, spelled without spaces, on an element it cannot name, or on another
+    element not named by a plain `id=`), a locator that *** Variables ***
+    defines as a list, a dict or a typed value, a test with a control
+    structure, a template, a step on its name line or a line this reader cannot
+    read as a step, and whole files that define their own `Get Text` / `Get
+    Selected Options` / `Select Options By` / `Set Variable` / `Should Contain`
+    / `Log`, catch errors (TRY, or own keywords under an error-catching
+    wrapper), use pipe-separated lines, or hold a scoped `Set … Variable` or
+    `VAR` anywhere. Idempotent.
 
     Covers the generation path and every dryrun repair round (both run
     `extract_and_normalize_robot_code`); pasted code and re-runs of stored code

@@ -238,6 +238,71 @@ _SETTER_ANYWHERE = [
 ]
 _SETTER_IDS = [case[0] for case in _SETTER_ANYWHERE]
 
+# What the reader cannot trust (owner, 2026-09-30: "Close the class" and "Fix both in the same amendment"): a line
+# it cannot follow, a keyword or Variables entry whose meaning it cannot assume, a selection change it cannot see,
+# or a Log that uses the value another way. In each, Robot reads another element or another selection than the
+# reader would (planning evidence, Robot 7.4.2). (label, the file, the blocking text, its neutral replacement): the
+# control is the same file with the blocking text replaced, and IS rewritten.
+_NAME_LINE = "Generated Test\n"
+_REPOINT = "${get_text_locator}=    Set Variable    id=other"
+_LOCATOR_ENTRY = "${get_text_locator}    css=#dropdown\n"
+_OWN_SET_VARIABLE = "\n\n*** Keywords ***\nSet Variable\n    [Arguments]    ${x}\n    RETURN    id=other\n"
+_CANNOT_TRUST = [
+    ("a typed assignment", _suite(_SELECT, "${get_text_locator: str}=    Set Variable    id=other", _READ, _CHECK),
+     "${get_text_locator: str}=    Set Variable    id=other", "Log    x"),
+    ("a step on the test-name line", _suite(_SELECT, _READ, _CHECK).replace(
+        _NAME_LINE, "Generated Test    " + _REPOINT + "\n"), "Generated Test    " + _REPOINT + "\n", _NAME_LINE),
+    ("an assignment on the test-name line", _suite("...    Set Variable    id=other", _SELECT, _READ, _CHECK).replace(
+        _NAME_LINE, "Generated Test    ${get_text_locator}=\n"),
+     "Generated Test    ${get_text_locator}=\n", _NAME_LINE),
+    ("an indented continuation of the test-name line", _suite(_SELECT, _READ, _CHECK).replace(
+        _NAME_LINE, _NAME_LINE + "    ...    " + _REPOINT + "\n"), "    ...    " + _REPOINT + "\n", "    Log    x\n"),
+    ("an unindented continuation of the test-name line", _suite(_SELECT, _READ, _CHECK).replace(
+        _NAME_LINE, _NAME_LINE + "...    " + _REPOINT + "\n"), "...    " + _REPOINT + "\n", "    Log    x\n"),
+    ("a bare continuation line at column 0", _suite("Log    x", _SELECT, _READ, _CHECK).replace(
+        "    Log    x\n", "...\n"), "\n...\n", "\n    Log    x\n"),
+    ("a line indented by one space starts a new test", _suite(_SELECT, "Log    x", _READ, _CHECK).replace(
+        "    Log    x\n", " Second Test    " + _REPOINT + "\n"),
+     " Second Test    " + _REPOINT + "\n", "    Log    x\n"),
+    ("the file's own Set Variable keyword", _suite(
+        _SELECT, "${get_text_locator}=    Set Variable    css=#dropdown", _READ, _CHECK, tail=_OWN_SET_VARIABLE),
+     "\nSet Variable\n", "\nMy Helper\n"),
+    ("the file's own Should Contain keyword", _suite(
+        _SELECT, _READ, _CHECK,
+        tail="\n\n*** Keywords ***\nShould Contain\n    [Arguments]    @{a}\n    No Operation\n"),
+     "\nShould Contain\n", "\nMy Helper\n"),
+    ("the file's own Log keyword", _suite(
+        _SELECT, _READ, "Log    ${selected_option}", _CHECK,
+        tail="\n\n*** Keywords ***\nLog\n    [Arguments]    @{a}\n    No Operation\n"), "\nLog\n", "\nMy Helper\n"),
+    ("a list of the same name first in Variables", _suite(_SELECT, _READ, _CHECK).replace(
+        _LOCATOR_ENTRY, "@{get_text_locator}    id=other\n" + _LOCATOR_ENTRY),
+     "@{get_text_locator}    id=other\n", "@{other_locator}    id=other\n"),
+    ("a typed duplicate in Variables", _suite(_SELECT, _READ, _CHECK).replace(
+        _LOCATOR_ENTRY, _LOCATOR_ENTRY + "${get_text_locator: str}    id=other\n"),
+     "${get_text_locator: str}    id=other\n", "${other_locator: str}    id=other\n"),
+    ("a list instead of the scalar in Variables", _suite(_SELECT, _READ, _CHECK).replace(
+        _LOCATOR_ENTRY, "@{get_text_locator}    css=#dropdown\n"),
+     "@{get_text_locator}    css=#dropdown\n", _LOCATOR_ENTRY),
+    ("a select spelled without spaces", _suite(
+        _SELECT, "SelectOptionsBy    ${dropdown_locator}    label    Option 1", _READ, _CHECK),
+     "SelectOptionsBy    ${dropdown_locator}    label    Option 1", "Log    x"),
+    ("the same select chosen again through an xpath", _suite(
+        _SELECT, "Select Options By    xpath=//select[@id='dropdown']    label    Option 1", _READ, _CHECK),
+     "xpath=//select[@id='dropdown']", "id=colour"),
+    ("Deselect Options on the select", _suite(_SELECT, "Deselect Options    ${dropdown_locator}", _READ, _CHECK),
+     "Deselect Options    ${dropdown_locator}", "Deselect Options    id=colour"),
+    ("a wrapper runs another select", _suite(
+        _SELECT, "Run Keyword    Select Options By    ${dropdown_locator}    label    Option 1", _READ, _CHECK),
+     "Select Options By    ${dropdown_locator}    label    Option 1", "Log    x"),
+    ("a Log of a method call on the value", _suite(_SELECT, _READ, "Log    ${selected_option.upper()}", _CHECK),
+     "${selected_option.upper()}", "${selected_option}"),
+    ("a Log of an item of the value", _suite(_SELECT, _READ, _CHECK, "Log    ${selected_option}[0]"),
+     "${selected_option}[0]", "${selected_option}"),
+    ("a Log of an expression over the value", _suite(_SELECT, _READ, "Log    ${{ ${selected_option} }}", _CHECK),
+     "${{ ${selected_option} }}", "${selected_option}"),
+]
+_CANNOT_TRUST_IDS = [case[0] for case in _CANNOT_TRUST]
+
 
 class TestSelectReadLeftAlone:
     @pytest.mark.parametrize("label, body", [
@@ -369,6 +434,16 @@ class TestSelectReadLeftAlone:
     @pytest.mark.parametrize("label, source, setter", _SETTER_ANYWHERE, ids=_SETTER_IDS)
     def test_control_the_same_file_with_a_neutral_step_is_rewritten(self, label, source, setter):
         control = source.replace(setter, "Log    x")
+        assert control != source, label
+        assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _CANNOT_TRUST, ids=_CANNOT_TRUST_IDS)
+    def test_what_the_reader_cannot_trust_is_left_alone(self, label, source, blocking, neutral):
+        assert rewrite_select_text_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _CANNOT_TRUST, ids=_CANNOT_TRUST_IDS)
+    def test_control_the_same_file_without_the_blocking_text_is_rewritten(self, label, source, blocking, neutral):
+        control = source.replace(blocking, neutral)
         assert control != source, label
         assert rewrite_select_text_reads(control) == control.replace(_READ, _READ_NEW), label
 
