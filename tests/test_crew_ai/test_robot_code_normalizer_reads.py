@@ -414,6 +414,8 @@ def _with_setting(line: str) -> str:
 # preflight/fw4-probes for the Log level and the own Close Browser); a teardown runs after the read too. (label, the
 # file, the control): the control is the same file with only allowed steps after the read, and IS rewritten.
 _OWN_CLOSE_BROWSER = "\n\n*** Keywords ***\nClose Browser\n    Log    own\n"
+_FI = "language: fi\n\n"
+_RF_VAR_USE = "Should Be True    len(RF_VAR_selected_option) > 5"
 _AFTER_THE_READ = [
     ("an escaped $ builds the name", _suite(
         "${p}=    Set Variable    \\x24selected", _SELECT, _READ, _CHECK, "Should Be True    len(${p}_option) > 5"),
@@ -461,6 +463,18 @@ _AFTER_THE_READ = [
      _with_setting("Task Setup    Close Browser")),
     ("a Suite Teardown in Settings", _with_setting("Suite Teardown    Close Browser"),
      _with_setting("Suite Setup    Close Browser")),
+    # A `language:` line makes Robot accept translated markers, a teardown among them (Finnish: `Testin Alasajo` is
+    # Test Teardown, `[Alasajo]` is [Teardown], `*** Asetukset ***` is *** Settings ***; each passes before the rewrite
+    # and fails after it, RF 7.4.2: preflight/fw4-rereview/ctl_rf742.out): the file is left alone. The control is the
+    # same file without the `language:` line.
+    ("L1 a translated Test Teardown", _FI + _with_setting(f"Testin Alasajo    {_RF_VAR_USE}"),
+     _with_setting(f"Testin Alasajo    {_RF_VAR_USE}")),
+    ("L2 a translated [Teardown] at the top of the test",
+     _FI + _suite(f"[Alasajo]    {_RF_VAR_USE}", _SELECT, _READ, _CHECK),
+     _suite(f"[Alasajo]    {_RF_VAR_USE}", _SELECT, _READ, _CHECK)),
+    ("L3 a translated Test Teardown under a translated Settings header",
+     _FI + _with_setting(f"Testin Alasajo    {_RF_VAR_USE}").replace("*** Settings ***", "*** Asetukset ***"),
+     _with_setting(f"Testin Alasajo    {_RF_VAR_USE}").replace("*** Settings ***", "*** Asetukset ***")),
 ]
 _AFTER_THE_READ_IDS = [case[0] for case in _AFTER_THE_READ]
 

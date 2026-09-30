@@ -1010,6 +1010,8 @@ _SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "
 _SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
 # A `$` that starts no variable, or an escaped `\${`: Robot can build a variable name from it at run time.
 _BARE_OR_ESCAPED_DOLLAR_RE = re.compile(r"\$(?!\{)|\\\$\{")
+# A `language:` line makes Robot accept translated settings and headers (e.g. a teardown) the reader cannot see.
+_LANGUAGE_LINE_RE = re.compile(r"^[^\S\n]*language:", re.IGNORECASE | re.MULTILINE)
 # Browser's close keywords, compared lower-cased without spaces: allowed after a rewritten read.
 _CLOSE_KEYWORDS = frozenset({"closebrowser", "closecontext", "closepage"})
 # A character that can name or build a variable: a cell without one is literal text.
@@ -1188,14 +1190,16 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     their own `Get Text` / `Get Selected Options` / `Select Options By` / `Set
     Variable` / `Should Contain` / `Log` / `Close Browser` / `Close Context` /
     `Close Page`, catch errors (TRY, or own keywords under an error-catching
-    wrapper), use pipe-separated lines, name a *** Variables *** entry through
-    another variable, hold a scoped `Set … Variable`, `Import Variables`,
-    `Import Resource`, `Set Selector Prefix` or `VAR` anywhere, or hold
-    anywhere a `$` that starts no variable (a `$name` expression, a lone `$`, a
-    price) or an escaped `\\${`: Robot can build a variable name from either at
-    run time. Not seen: code that runs after the read without a step in the
-    file — a listener or library hook from outside the file, or one that Python
-    run before the read sets up. Idempotent.
+    wrapper), use pipe-separated lines, hold a `language:` line (Robot then
+    accepts translated settings and headers, a teardown among them), name a
+    *** Variables *** entry through another variable, hold a scoped `Set …
+    Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
+    `VAR` anywhere, or hold anywhere a `$` that starts no variable (a `$name`
+    expression, a lone `$`, a price) or an escaped `\\${`: Robot can build a
+    variable name from either at run time. Not seen: a library, resource or
+    listener from outside the file, including one that provides a keyword
+    named like an allowed step, and a hook that Python run before the read
+    sets up. Idempotent.
 
     Covers the generation path and every dryrun repair round (both run
     `extract_and_normalize_robot_code`); pasted code and re-runs of stored code
@@ -1208,6 +1212,8 @@ def rewrite_select_text_reads(robot_code: str) -> str:
         return robot_code
     if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code):
         return robot_code  # Robot can build a variable name at run time from any `$` the reader cannot follow
+    if _LANGUAGE_LINE_RE.search(robot_code):
+        return robot_code
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code
