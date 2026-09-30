@@ -18,6 +18,7 @@ Covered (§5):
     was refactored out of
 """
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from unittest.mock import patch, MagicMock
@@ -678,6 +679,33 @@ class TestExtractAndNormalize:
         second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
         assert "    ${city_value}=    Get Property    ${customer_city_locator}    value\n" in first
         assert second == first
+
+    # Both read rewrites are optional and skip-only: one that raises must cost only its own rewrite, never the
+    # paid-for generation. The rest of cleanup (the other rewrite, the Browser timeout) still runs.
+    _N1_RAW = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+               "${customer_city_locator}    id=customer.address.city\n\n"
+               "*** Test Cases ***\nT\n"
+               "    Fill Text    ${customer_city_locator}    NewYork\n"
+               "    ${city_value}=    Get Attribute    ${customer_city_locator}    value\n"
+               "    Should Be True    '${city_value}' == 'NewYork'")
+
+    @pytest.mark.parametrize("failing, raw, still_rewritten", [
+        ("rewrite_select_text_reads", _N1_RAW,
+         "    ${city_value}=    Get Property    ${customer_city_locator}    value\n"),
+        ("rewrite_typed_value_reads", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+    ], ids=["select read rewrite raises", "typed value rewrite raises"])
+    def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
+            self, caplog, failing, raw, still_rewritten):
+        with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),
+              caplog.at_level(logging.WARNING, logger="src.backend.services.dryrun_service")):
+            out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Library    Browser    timeout=30s" in out
+        assert still_rewritten in out
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert [r.getMessage() for r in warnings] == [
+            f"{failing} failed; code left unchanged by it (non-blocking)"]
+        assert warnings[0].exc_info is not None
 
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"

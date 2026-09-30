@@ -190,9 +190,14 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # every option, so its Should Contain cannot fail (q08); `Get Attribute …
     # value` after typing returns the initial value, not the typed one (N1).
     # Same place as the visibility rewrite, for the same reason: every repair
-    # round passes through here too.
-    robot_code = rewrite_select_text_reads(robot_code)
-    robot_code = rewrite_typed_value_reads(robot_code)
+    # round passes through here too. Both are optional and skip-only, so one
+    # that raises costs only its own rewrite, never the generation.
+    for name, rewrite in (("rewrite_select_text_reads", rewrite_select_text_reads),
+                          ("rewrite_typed_value_reads", rewrite_typed_value_reads)):
+        try:
+            robot_code = rewrite(robot_code)
+        except Exception:
+            logger.warning("%s failed; code left unchanged by it (non-blocking)", name, exc_info=True)
 
     # Step 4: Raise the Browser Library timeout ceiling off its 10s import default.
     # Runs here, after the Settings block is resolved, so BOTH the generation path
