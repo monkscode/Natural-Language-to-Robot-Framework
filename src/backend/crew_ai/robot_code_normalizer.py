@@ -42,6 +42,7 @@ Referenced by:
 
 import logging
 import re
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -374,16 +375,17 @@ def _section_header_name(line: str) -> str | None:
     return " ".join(cell.split()).strip("* ").title()
 
 
-def _names_get_element_states(line: str, first_part: str) -> bool:
-    """True when a non-indented line's name is (or could resolve to) `Get Element States`.
+def _names_keyword(line: str, first_part: str, keyword: str) -> bool:
+    """True when a non-indented line's name is (or could resolve to) `keyword`.
 
-    Robot picks the separator format per line, so a pipe-separated definition
-    (`| Get Element States | ... |`) can mix legally with space-separated steps
-    elsewhere in the same file; there the name is the first pipe cell, not the
-    whole line. Robot also matches an embedded-argument name (`Get ${what}
-    States`) against the literal call, so `${...}` segments are treated as a
-    wildcard — greedily, so a custom embedded regex containing `}` can only
-    over-match, never under-match.
+    `keyword` is given the way Robot compares names: lowercase, no spaces, no
+    underscores (`getelementstates`). Robot picks the separator format per line,
+    so a pipe-separated definition (`| Get Element States | ... |`) can mix
+    legally with space-separated steps elsewhere in the same file; there the name
+    is the first pipe cell, not the whole line. Robot also matches an
+    embedded-argument name (`Get ${what} States`) against the literal call, so
+    `${...}` segments are treated as a wildcard — greedily, so a custom embedded
+    regex containing `}` can only over-match, never under-match.
     """
     if line[:1] == "|" and line[:2].strip() == "|":
         cell = line.split("|")[1].strip()
@@ -396,7 +398,97 @@ def _names_get_element_states(line: str, first_part: str) -> bool:
         return False
     canon = re.sub(r"[\s_]", "", name.lower())
     pattern = ".*".join(re.escape(piece) for piece in re.split(r"\$\{.*\}", canon))
-    return re.fullmatch(pattern, "getelementstates") is not None
+    return re.fullmatch(pattern, keyword) is not None
+
+
+# Robot's tokenizer splits physical lines on more than "\n" — also a lone "\r"
+# (one not paired into "\r\n"), and the rarer separator characters below. A
+# section header that lands after one of those, glued onto whatever line we
+# split on "\n", would be invisible to a header scan — meaning the section
+# state (and every guard gated on it) could end up wrong in the direction that
+# matters: rewriting a call Robot would actually resolve to the file's own
+# keyword.
+_OTHER_LINEBREAK_CHARS = "\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
+
+
+@dataclass(frozen=True)
+class _FileGuard:
+    """What a rewrite must know about the whole file before it changes one line.
+
+    own_keywords: which of the asked-for keyword names the file defines itself.
+        Robot resolves such a call to the file's own keyword before any library.
+    catches_errors: the file has a `TRY`, or its own keywords together with an
+        error-catching wrapper — a changed check there can be caught and turn
+        into a pass/fail flip or a stall the line cannot see.
+    unsafe_section_state: the file holds a line break Robot honours but a "\n"
+        split does not, so section state cannot be trusted anywhere in it.
+    """
+
+    own_keywords: frozenset[str]
+    catches_errors: bool
+    unsafe_section_state: bool
+
+
+def _scan_file_guard(robot_code: str, keywords: tuple[str, ...]) -> _FileGuard:
+    """Scan the whole file once for the facts every Robot-code rewrite guards on.
+
+    `keywords` are names in `_names_keyword` form. When section state is unsafe
+    (see `_OTHER_LINEBREAK_CHARS`), the own-keyword check falls back to every
+    non-indented line regardless of section, and the TRY/wrapper check treats the
+    file as if it had a Keywords section, since a hidden header could be one.
+    """
+    unsafe_section_state = any(
+        c in robot_code.replace("\r\n", "\n") for c in _OTHER_LINEBREAK_CHARS
+    )
+    own = set()
+    has_try = False
+    has_keywords_section = False
+    has_catching_wrapper = False
+    in_non_keyword_section = False
+    for line in robot_code.split("\n"):
+        section_name = _section_header_name(line)
+        if section_name is not None:
+            in_non_keyword_section = section_name in _NON_KEYWORD_SECTIONS
+            if not in_non_keyword_section:
+                has_keywords_section = True
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("..."):
+            continue
+        parts = _CELL_SPLIT_RE.split(line)
+        cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
+        # A non-indented line names a test or a keyword. Robot resolves a keyword name
+        # to the file's own keyword before any library, ignoring case, spaces and
+        # underscores, and also matching an embedded-argument name or a pipe-separated
+        # definition. Only a section that could define a keyword counts: a
+        # *** Variables *** entry is `${name}    value`, a non-indented line whose first
+        # cell is an embedded-argument wildcard that over-matches every keyword name;
+        # a test, a setting and a comment cannot define keywords either. An
+        # unrecognized header might be a localized Keywords header, so it counts as
+        # "could". When section state is unsafe, the section is ignored entirely.
+        if unsafe_section_state or not in_non_keyword_section:
+            for keyword in keywords:
+                if keyword not in own and _names_keyword(line, parts[0], keyword):
+                    own.add(keyword)
+        # parts[0] is empty only for an indented line; anything else is a
+        # section header or a test/keyword name, never a step.
+        if not cells or parts[0]:
+            continue
+        first = 0
+        while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
+            first += 1
+        if first < len(cells):
+            step_keyword = parts[cells[first]]
+            if step_keyword.strip() == "TRY":
+                has_try = True
+            elif _canon_keyword(step_keyword) in _ERROR_CATCHING_WRAPPERS:
+                has_catching_wrapper = True
+    return _FileGuard(
+        own_keywords=frozenset(own),
+        catches_errors=has_try or (
+            has_catching_wrapper and (has_keywords_section or unsafe_section_state)
+        ),
+        unsafe_section_state=unsafe_section_state,
+    )
 
 
 def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
@@ -444,36 +536,10 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     if "element states" not in lower and "element_states" not in lower:
         return robot_code
 
-    # Robot's tokenizer splits physical lines on more than "\n" — also a lone "\r"
-    # (one not paired into "\r\n"), and the rarer separator characters below. A
-    # section header that lands after one of those, glued onto whatever line we
-    # split on "\n", would be invisible to the header scan a few lines down —
-    # meaning the section state (and both guards gated on it) could end up
-    # wrong in the direction that matters: converting a call Robot would
-    # actually resolve to the file's own keyword. When any of them is present,
-    # section state is untrustworthy for the whole file: the own-keyword guard
-    # falls back to checking every non-indented line regardless of section —
-    # the same, unconditional check this module used before section tracking
-    # existed — and the TRY/wrapper guard treats the file as if it did have a
-    # Keywords section, since a hidden header could be one.
-    _other_linebreak_chars = "\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
-    unsafe_section_state = any(
-        c in robot_code.replace("\r\n", "\n") for c in _other_linebreak_chars
-    )
-
-    has_try = False
-    has_keywords_section = False
-    has_catching_wrapper = False
-    defines_own_keyword = False
-    in_non_keyword_section = False
+    guard = _scan_file_guard(robot_code, ("getelementstates",))
     rewrote = 0
     out_lines = []
     for line in robot_code.split("\n"):
-        section_name = _section_header_name(line)
-        if section_name is not None:
-            in_non_keyword_section = section_name in _NON_KEYWORD_SECTIONS
-            if not in_non_keyword_section:
-                has_keywords_section = True
         stripped = line.lstrip()
         if stripped.startswith("#") or stripped.startswith("..."):
             out_lines.append(line)
@@ -481,19 +547,6 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
         parts = _CELL_SPLIT_RE.split(line)
         cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
-        # A non-indented line names a test or a keyword. Robot resolves a keyword name
-        # to the file's own keyword before any library, ignoring case, spaces and
-        # underscores, and also matching an embedded-argument name or a pipe-separated
-        # definition, so a file defining `Get Element States` (in any of those forms)
-        # calls its own — rewriting that call would swap in a different keyword. Only a
-        # section that could define a keyword counts: a *** Variables *** entry is
-        # `${name}    value`, a non-indented line whose first cell is an
-        # embedded-argument wildcard that over-matches every keyword name; a test,
-        # a setting and a comment cannot define keywords either. An unrecognized
-        # header might be a localized Keywords header, so it counts as "could". When
-        # section state is unsafe (see above), the section is ignored entirely.
-        if (unsafe_section_state or not in_non_keyword_section) and _names_get_element_states(line, parts[0]):
-            defines_own_keyword = True
         # parts[0] is empty only for an indented line; anything else is a
         # section header or a test/keyword name, never a step.
         if not cells or parts[0]:
@@ -503,13 +556,6 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         first = 0
         while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
             first += 1
-        if first < len(cells):
-            step_keyword = parts[cells[first]]
-            if step_keyword.strip() == "TRY":
-                has_try = True
-            elif _canon_keyword(step_keyword) in _ERROR_CATCHING_WRAPPERS:
-                has_catching_wrapper = True
-
         if first or len(cells) < 4:
             out_lines.append(line)
             continue
@@ -565,14 +611,14 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
     if not rewrote:
         return robot_code
-    if defines_own_keyword:
+    if guard.own_keywords:
         logger.info(
             f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
             "unchanged — the file defines its own keyword of that name, which Robot "
             "resolves ahead of the Browser library"
         )
         return robot_code
-    if has_try or (has_catching_wrapper and (has_keywords_section or unsafe_section_state)):
+    if guard.catches_errors:
         logger.info(
             f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
             "unchanged — the file catches errors (TRY, or its own keywords under an "
