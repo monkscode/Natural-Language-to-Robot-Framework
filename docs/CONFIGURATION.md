@@ -54,29 +54,25 @@ GEMINI_API_KEY=your-actual-api-key-here
 Which model to use (bare name — the provider prefix is added automatically based on `MODEL_PROVIDER`).
 
 ```env
-ONLINE_MODEL=gemini-3.5-flash
+ONLINE_MODEL=gemini-3.8-flash
 ```
 
-**Default:** `gemini-3.5-flash`
+**Default:** `gemini-3.8-flash`
 
 **Available Models:**
-- `gemini-3.5-flash` - the default, and the only one with benchmark evidence
-- `gemini-2.5-flash` - cheaper, fewer thinking tokens; never benched here
+- `gemini-3.8-flash` - the default, and the only one with current benchmark evidence
+- `gemini-3.5-flash` - works; no longer benched (it was the benched model until 2026-10-01)
+- `gemini-2.5-flash` - cheaper; never benched here
 - `gemini-2.0-flash` - faster, slightly less capable
 - `gemini-1.5-pro` - more powerful, slower
 
-**Recommendation:** keep `gemini-3.5-flash`. Every baseline in `bench/baselines/`
-was measured on it, so the pass rate, cost per run and timings this project
-publishes describe that model and no other. The alternatives work; they simply
-have no numbers behind them.
-
-It is not the cheap option, and the gap is worth knowing before you change it.
-Per LiteLLM's own price map, `gemini-3.5-flash` on Vertex costs **$1.50 per
-million input tokens and $9.00 per million output**, against `gemini-2.5-flash`
-at **$0.30 and $2.50** — 5x input, 3.6x output — before counting the extra
-thinking tokens 3.5 generates by default. Switching to `2.5-flash` is a
-legitimate way to cut cost; you are trading away the only configuration with
-measured reliability behind it.
+**Recommendation:** keep `gemini-3.8-flash`. Since 2026-10-01 it is the model
+the bench gate's baseline is measured on. Figures dated before that, including
+the performance numbers in `docs/ARCHITECTURE.md`, were measured on
+`gemini-3.5-flash`. The other models work; none has current benchmark numbers
+behind it. On Vertex, `gemini-3.8-flash` costs $0.75 per million input tokens
+and $3.75 per million output (LiteLLM's price map); Google lists that as
+introductory pricing through 2026-12-31, and $1.50 / $7.50 from 2027-01-01.
 
 ### LOCAL_MODEL
 
@@ -497,7 +493,7 @@ GOOGLE_REDIRECT_URI=http://localhost:5000/auth/google/callback
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-gcp-project-id
 VERTEXAI_LOCATION=global
-ONLINE_MODEL=gemini-3.5-flash
+ONLINE_MODEL=gemini-3.8-flash
 
 # Access — set BEFORE the first start
 ADMIN_EMAILS=you@company.com
@@ -522,7 +518,7 @@ runs in production.
 ```env
 MODEL_PROVIDER=gemini
 GEMINI_API_KEY=your-ai-studio-key   # https://aistudio.google.com/apikey
-ONLINE_MODEL=gemini-3.5-flash
+ONLINE_MODEL=gemini-3.8-flash
 ADMIN_EMAILS=you@company.com
 ```
 

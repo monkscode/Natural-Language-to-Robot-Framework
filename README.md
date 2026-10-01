@@ -116,7 +116,7 @@ email as an admin:
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-project-id
 VERTEXAI_LOCATION=global
-ONLINE_MODEL=gemini-3.5-flash
+ONLINE_MODEL=gemini-3.8-flash
 ADMIN_EMAILS=you@example.com
 ```
 

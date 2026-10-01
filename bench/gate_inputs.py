@@ -57,8 +57,8 @@ from pathlib import Path
 
 from bench.bench_lib import compare_pins, load_meta
 
-BASELINE_CSV = "bench/baselines/2026-09-24-develop-b57b683-bs-1.0.39.csv"
-TIMING_REFERENCE_CSV = "bench/baselines/2026-08-02-rule6-url-backstop.csv"
+BASELINE_CSV = "bench/baselines/2026-10-01-develop-fda923f-bs-1.0.39-gemini-3.8-flash-run2.csv"
+TIMING_REFERENCE_CSV = "bench/baselines/2026-10-01-develop-fda923f-bs-1.0.39-gemini-3.8-flash-run2.csv"
 PASS_RATE_GATE = 96.7
 
 REQUIRED_COLUMNS = ("query_id", "query", "repeat", "workflow_id", "started_at",
