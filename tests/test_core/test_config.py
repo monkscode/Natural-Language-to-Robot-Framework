@@ -206,9 +206,9 @@ def test_local_service_urls_use_ipv4_loopback(monkeypatch):
     assert "localhost" not in s.BROWSER_USE_SERVICE_URL
 
 
-# The model every published baseline in bench/baselines/ was measured on. The
-# pass-rate gate, the cost-per-run and the timing figures quoted in the README
-# and CLAUDE.md all describe THIS model and no other.
+# The model the bench gate's baseline is measured on (gemini-3.8-flash since
+# 2026-10-01; gemini-3.5-flash before, so figures dated earlier describe 3.5).
+# The shipped default must be this model and no other.
 BENCHED_ONLINE_MODEL = "gemini-3.8-flash"
 
 

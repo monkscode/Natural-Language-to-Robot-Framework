@@ -62,24 +62,17 @@ ONLINE_MODEL=gemini-3.8-flash
 **Available Models:**
 - `gemini-3.8-flash` - the default, and the only one with current benchmark evidence
 - `gemini-3.5-flash` - works; no longer benched (it was the benched model until 2026-10-01)
-- `gemini-2.5-flash` - cheaper, fewer thinking tokens; never benched here
+- `gemini-2.5-flash` - cheaper; never benched here
 - `gemini-2.0-flash` - faster, slightly less capable
 - `gemini-1.5-pro` - more powerful, slower
 
-**Recommendation:** keep `gemini-3.8-flash`. The current baseline
-(2026-10-01) in `bench/baselines/` was measured on it, so the pass rate, cost
-per run and timings this project publishes describe that model and no other.
-Baselines before that date were measured on `gemini-3.5-flash`. The
-alternatives work; they simply have no current numbers behind them.
-
-It is not the cheap option, and the gap is worth knowing before you change it.
-Per LiteLLM's own price map, `gemini-3.8-flash` on Vertex costs **$0.75 per
-million input tokens and $3.75 per million output**, against `gemini-2.5-flash`
-at **$0.30 and $2.50** — 2.5x input, 1.5x output. Google lists $0.75 / $3.75 as
-introductory pricing through 2026-12-31; from 2027-01-01 it is $1.50 / $7.50
-(5x input, 3x output). Switching to `2.5-flash` is a
-legitimate way to cut cost; you are trading away the only configuration with
-measured reliability behind it.
+**Recommendation:** keep `gemini-3.8-flash`. Since 2026-10-01 it is the model
+the bench gate's baseline is measured on. Figures dated before that, including
+the performance numbers in `docs/ARCHITECTURE.md`, were measured on
+`gemini-3.5-flash`. The other models work; none has current benchmark numbers
+behind it. On Vertex, `gemini-3.8-flash` costs $0.75 per million input tokens
+and $3.75 per million output (LiteLLM's price map); Google lists that as
+introductory pricing through 2026-12-31, and $1.50 / $7.50 from 2027-01-01.
 
 ### LOCAL_MODEL
 

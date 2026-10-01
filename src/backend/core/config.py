@@ -17,11 +17,11 @@ class Settings(BaseSettings):
     #   "local"   — Ollama (requires a running Ollama server)
     MODEL_PROVIDER: str = "vertex"
     GEMINI_API_KEY: str | None = None
-    # The model every baseline in bench/baselines/ was measured on — the pass-rate
-    # gate, cost per run and timing figures all describe this one. It shipped as
-    # gemini-2.5-flash, which no baseline has ever covered, so a new user ran a
-    # configuration with no evidence behind it. Keep this and .env.example in step
-    # (tests/test_core/test_config.py guards both).
+    # The model the bench gate's baseline is measured on: gemini-3.8-flash since
+    # 2026-10-01, gemini-3.5-flash before (figures dated earlier describe 3.5). The
+    # default once shipped as gemini-2.5-flash, which no baseline has ever covered,
+    # so a new user ran a configuration with no evidence behind it. Keep this and
+    # .env.example in step (tests/test_core/test_config.py guards both).
     ONLINE_MODEL: str = "gemini-3.8-flash"
     LOCAL_MODEL: str = "llama3"
 

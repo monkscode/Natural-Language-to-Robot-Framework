@@ -355,7 +355,7 @@ class TestResolveThinkingKwargs:
         ("local", "llama3"),
     ])
     def test_non_vertex_providers_get_nothing(self, provider, model_name):
-        """The thinking-ON flip is Vertex-specific (probe-verified 2026-07-18).
+        """The thinking-ON flip is Vertex-specific (probe-verified 2026-07-18 on gemini-3.5-flash).
 
         Note the gemini case also guards the router's own shape: its routed
         string is 'gemini/gemini-3.5-flash', so the family substring is always

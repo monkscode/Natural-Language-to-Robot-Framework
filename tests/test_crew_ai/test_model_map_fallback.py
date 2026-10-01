@@ -66,6 +66,7 @@ def test_gemini_gets_schema_and_cost_back(failed_download, caplog):
 def test_vertex_gets_gemini_3_8_schema_and_cost_back(failed_download, caplog):
     with caplog.at_level(logging.WARNING, logger=fallback.__name__):
         fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.8-flash")
+    assert "vertex_ai/gemini-3.5-flash" not in litellm.model_cost
     assert supports_response_schema(model="vertex_ai/gemini-3.8-flash") is True
     assert _cost("vertex_ai/gemini-3.8-flash") == pytest.approx((0.00075, 0.000375))
     assert [r.levelname for r in caplog.records] == ["WARNING"]
