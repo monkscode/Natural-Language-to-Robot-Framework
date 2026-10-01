@@ -145,6 +145,8 @@ mid-run, check `workflow_metrics` for strays from that time window.
 `bench/gate.py` gives one verdict for a bench CSV. It compares the CSV with the one
 baseline, `bench/baselines/2026-10-01-develop-fda923f-bs-1.0.39-gemini-3.8-flash-run2.csv`, and reads only
 `bench/baselines/`, `bench/runs/` and `logs/` — no database, no network.
+The baseline CSV, its `.meta.json` and its run captures are local files: bench data is never committed
+(see `.gitignore`), so on a machine without them the gate cannot compare and exits 2 (`REFUSED`).
 
 ```powershell
 python -m bench.gate bench/baselines/2026-10-01-what-changed.csv
