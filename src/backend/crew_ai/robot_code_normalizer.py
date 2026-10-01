@@ -1239,26 +1239,42 @@ def rewrite_select_text_reads(robot_code: str) -> str:
 # Keywords that write a field's value AND fail on an element that is not a field
 # (measured, Browser 19.14.2: each raises "Element is not an <input>, <textarea>,
 # <select> or [contenteditable]" on a <div value>, <li value> or custom element).
-# Type Text / Type Secret only fail there because they clear the field first; with
-# `clear` switched off they type into anything, as `Press Keys` does — so neither
-# counts as proof that the element is a field.
-_TYPING_KEYWORDS = frozenset({"fill text", "fill secret", "clear text", _TYPE_TEXT, _TYPE_SECRET})
+# Type Text only fails there because it clears the field first; with `clear`
+# switched off it types into anything, as `Press Keys` does — so then it is no
+# proof that the element is a field. Fill Secret and Type Secret are not listed:
+# rewrite_typed_value_reads leaves alone any file that names either.
+_TYPING_KEYWORDS = frozenset({"fill text", "clear text", _TYPE_TEXT})
 # The keyword a typed-value read is rewritten to.
 _GET_PROPERTY = "Get Property"
 # Set Variable: the shared reader trusts BuiltIn's meaning of it (_follow).
-_TYPED_READ_GUARD = ("Get Attribute", _GET_PROPERTY, "Fill Text", "Fill Secret", "Clear Text",
-                     "Type Text", "Type Secret", "Set Variable")
+_TYPED_READ_GUARD = ("Get Attribute", _GET_PROPERTY, "Fill Text", "Clear Text", "Type Text", "Set Variable")
+# Browser's two secret keywords, compared lower-cased without spaces or underscores.
+_SECRET_KEYWORDS = frozenset({"fillsecret", "typesecret"})
+
+
+def _names_secret_keyword(robot_code: str) -> bool:
+    """True when a content cell on any line of any section names Fill Secret or
+    Type Secret: lower-cased without spaces or underscores it is `fillsecret` /
+    `typesecret`, or ends with `.fillsecret` / `.typesecret` (any library
+    prefix or alias). A step, a wrapper's argument, a keyword definition or a
+    setting all count; a comment does not."""
+    for line in robot_code.split("\n"):
+        parts = _CELL_SPLIT_RE.split(line)
+        for i in _content_cells(parts):
+            if re.sub(_SPACE_UNDERSCORE, "", parts[i].lower()).rsplit(".", 1)[-1] in _SECRET_KEYWORDS:
+                return True
+    return False
 
 
 def _proves_a_field(step: _Step) -> bool:
     """True when the typing step could only have succeeded on a field."""
-    if step.keyword in (_TYPE_TEXT, _TYPE_SECRET):
+    if step.keyword == _TYPE_TEXT:
         if any(a.startswith(("@{", "&{")) for a in step.args):
             return False  # an expanded list or dict may carry `clear`
         rest = step.args[1:]  # `clear=` may be named before the text
         # Robot resolves an argument name at run time (`${n}=`, `cl\ear=`): deny every name but these.
         return len(rest) <= 2 and not any(
-            "=" in a and a.split("=", 1)[0] not in ("txt", "secret", "delay") for a in rest
+            "=" in a and a.split("=", 1)[0] not in ("txt", "delay") for a in rest
         )
     return True
 
@@ -1299,10 +1315,10 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     `Get Attribute    <L>    value` returns '' (or the prefilled default) and a
     correct test fails. Only after a typing step on the same element (same
     resolution rules as `rewrite_select_text_reads`) that proves the element is
-    a field: Fill Text, Fill Secret, Clear Text, and Type Text / Type Secret
-    unless an argument could switch `clear` off (a second argument after the
-    text, `clear` by position; any cell after the locator holding `=` whose
-    name before the first `=` is not `txt`, `secret` or `delay`; an expanded
+    a field: Fill Text, Clear Text, and Type Text unless an argument could
+    switch `clear` off (a second argument after the text, `clear` by
+    position; any cell after the locator holding `=` whose name before the
+    first `=` is not `txt` or `delay`; an expanded
     `@{…}` / `&{…}`). The named form `attribute=value` becomes
     `property=value` (swapping only the keyword would ask for a property
     literally named "attribute=value", which dryrun cannot catch); inline
@@ -1317,19 +1333,25 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     keyword / `Set Variable`, catch errors, use pipe-separated lines, name a
     *** Variables *** entry through another variable, hold a scoped `Set …
     Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
-    `VAR` anywhere, or hold a `$` that starts no variable, an escaped `\\${` or
-    any `%` (the only ways Fill Secret / Type Secret take a secret: `$name`,
-    `\\${name}`, `%NAME`, or an RF `Secret` made from `%{NAME}`; the rewritten
-    read would log it). Not seen: a `Secret` passed in from outside the file (a
-    `--variable`, a variable file, a library; the runner passes none) or made
-    by Python inside it. Idempotent.
+    `VAR` anywhere, hold a `$` that starts no variable, an escaped `\\${`, any
+    `%` or any backslash, or name Fill Secret or Type Secret in any cell (a
+    step, a wrapper's argument, a keyword definition or a setting; any library
+    prefix): Browser takes a secret as `$name`, `%NAME` or an RF `Secret`,
+    Robot escapes (`\\x24`, `\\x25`, `\\${`) produce those forms at run time,
+    and the rewritten read would log the secret. Not seen: a keyword name built
+    at run time together with an argument Python builds at run time in the
+    same call (`Run Keyword    Fill ${EMPTY}Secret    <L>    ${{chr(36)+'pw'}}`),
+    and a `Secret` passed in from outside the file (a `--variable`, a variable
+    file, a library; the runner passes none). Idempotent.
     """
     if not robot_code:
         return robot_code
     if "getattribute" not in re.sub(_SPACE_UNDERSCORE, "", robot_code.lower()):
         return robot_code
-    if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code) or "%" in robot_code:
-        return robot_code  # Browser's secret forms ($name, \${name}, %NAME): the rewritten read would log the value
+    if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code) or "%" in robot_code or "\\" in robot_code:
+        return robot_code  # a secret form ($name, %NAME) or a Robot escape that builds one: the read would log it
+    if _names_secret_keyword(robot_code):
+        return robot_code  # Fill Secret / Type Secret, whatever its arguments: the read would log the secret
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code

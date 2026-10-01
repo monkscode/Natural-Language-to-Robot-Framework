@@ -12,6 +12,7 @@ is rewritten.
 """
 
 import logging
+import re
 
 import pytest
 
@@ -774,30 +775,87 @@ _N1_CANNOT_TRUST = [
 ]
 _N1_CANNOT_TRUST_IDS = [case[0] for case in _N1_CANNOT_TRUST]
 
-# A file that can hand Fill Secret / Type Secret a secret (owner, 2026-10-01, PR #120 review): Browser 19.14.2 takes one
-# only as `$name`, an escaped `\${name}`, `%NAME`, or an RF `Secret` made from `%{NAME}`. Before the rewrite the read
-# fails and logs nothing; after it the read passes and output.xml holds the secret (runner, RF 7.4.2). So a `$` that
-# starts no variable, an escaped `\${` or any `%` anywhere leaves the file alone. (label, the file, the blocking text,
-# its neutral replacement): the control is the same file with the blocking text replaced, and IS rewritten.
-_SECRET_FILL = "Fill Secret    ${customer_city_locator}    "
-_N1_SECRET = [
-    ("Fill Secret with $name", _n1(_TYPE, _SECRET_FILL + "$pw", _ATTR, _USE), "$pw", "${pw}"),
-    ("Type Secret with $name", _n1(_TYPE, "Type Secret    ${customer_city_locator}    $pw", _ATTR, _USE),
-     "$pw", "${pw}"),
-    ("Fill Secret with %NAME", _n1(_TYPE, _SECRET_FILL + "%PW_ENV", _ATTR, _USE), "%PW_ENV", "${pw}"),
-    ("Fill Secret with an escaped ${name}", _n1(_TYPE, _SECRET_FILL + "\\${pw}", _ATTR, _USE), "\\${pw}", "${pw}"),
-    ("a Secret made from the environment", _n1(_TYPE, _SECRET_FILL + "${pw}", _ATTR, _USE).replace(
-        _N1_ENTRY, _N1_ENTRY + "${pw: Secret}    %{PW_ENV}\n"), "%{PW_ENV}", "plain"),
-    ("a keyword name built at run time", _n1(
-        _TYPE, "Run Keyword    Fill ${EMPTY}Secret    ${customer_city_locator}    $pw", _ATTR, _USE), "$pw", "${pw}"),
-    ("the secret in another test of the file", _n1(
-        _TYPE, _ATTR, _USE, tail="\n\nSecond Test\n    Fill Secret    id=pw    $pw\n"), "$pw", "${pw}"),
-    # The accepted cost: a `%` that carries no secret also leaves the file alone.
+# A file that can hand Browser's Fill Secret / Type Secret a secret (owner, 2026-10-01: "Close the class"). Browser
+# 19.14.2 takes a secret as `$name`, `%NAME` or an RF `Secret`; Robot escapes (`\x24`, `\x25`, `\${`) produce those
+# forms at run time, and Python can build them (`Evaluate    chr(36)+'pw'`). Before the rewrite the read fails and logs
+# nothing; after it the read passes and output.xml holds the secret (runner, RF 7.4.2). So N1 leaves the whole file
+# alone on either of two checks, and each list below is blocked by ONE of them only (each left-alone test asserts the
+# other check cannot see its file). (label, the file, the blocking text, its neutral replacement): the control is the
+# same file with the blocking text replaced, and IS rewritten.
+#
+# The argument-form check: a `$` that starts no variable, an escaped `\${`, any `%` or any backslash. The keyword is
+# named through a name built at run time, which the keyword-cell check cannot see.
+_HIDDEN_FILL = "Run Keyword    Fill ${EMPTY}Secret    ${customer_city_locator}    "
+_N1_SECRET_FORMS = [
+    ("$name", _n1(_TYPE, _HIDDEN_FILL + "$pw", _ATTR, _USE), "$pw", "pw"),
+    ("an escaped ${name}", _n1(_TYPE, _HIDDEN_FILL + "\\${pw}", _ATTR, _USE), "\\${pw}", "pw"),
+    ("%NAME", _n1(_TYPE, _HIDDEN_FILL + "%PW_ENV", _ATTR, _USE), "%PW_ENV", "pw"),
+    ("a Secret made from the environment", _n1(_TYPE, _HIDDEN_FILL + "${pw}", _ATTR, _USE).replace(
+        _N1_ENTRY, _N1_ENTRY + "${pw: Secret}    %{PW_ENV}\n"), "%{PW_ENV}", "pw"),
+    ("a hex escape that makes %NAME", _n1(_TYPE, _HIDDEN_FILL + "\\x25PW_ENV", _ATTR, _USE), "\\x25PW_ENV", "pw"),
+    ("a hex escape that makes $name", _n1(_TYPE, _HIDDEN_FILL + "\\x24pw", _ATTR, _USE), "\\x24pw", "pw"),
+    ("a unicode escape that makes %NAME", _n1(_TYPE, _HIDDEN_FILL + "\\u0025PW_ENV", _ATTR, _USE),
+     "\\u0025PW_ENV", "pw"),
+    ("a hex escape in Variables passed as a plain ${ref}", _n1(_TYPE, _HIDDEN_FILL + "${ref}", _ATTR, _USE).replace(
+        _N1_ENTRY, _N1_ENTRY + "${ref}    \\x25PW_ENV\n"), "\\x25PW_ENV", "pw"),
+    # The accepted cost: a `%` or a backslash that carries no secret also leaves the file alone.
     ("accepted cost: a % in the New Page URL", _n1(_TYPE, _ATTR, _USE).replace(
         "register.htm\n", "register.htm?ref=a%20b\n"), "a%20b", "a20b"),
     ("accepted cost: a % in a Log line", _n1(_TYPE, "Log    50% done", _ATTR, _USE), "50% done", "50 done"),
+    # The corpus shape: bench runs on the-internet's tables page escape the quotes of a WARNING comment.
+    ("accepted cost: a backslash in a WARNING comment", _n1(
+        _TYPE, "# WARNING: locator for 'the \\'edit\\' link in the row containing \\'Smith\\'' is positional"
+               " — may break in a fresh session", _ATTR, _USE), "\\'", "'"),
 ]
-_N1_SECRET_IDS = [case[0] for case in _N1_SECRET]
+_N1_SECRET_FORM_IDS = [case[0] for case in _N1_SECRET_FORMS]
+
+# The keyword-cell check: any content cell, in any section, that names Fill Secret or Type Secret (any library prefix),
+# whatever its arguments. Each file here holds no `$` that starts no variable, no `%` and no backslash: the secret is a
+# `$name` Python builds at run time. The control replaces the secret keyword with its plain twin.
+_EVAL_SECRET = "${x}=    Evaluate    chr(36)+'pw'"
+_N1_SECRET_KEYWORDS = [
+    ("Fill Secret", _n1(_TYPE, _EVAL_SECRET, "Fill Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Fill Secret", "Fill Text"),
+    ("Type Secret", _n1(_TYPE, _EVAL_SECRET, "Type Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Type Secret", "Type Text"),
+    ("Browser.Fill Secret", _n1(
+        _TYPE, _EVAL_SECRET, "Browser.Fill Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Fill Secret", "Fill Text"),
+    ("Fill_Secret", _n1(_TYPE, _EVAL_SECRET, "Fill_Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Fill_Secret", "Fill_Text"),
+    ("a library alias: B.Type Secret", _n1(
+        _TYPE, _EVAL_SECRET, "B.Type Secret    ${customer_city_locator}    ${x}", _ATTR, _USE).replace(
+        "Library    Collections\n", "Library    Collections\nLibrary    Browser    AS    B\n"),
+     "Type Secret", "Type Text"),
+    ("Run Keyword    Fill Secret", _n1(
+        _TYPE, _EVAL_SECRET, "Run Keyword    Fill Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Fill Secret", "Fill Text"),
+    ("the file's own keyword calls Fill Secret", _n1(
+        _TYPE, _EVAL_SECRET, "Log In    ${x}", _ATTR, _USE,
+        tail="\n\n*** Keywords ***\nLog In\n    [Arguments]    ${secret}\n    Fill Secret    id=password    ${secret}\n"),
+     "Fill Secret", "Fill Text"),
+    ("the file defines its own Fill Secret", _n1(
+        _TYPE, _ATTR, _USE, tail="\n\n*** Keywords ***\nFill Secret\n    [Arguments]    @{a}\n    Log    own\n"),
+     "\nFill Secret\n", "\nMy Helper\n"),
+    ("a Settings line runs Fill Secret", _n1(_TYPE, _ATTR, _USE).replace(
+        "Library    Collections\n", "Library    Collections\nTest Setup    Fill Secret    id=password    ${EMPTY}\n"),
+     "Fill Secret", "Fill Text"),
+    ("Fill Secret in another test of the file", _n1(
+        _TYPE, _ATTR, _USE, tail=f"\n\nSecond Test\n    {_EVAL_SECRET}\n    Fill Secret    id=password    ${{x}}\n"),
+     "Fill Secret", "Fill Text"),
+]
+_N1_SECRET_KEYWORD_IDS = [case[0] for case in _N1_SECRET_KEYWORDS]
+
+
+def _names_a_secret_keyword(source: str) -> bool:
+    """The test's own view of the keyword-cell check: some cell squashes to fillsecret / typesecret."""
+    cells = re.split(r"\s{2,}|\t|\n", source)
+    return any(re.sub(r"[\s_]", "", c.lower()).rsplit(".", 1)[-1] in ("fillsecret", "typesecret") for c in cells)
+
+
+def _holds_a_secret_form(source: str) -> bool:
+    """The test's own view of the argument-form check: a `$` that starts no variable, `%` or a backslash."""
+    return "$" in source.replace("${", "") or "%" in source or "\\" in source
 
 
 class TestTypedValueRewritten:
@@ -807,15 +865,11 @@ class TestTypedValueRewritten:
 
     @pytest.mark.parametrize("typing", [
         "Fill Text    ${customer_city_locator}    NewYork",
-        # A plain `${secret}`: Browser refuses it at run time, so no secret ever reaches the field, and the step still
-        # proves a field. `$secret` would leave the whole file alone (see _N1_SECRET).
-        "Fill Secret    ${customer_city_locator}    ${secret}",
         "Clear Text    ${customer_city_locator}",
         "Type Text    ${customer_city_locator}    NewYork",
         "Type Text    ${customer_city_locator}    NewYork    delay=10 ms",
         "Type Text    ${customer_city_locator}    txt=NewYork",
         "Type Text    ${customer_city_locator}    txt=NewYork    delay=10 ms",
-        "Type Secret    ${customer_city_locator}    ${secret}",
         "Browser.Fill Text    ${customer_city_locator}    NewYork",
     ])
     def test_each_typing_keyword_that_proves_a_field(self, typing):
@@ -868,10 +922,6 @@ class TestTypedValueLeftAlone:
          ("&{kw}=    Create Dictionary    clear=False", "Type Text    ${customer_city_locator}    NewYork    &{kw}", _ATTR)),
         ("Type Text with every argument in an expanded list",
          ("@{all}=    Create List    NewYork    0 ms    False", "Type Text    ${customer_city_locator}    @{all}", _ATTR)),
-        # `${pw}`, not `$pw`: a `$` that starts no variable would leave the file alone by itself (see _N1_SECRET), so
-        # the `clear` rule must be the only thing that blocks these two.
-        ("Type Secret with clear named before the secret",
-         ("Type Secret    ${customer_city_locator}    clear=False    secret=${pw}", _ATTR)),
         # Robot resolves a named argument's name at run time: each of these names is `clear`.
         ("Type Text with clear named through a variable",
          ("${n}=    Set Variable    clear", "Type Text    ${customer_city_locator}    NewYork    ${n}=False", _ATTR)),
@@ -887,8 +937,6 @@ class TestTypedValueLeftAlone:
          ("Type Text    ${customer_city_locator}    NewYork    ${{'clear'}}=False", _ATTR)),
         ("Type Text with clear named by a character escape",
          ("Type Text    ${customer_city_locator}    NewYork    \\x63lear=False", _ATTR)),
-        ("Type Secret with clear named through a variable",
-         ("${n}=    Set Variable    clear", "Type Secret    ${customer_city_locator}    ${pw}    ${n}=False", _ATTR)),
         # Accepted cost: a positional text holding `=` no longer proves a field.
         ("Type Text with a text holding =", ("Type Text    ${customer_city_locator}    a=b", _ATTR)),
         ("Keyboard Input names no element", ("Click    ${customer_city_locator}", "Keyboard Input    type    x", _ATTR)),
@@ -958,12 +1006,24 @@ class TestTypedValueLeftAlone:
         assert control != source, label
         assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
 
-    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET, ids=_N1_SECRET_IDS)
-    def test_a_file_that_can_hold_a_secret_is_left_alone(self, label, source, blocking, neutral):
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET_FORMS, ids=_N1_SECRET_FORM_IDS)
+    def test_a_secret_argument_form_leaves_the_file_alone(self, label, source, blocking, neutral):
+        assert not _names_a_secret_keyword(source), label  # only the argument-form check can see this file
         assert rewrite_typed_value_reads(source) == source, label
 
-    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET, ids=_N1_SECRET_IDS)
-    def test_control_the_same_file_without_the_secret_form_is_rewritten(self, label, source, blocking, neutral):
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET_FORMS, ids=_N1_SECRET_FORM_IDS)
+    def test_control_the_same_file_without_that_form_is_rewritten(self, label, source, blocking, neutral):
+        control = source.replace(blocking, neutral)
+        assert control != source, label
+        assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET_KEYWORDS, ids=_N1_SECRET_KEYWORD_IDS)
+    def test_a_secret_keyword_in_any_cell_leaves_the_file_alone(self, label, source, blocking, neutral):
+        assert not _holds_a_secret_form(source), label  # only the keyword-cell check can see this file
+        assert rewrite_typed_value_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET_KEYWORDS, ids=_N1_SECRET_KEYWORD_IDS)
+    def test_control_the_same_file_with_the_plain_keyword_is_rewritten(self, label, source, blocking, neutral):
         control = source.replace(blocking, neutral)
         assert control != source, label
         assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
@@ -990,9 +1050,10 @@ _DENY_BRANCHES = [
     ("the locator's value holds a variable", rewrite_typed_value_reads,
      _N1_UNTOUCHED.replace(_N1_ENTRY, "${base}    id=customer.address\n${customer_city_locator}    ${base}.city\n"),
      "${base}.city", "id=customer.address.city", _ATTR, _PROP),
-    ("the locator's value holds a backslash", rewrite_typed_value_reads,
-     _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY.replace("customer.address", "customer\\.address")),
-     "customer\\.address", "customer.address", _ATTR, _PROP),
+    # On the select read: the typed-value read leaves a file with any backslash alone before this reader runs.
+    ("the locator's value holds a backslash", rewrite_select_text_reads,
+     _suite("Select Options By    ${get_text_locator}    label    Option 2", _READ, _CHECK).replace(
+         _LOCATOR_ENTRY, "${get_text_locator}    css=#drop\\down\n"), "drop\\down", "dropdown", _READ, _READ_NEW),
     ("the test's [Documentation] before the read names its variable", rewrite_select_text_reads,
      _suite(_SELECT, _READ, _CHECK).replace("Auto-generated test case", "Checks ${selected_option}"),
      "Checks ${selected_option}", "Checks the selection", _READ, _READ_NEW),
