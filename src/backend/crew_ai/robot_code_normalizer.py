@@ -1248,20 +1248,22 @@ _TYPING_KEYWORDS = frozenset({"fill text", "clear text", _TYPE_TEXT})
 _GET_PROPERTY = "Get Property"
 # Set Variable: the shared reader trusts BuiltIn's meaning of it (_follow).
 _TYPED_READ_GUARD = ("Get Attribute", _GET_PROPERTY, "Fill Text", "Clear Text", "Type Text", "Set Variable")
-# Browser's two secret keywords, compared lower-cased without spaces or underscores.
-_SECRET_KEYWORDS = frozenset({"fillsecret", "typesecret"})
+# Browser's two secret keywords, compared case-folded without spaces or underscores.
+_SECRET_KEYWORDS = ("fillsecret", "typesecret")
 
 
 def _names_secret_keyword(robot_code: str) -> bool:
     """True when a content cell on any line of any section names Fill Secret or
-    Type Secret: lower-cased without spaces or underscores it is `fillsecret` /
-    `typesecret`, or ends with `.fillsecret` / `.typesecret` (any library
-    prefix or alias). A step, a wrapper's argument, a keyword definition or a
+    Type Secret the way Robot matches a keyword name: case-folded (`ſ` is `s`)
+    and without spaces or underscores, it ends with `fillsecret` /
+    `typesecret`. Any prefix counts — a library name or alias with `.`, a BDD
+    word (`Given`, `When`, a translated one), anything — which only makes the
+    rewrite skip. A step, a wrapper's argument, a keyword definition or a
     setting all count; a comment does not."""
     for line in robot_code.split("\n"):
         parts = _CELL_SPLIT_RE.split(line)
         for i in _content_cells(parts):
-            if re.sub(_SPACE_UNDERSCORE, "", parts[i].lower()).rsplit(".", 1)[-1] in _SECRET_KEYWORDS:
+            if re.sub(_SPACE_UNDERSCORE, "", parts[i].casefold()).endswith(_SECRET_KEYWORDS):
                 return True
     return False
 
@@ -1335,14 +1337,17 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
     `VAR` anywhere, hold a `$` that starts no variable, an escaped `\\${`, any
     `%` or any backslash, or name Fill Secret or Type Secret in any cell (a
-    step, a wrapper's argument, a keyword definition or a setting; any library
-    prefix): Browser takes a secret as `$name`, `%NAME` or an RF `Secret`,
-    Robot escapes (`\\x24`, `\\x25`, `\\${`) produce those forms at run time,
-    and the rewritten read would log the secret. Not seen: a keyword name built
-    at run time together with an argument Python builds at run time in the
-    same call (`Run Keyword    Fill ${EMPTY}Secret    <L>    ${{chr(36)+'pw'}}`),
-    and a `Secret` passed in from outside the file (a `--variable`, a variable
-    file, a library; the runner passes none). Idempotent.
+    step, a wrapper's argument, a keyword definition or a setting; matched as
+    Robot matches keyword names, case-folded, so any prefix counts: a library
+    name or alias, a BDD word): Browser takes a secret as `$name`, `%NAME` or
+    an RF `Secret`, Robot escapes (`\\x24`, `\\x25`, `\\${`) produce those
+    forms at run time, and the rewritten read would log the secret. Not seen:
+    a keyword name built at run time together with an argument whose value is
+    only known at run time (built by Python, read from the page or from the
+    environment) in the same call (`Run Keyword    Fill ${EMPTY}Secret    <L>
+    ${{chr(36)+'pw'}}`), and a `Secret` passed in from outside the file (a
+    `--variable`, a variable file, a library; the runner passes none).
+    Idempotent.
     """
     if not robot_code:
         return robot_code

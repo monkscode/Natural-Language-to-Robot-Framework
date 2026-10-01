@@ -823,6 +823,16 @@ _N1_SECRET_KEYWORDS = [
      "Fill Secret", "Fill Text"),
     ("Fill_Secret", _n1(_TYPE, _EVAL_SECRET, "Fill_Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
      "Fill_Secret", "Fill_Text"),
+    # Robot strips a BDD prefix and compares names case-folded (RF 7.4.2): each of these runs Browser's keyword.
+    ("a BDD prefix: Given Fill Secret", _n1(
+        _TYPE, _EVAL_SECRET, "Given Fill Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Fill Secret", "Fill Text"),
+    ("a BDD prefix: When Type Secret", _n1(
+        _TYPE, _EVAL_SECRET, "When Type Secret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Type Secret", "Type Text"),
+    ("a long s that case-folds to s", _n1(
+        _TYPE, _EVAL_SECRET, "Fill \u017fecret    ${customer_city_locator}    ${x}", _ATTR, _USE),
+     "Fill \u017fecret", "Fill Text"),
     ("a library alias: B.Type Secret", _n1(
         _TYPE, _EVAL_SECRET, "B.Type Secret    ${customer_city_locator}    ${x}", _ATTR, _USE).replace(
         "Library    Collections\n", "Library    Collections\nLibrary    Browser    AS    B\n"),
@@ -848,9 +858,9 @@ _N1_SECRET_KEYWORD_IDS = [case[0] for case in _N1_SECRET_KEYWORDS]
 
 
 def _names_a_secret_keyword(source: str) -> bool:
-    """The test's own view of the keyword-cell check: some cell squashes to fillsecret / typesecret."""
+    """The test's own view of the keyword-cell check: some cell, case-folded and squashed, ends with a secret name."""
     cells = re.split(r"\s{2,}|\t|\n", source)
-    return any(re.sub(r"[\s_]", "", c.lower()).rsplit(".", 1)[-1] in ("fillsecret", "typesecret") for c in cells)
+    return any(re.sub(r"[\s_]", "", c.casefold()).endswith(("fillsecret", "typesecret")) for c in cells)
 
 
 def _holds_a_secret_form(source: str) -> bool:
