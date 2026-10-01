@@ -1047,6 +1047,13 @@ _DENY_BRANCHES = [
     ("the locator's value in two cells", rewrite_typed_value_reads,
      _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY.replace("\n", "    id=other\n")), "    id=other\n", "\n",
      _ATTR, _PROP),
+    # Robot keeps the FIRST definition: a later plain one must not make the value known (the control renames the
+    # first definition, as in "a nested name first in Variables").
+    ("the locator defined twice, first in two cells", rewrite_typed_value_reads,
+     _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY.replace("\n", "    id=other\n") + _N1_ENTRY),
+     _N1_ENTRY.replace("\n", "    id=other\n"),
+     _N1_ENTRY.replace("\n", "    id=other\n").replace("${customer_city_locator}", "${other_locator}"),
+     _ATTR, _PROP),
     ("the locator's value holds a variable", rewrite_typed_value_reads,
      _N1_UNTOUCHED.replace(_N1_ENTRY, "${base}    id=customer.address\n${customer_city_locator}    ${base}.city\n"),
      "${base}.city", "id=customer.address.city", _ATTR, _PROP),
