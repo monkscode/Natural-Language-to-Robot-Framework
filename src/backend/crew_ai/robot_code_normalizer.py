@@ -1302,14 +1302,21 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     cannot read as a step (a nested or item assignment target among them), and
     whole files that define their own `Get Attribute` / `Get Property` / typing
     keyword / `Set Variable`, catch errors, use pipe-separated lines, name a
-    *** Variables *** entry through another variable, or hold a scoped `Set …
+    *** Variables *** entry through another variable, hold a scoped `Set …
     Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
-    `VAR` anywhere. Idempotent.
+    `VAR` anywhere, or hold a `$` that starts no variable, an escaped `\\${` or
+    any `%` (the only ways Fill Secret / Type Secret take a secret: `$name`,
+    `\\${name}`, `%NAME`, or an RF `Secret` made from `%{NAME}`; the rewritten
+    read would log it). Not seen: a `Secret` passed in from outside the file (a
+    `--variable`, a variable file, a library; the runner passes none) or made
+    by Python inside it. Idempotent.
     """
     if not robot_code:
         return robot_code
     if "getattribute" not in re.sub(r"[\s_]", "", robot_code.lower()):
         return robot_code
+    if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code) or "%" in robot_code:
+        return robot_code  # Browser's secret forms ($name, \${name}, %NAME): the rewritten read would log the value
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code

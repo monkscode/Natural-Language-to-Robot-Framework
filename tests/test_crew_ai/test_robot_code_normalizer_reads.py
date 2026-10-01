@@ -773,6 +773,31 @@ _N1_CANNOT_TRUST = [
 ]
 _N1_CANNOT_TRUST_IDS = [case[0] for case in _N1_CANNOT_TRUST]
 
+# A file that can hand Fill Secret / Type Secret a secret (owner, 2026-10-01, PR #120 review): Browser 19.14.2 takes one
+# only as `$name`, an escaped `\${name}`, `%NAME`, or an RF `Secret` made from `%{NAME}`. Before the rewrite the read
+# fails and logs nothing; after it the read passes and output.xml holds the secret (runner, RF 7.4.2). So a `$` that
+# starts no variable, an escaped `\${` or any `%` anywhere leaves the file alone. (label, the file, the blocking text,
+# its neutral replacement): the control is the same file with the blocking text replaced, and IS rewritten.
+_SECRET_FILL = "Fill Secret    ${customer_city_locator}    "
+_N1_SECRET = [
+    ("Fill Secret with $name", _n1(_TYPE, _SECRET_FILL + "$pw", _ATTR, _USE), "$pw", "${pw}"),
+    ("Type Secret with $name", _n1(_TYPE, "Type Secret    ${customer_city_locator}    $pw", _ATTR, _USE),
+     "$pw", "${pw}"),
+    ("Fill Secret with %NAME", _n1(_TYPE, _SECRET_FILL + "%PW_ENV", _ATTR, _USE), "%PW_ENV", "${pw}"),
+    ("Fill Secret with an escaped ${name}", _n1(_TYPE, _SECRET_FILL + "\\${pw}", _ATTR, _USE), "\\${pw}", "${pw}"),
+    ("a Secret made from the environment", _n1(_TYPE, _SECRET_FILL + "${pw}", _ATTR, _USE).replace(
+        _N1_ENTRY, _N1_ENTRY + "${pw: Secret}    %{PW_ENV}\n"), "%{PW_ENV}", "plain"),
+    ("a keyword name built at run time", _n1(
+        _TYPE, "Run Keyword    Fill ${EMPTY}Secret    ${customer_city_locator}    $pw", _ATTR, _USE), "$pw", "${pw}"),
+    ("the secret in another test of the file", _n1(
+        _TYPE, _ATTR, _USE, tail="\n\nSecond Test\n    Fill Secret    id=pw    $pw\n"), "$pw", "${pw}"),
+    # The accepted cost: a `%` that carries no secret also leaves the file alone.
+    ("accepted cost: a % in the New Page URL", _n1(_TYPE, _ATTR, _USE).replace(
+        "register.htm\n", "register.htm?ref=a%20b\n"), "a%20b", "a20b"),
+    ("accepted cost: a % in a Log line", _n1(_TYPE, "Log    50% done", _ATTR, _USE), "50% done", "50 done"),
+]
+_N1_SECRET_IDS = [case[0] for case in _N1_SECRET]
+
 
 class TestTypedValueRewritten:
     def test_the_corpus_shape(self):
@@ -781,13 +806,15 @@ class TestTypedValueRewritten:
 
     @pytest.mark.parametrize("typing", [
         "Fill Text    ${customer_city_locator}    NewYork",
-        "Fill Secret    ${customer_city_locator}    $secret",
+        # A plain `${secret}`: Browser refuses it at run time, so no secret ever reaches the field, and the step still
+        # proves a field. `$secret` would leave the whole file alone (see _N1_SECRET).
+        "Fill Secret    ${customer_city_locator}    ${secret}",
         "Clear Text    ${customer_city_locator}",
         "Type Text    ${customer_city_locator}    NewYork",
         "Type Text    ${customer_city_locator}    NewYork    delay=10 ms",
         "Type Text    ${customer_city_locator}    txt=NewYork",
         "Type Text    ${customer_city_locator}    txt=NewYork    delay=10 ms",
-        "Type Secret    ${customer_city_locator}    $secret",
+        "Type Secret    ${customer_city_locator}    ${secret}",
         "Browser.Fill Text    ${customer_city_locator}    NewYork",
     ])
     def test_each_typing_keyword_that_proves_a_field(self, typing):
@@ -840,8 +867,10 @@ class TestTypedValueLeftAlone:
          ("&{kw}=    Create Dictionary    clear=False", "Type Text    ${customer_city_locator}    NewYork    &{kw}", _ATTR)),
         ("Type Text with every argument in an expanded list",
          ("@{all}=    Create List    NewYork    0 ms    False", "Type Text    ${customer_city_locator}    @{all}", _ATTR)),
+        # `${pw}`, not `$pw`: a `$` that starts no variable would leave the file alone by itself (see _N1_SECRET), so
+        # the `clear` rule must be the only thing that blocks these two.
         ("Type Secret with clear named before the secret",
-         ("Type Secret    ${customer_city_locator}    clear=False    secret=$pw", _ATTR)),
+         ("Type Secret    ${customer_city_locator}    clear=False    secret=${pw}", _ATTR)),
         # Robot resolves a named argument's name at run time: each of these names is `clear`.
         ("Type Text with clear named through a variable",
          ("${n}=    Set Variable    clear", "Type Text    ${customer_city_locator}    NewYork    ${n}=False", _ATTR)),
@@ -858,7 +887,7 @@ class TestTypedValueLeftAlone:
         ("Type Text with clear named by a character escape",
          ("Type Text    ${customer_city_locator}    NewYork    \\x63lear=False", _ATTR)),
         ("Type Secret with clear named through a variable",
-         ("${n}=    Set Variable    clear", "Type Secret    ${customer_city_locator}    $pw    ${n}=False", _ATTR)),
+         ("${n}=    Set Variable    clear", "Type Secret    ${customer_city_locator}    ${pw}    ${n}=False", _ATTR)),
         # Accepted cost: a positional text holding `=` no longer proves a field.
         ("Type Text with a text holding =", ("Type Text    ${customer_city_locator}    a=b", _ATTR)),
         ("Keyboard Input names no element", ("Click    ${customer_city_locator}", "Keyboard Input    type    x", _ATTR)),
@@ -924,6 +953,16 @@ class TestTypedValueLeftAlone:
 
     @pytest.mark.parametrize("label, source, blocking, neutral", _N1_CANNOT_TRUST, ids=_N1_CANNOT_TRUST_IDS)
     def test_control_the_same_file_without_the_blocking_text_is_rewritten(self, label, source, blocking, neutral):
+        control = source.replace(blocking, neutral)
+        assert control != source, label
+        assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET, ids=_N1_SECRET_IDS)
+    def test_a_file_that_can_hold_a_secret_is_left_alone(self, label, source, blocking, neutral):
+        assert rewrite_typed_value_reads(source) == source, label
+
+    @pytest.mark.parametrize("label, source, blocking, neutral", _N1_SECRET, ids=_N1_SECRET_IDS)
+    def test_control_the_same_file_without_the_secret_form_is_rewritten(self, label, source, blocking, neutral):
         control = source.replace(blocking, neutral)
         assert control != source, label
         assert rewrite_typed_value_reads(control) == control.replace(_ATTR, _PROP), label
