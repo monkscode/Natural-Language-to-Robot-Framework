@@ -86,13 +86,22 @@ _SETTING_MARKERS = frozenset({
     "[timeout]", "[template]", "[return]",
 })
 
+# re.sub patterns for what Robot ignores when it compares names: one space or
+# underscore, or a run of them.
+_SPACE_UNDERSCORE = r"[\s_]"
+_SPACE_UNDERSCORE_RUN = r"[\s_]+"
+
+# Browser's Type Text and Type Secret, as _canon_keyword spells them.
+_TYPE_TEXT = "type text"
+_TYPE_SECRET = "type secret"
+
 
 def _canon_keyword(name: str) -> str:
     """Canonicalize an RF keyword cell: lowercase, single-space between words,
     library prefix stripped. RF itself is case- and space-insensitive for keyword
     names, so `Fill Text`, `fill_text`, and `fill  text` all map to `fill text`.
     """
-    stripped = re.sub(r"[\s_]+", " ", name.strip().lower())
+    stripped = re.sub(_SPACE_UNDERSCORE_RUN, " ", name.strip().lower())
     # Strip library prefix (e.g., "browser.click" -> "click"). A leading `.` is
     # a bare CSS selector — not a library prefix — so guard against that.
     if "." in stripped and not stripped.startswith("."):
@@ -111,8 +120,8 @@ _LOCATOR_KEYWORDS: dict[str, tuple[int, ...]] = {
     "click with options": (0,),
     "fill text": (0,),
     "fill secret": (0,),
-    "type text": (0,),
-    "type secret": (0,),
+    _TYPE_TEXT: (0,),
+    _TYPE_SECRET: (0,),
     "check checkbox": (0,),
     "uncheck checkbox": (0,),
     "select options by": (0,),
@@ -397,7 +406,7 @@ def _names_keyword(line: str, first_part: str, keyword: str) -> bool:
         name = first_part
     if not name:
         return False
-    canon = re.sub(r"[\s_]", "", name.lower())
+    canon = re.sub(_SPACE_UNDERSCORE, "", name.lower())
     pattern = ".*".join(re.escape(piece) for piece in re.split(r"\$\{.*\}", canon))
     return re.fullmatch(pattern, keyword) is not None
 
@@ -542,7 +551,7 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     out_lines = []
     for line in robot_code.split("\n"):
         stripped = line.lstrip()
-        if stripped.startswith("#") or stripped.startswith("..."):
+        if stripped.startswith(("#", "...")):
             out_lines.append(line)
             continue
 
@@ -567,7 +576,7 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
             out_lines.append(line)
             continue
 
-        operator = re.sub(r"[\s_]+", "", parts[operator_idx].lower())
+        operator = re.sub(_SPACE_UNDERSCORE_RUN, "", parts[operator_idx].lower())
         state_cell = parts[state_idx]
         if operator == "validate":
             target_state = (
@@ -691,14 +700,14 @@ _ID_LOCATOR_RE = re.compile(r"(?:id=|css=#)([A-Za-z_][\w-]*)")
 
 def _canon_variable(name: str) -> str:
     """A variable name the way Robot compares it: case, spaces and underscores ignored."""
-    return re.sub(r"[\s_]", "", name.lower())
+    return re.sub(_SPACE_UNDERSCORE, "", name.lower())
 
 
 def _keyword_prefix(cell: str) -> str:
     """The library prefix of a keyword cell (`Browser.Get Text` -> `browser`), or ''."""
     name = cell.strip()
     if "." in name and not name.startswith("."):
-        return re.sub(r"[\s_]", "", name.rsplit(".", 1)[0].lower())
+        return re.sub(_SPACE_UNDERSCORE, "", name.rsplit(".", 1)[0].lower())
     return ""
 
 
@@ -883,7 +892,7 @@ def _parse_suite(robot_code: str) -> _Suite | None:
     last_variable = None
     for line_no, raw in enumerate(lines):
         line, eol = (raw[:-1], "\r") if raw.endswith("\r") else (raw, "")
-        if line[:1] == "|" and line[:2].strip() == "|":
+        if line.startswith("|") and line[:2].strip() == "|":
             return None
         header = _section_header_name(line)
         if header is not None:
@@ -894,7 +903,7 @@ def _parse_suite(robot_code: str) -> _Suite | None:
             continue
         parts = _CELL_SPLIT_RE.split(line)
         content = [parts[i].strip() for i in _content_cells(parts)]
-        if any(setter in re.sub(r"[\s_]", "", cell.lower()) for cell in content for setter in _SCOPED_SETTERS):
+        if any(setter in re.sub(_SPACE_UNDERSCORE, "", cell.lower()) for cell in content for setter in _SCOPED_SETTERS):
             return None
         if "VAR" in content:
             return None
@@ -975,11 +984,11 @@ def _apply_rewrites(robot_code: str, suite: _Suite, rewrites: dict[int, str],
     if not rewrites:
         return robot_code
     guard = _scan_file_guard(
-        robot_code, tuple(re.sub(r"[\s_]", "", k.lower()) for k in guard_keywords)
+        robot_code, tuple(re.sub(_SPACE_UNDERSCORE, "", k.lower()) for k in guard_keywords)
     )
     count = len(rewrites)
     if guard.own_keywords:
-        own = ", ".join(k for k in guard_keywords if re.sub(r"[\s_]", "", k.lower()) in guard.own_keywords)
+        own = ", ".join(k for k in guard_keywords if re.sub(_SPACE_UNDERSCORE, "", k.lower()) in guard.own_keywords)
         logger.info(
             f"{label}: left {count} {noun} unchanged — the file defines its own "
             f"keyword ({own}), which Robot resolves ahead of the Browser library"
@@ -999,12 +1008,14 @@ def _apply_rewrites(robot_code: str, suite: _Suite, rewrites: dict[int, str],
     return "\n".join(lines)
 
 
+# The keyword a select read is rewritten to.
+_GET_SELECTED_OPTIONS = "Get Selected Options"
 _SELECT_ATTRIBUTES = frozenset({"label", "value", "text"})
 _CONTAINS_OPERATORS = frozenset({"contains", "*="})
 # Get Text / Get Selected Options / Select Options By are the rewrite's own evidence; Set Variable, Should Contain,
 # Log and the three close keywords are the keywords whose library meaning the reader relies on (_follow, the steps
 # allowed after the read).
-_SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "Set Variable", "Should Contain", "Log",
+_SELECT_READ_GUARD = ("Get Text", _GET_SELECTED_OPTIONS, "Select Options By", "Set Variable", "Should Contain", "Log",
                       "Close Browser", "Close Context", "Close Page")
 # The keywords that change a <select>'s selection, compared lower-cased without spaces or underscores.
 _SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
@@ -1074,7 +1085,7 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
         checked = checked or verdict == "check"
     if any(s.setting and "teardown" in re.sub(r"[\s_\[\]]", "", s.keyword) for s in test.steps):
         return False  # a [Teardown] runs after the read, wherever it sits
-    if any("teardown" in re.sub(r"[\s_]", "", _CELL_SPLIT_RE.split(suite.lines[no].strip())[0].lower())
+    if any("teardown" in re.sub(_SPACE_UNDERSCORE, "", _CELL_SPLIT_RE.split(suite.lines[no].strip())[0].lower())
            for no in suite.settings_line_nos):
         return False  # so does a Test, Task or Suite Teardown
     elsewhere = [s.line_no for s in test.steps if s.setting and s.line_no < read_line] + suite.settings_line_nos
@@ -1095,7 +1106,7 @@ def _update_selected(step: _Step, args: list[str | None],
     other selection unless both are plain `id=` locators with different ids: an
     xpath or css spelling may name the same element.
     """
-    if any(name in re.sub(r"[\s_]", "", arg.lower()) for arg in step.args for name in _SELECTION_CHANGES):
+    if any(name in re.sub(_SPACE_UNDERSCORE, "", arg.lower()) for arg in step.args for name in _SELECTION_CHANGES):
         selected.clear()
         return True
     if step.keyword.replace(" ", "") not in _SELECTION_CHANGES:
@@ -1141,10 +1152,10 @@ def _select_read_rewrites(suite: _Suite) -> dict[int, str]:
             if step.assigns:
                 if (step.scalar_assign and len(step.args) == 1
                         and _only_checked_as_selected(suite, test, i, step.assigns[0], values, resolved)):
-                    rewrites[step.line_no] = _rebuild(step, "Get Selected Options", insert_after_locator=attribute)
-            elif (len(step.args) == 3 and re.sub(r"[\s_]+", "", step.args[1].lower()) in _CONTAINS_OPERATORS
+                    rewrites[step.line_no] = _rebuild(step, _GET_SELECTED_OPTIONS, insert_after_locator=attribute)
+            elif (len(step.args) == 3 and re.sub(_SPACE_UNDERSCORE_RUN, "", step.args[1].lower()) in _CONTAINS_OPERATORS
                   and args[2] in values):
-                rewrites[step.line_no] = _rebuild(step, "Get Selected Options", insert_after_locator=attribute)
+                rewrites[step.line_no] = _rebuild(step, _GET_SELECTED_OPTIONS, insert_after_locator=attribute)
     return rewrites
 
 
@@ -1206,7 +1217,7 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     """
     if not robot_code:
         return robot_code
-    squashed = re.sub(r"[\s_]", "", robot_code.lower())
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.lower())
     if "selectoptionsby" not in squashed or "gettext" not in squashed:
         return robot_code
     if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code):
@@ -1221,31 +1232,51 @@ def rewrite_select_text_reads(robot_code: str) -> str:
         return robot_code
     return _apply_rewrites(
         robot_code, suite, _select_read_rewrites(suite), _SELECT_READ_GUARD,
-        "Select read normalizer", "Get Text line(s) on a select", "Get Selected Options",
+        "Select read normalizer", "Get Text line(s) on a select", _GET_SELECTED_OPTIONS,
     )
 
 
 # Keywords that write a field's value AND fail on an element that is not a field
 # (measured, Browser 19.14.2: each raises "Element is not an <input>, <textarea>,
 # <select> or [contenteditable]" on a <div value>, <li value> or custom element).
-# Type Text / Type Secret only fail there because they clear the field first; with
-# `clear` switched off they type into anything, as `Press Keys` does — so neither
-# counts as proof that the element is a field.
-_TYPING_KEYWORDS = frozenset({"fill text", "fill secret", "clear text", "type text", "type secret"})
+# Type Text only fails there because it clears the field first; with `clear`
+# switched off it types into anything, as `Press Keys` does — so then it is no
+# proof that the element is a field. Fill Secret and Type Secret are not listed:
+# rewrite_typed_value_reads leaves alone any file that names either.
+_TYPING_KEYWORDS = frozenset({"fill text", "clear text", _TYPE_TEXT})
+# The keyword a typed-value read is rewritten to.
+_GET_PROPERTY = "Get Property"
 # Set Variable: the shared reader trusts BuiltIn's meaning of it (_follow).
-_TYPED_READ_GUARD = ("Get Attribute", "Get Property", "Fill Text", "Fill Secret", "Clear Text",
-                     "Type Text", "Type Secret", "Set Variable")
+_TYPED_READ_GUARD = ("Get Attribute", _GET_PROPERTY, "Fill Text", "Clear Text", "Type Text", "Set Variable")
+# Browser's two secret keywords, compared case-folded without spaces or underscores.
+_SECRET_KEYWORDS = ("fillsecret", "typesecret")
+
+
+def _names_secret_keyword(robot_code: str) -> bool:
+    """True when a content cell on any line of any section names Fill Secret or
+    Type Secret the way Robot matches a keyword name: case-folded (`ſ` is `s`)
+    and without spaces or underscores, it ends with `fillsecret` /
+    `typesecret`. Any prefix counts — a library name or alias with `.`, a BDD
+    word (`Given`, `When`, a translated one), anything — which only makes the
+    rewrite skip. A step, a wrapper's argument, a keyword definition or a
+    setting all count; a comment does not."""
+    for line in robot_code.split("\n"):
+        parts = _CELL_SPLIT_RE.split(line)
+        for i in _content_cells(parts):
+            if re.sub(_SPACE_UNDERSCORE, "", parts[i].casefold()).endswith(_SECRET_KEYWORDS):
+                return True
+    return False
 
 
 def _proves_a_field(step: _Step) -> bool:
     """True when the typing step could only have succeeded on a field."""
-    if step.keyword in ("type text", "type secret"):
+    if step.keyword == _TYPE_TEXT:
         if any(a.startswith(("@{", "&{")) for a in step.args):
             return False  # an expanded list or dict may carry `clear`
         rest = step.args[1:]  # `clear=` may be named before the text
         # Robot resolves an argument name at run time (`${n}=`, `cl\ear=`): deny every name but these.
         return len(rest) <= 2 and not any(
-            "=" in a and a.split("=", 1)[0] not in ("txt", "secret", "delay") for a in rest
+            "=" in a and a.split("=", 1)[0] not in ("txt", "delay") for a in rest
         )
     return True
 
@@ -1271,7 +1302,7 @@ def _typed_value_rewrites(suite: _Suite) -> dict[int, str]:
                     and step.args[1] in ("value", "attribute=value")
                     and _canon_locator(args[0]) in typed):
                 rewrites[step.line_no] = _rebuild(
-                    step, "Get Property",
+                    step, _GET_PROPERTY,
                     replace_second_arg="property=value" if step.args[1] == "attribute=value" else None,
                 )
     return rewrites
@@ -1286,10 +1317,10 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     `Get Attribute    <L>    value` returns '' (or the prefilled default) and a
     correct test fails. Only after a typing step on the same element (same
     resolution rules as `rewrite_select_text_reads`) that proves the element is
-    a field: Fill Text, Fill Secret, Clear Text, and Type Text / Type Secret
-    unless an argument could switch `clear` off (a second argument after the
-    text, `clear` by position; any cell after the locator holding `=` whose
-    name before the first `=` is not `txt`, `secret` or `delay`; an expanded
+    a field: Fill Text, Clear Text, and Type Text unless an argument could
+    switch `clear` off (a second argument after the text, `clear` by
+    position; any cell after the locator holding `=` whose name before the
+    first `=` is not `txt` or `delay`; an expanded
     `@{…}` / `&{…}`). The named form `attribute=value` becomes
     `property=value` (swapping only the keyword would ask for a property
     literally named "attribute=value", which dryrun cannot catch); inline
@@ -1302,20 +1333,36 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     cannot read as a step (a nested or item assignment target among them), and
     whole files that define their own `Get Attribute` / `Get Property` / typing
     keyword / `Set Variable`, catch errors, use pipe-separated lines, name a
-    *** Variables *** entry through another variable, or hold a scoped `Set …
+    *** Variables *** entry through another variable, hold a scoped `Set …
     Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
-    `VAR` anywhere. Idempotent.
+    `VAR` anywhere, hold a `$` that starts no variable, an escaped `\\${`, any
+    `%` or any backslash, or name Fill Secret or Type Secret in any cell (a
+    step, a wrapper's argument, a keyword definition or a setting; matched as
+    Robot matches keyword names, case-folded, so any prefix counts: a library
+    name or alias, a BDD word): Browser takes a secret as `$name`, `%NAME` or
+    an RF `Secret`, Robot escapes (`\\x24`, `\\x25`, `\\${`) produce those
+    forms at run time, and the rewritten read would log the secret. Not seen:
+    a keyword name built at run time together with an argument whose value is
+    only known at run time (built by Python, read from the page or from the
+    environment) in the same call (`Run Keyword    Fill ${EMPTY}Secret    <L>
+    ${{chr(36)+'pw'}}`), and a `Secret` passed in from outside the file (a
+    `--variable`, a variable file, a library; the runner passes none).
+    Idempotent.
     """
     if not robot_code:
         return robot_code
-    if "getattribute" not in re.sub(r"[\s_]", "", robot_code.lower()):
+    if "getattribute" not in re.sub(_SPACE_UNDERSCORE, "", robot_code.lower()):
         return robot_code
+    if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code) or "%" in robot_code or "\\" in robot_code:
+        return robot_code  # a secret form ($name, %NAME) or a Robot escape that builds one: the read would log it
+    if _names_secret_keyword(robot_code):
+        return robot_code  # Fill Secret / Type Secret, whatever its arguments: the read would log the secret
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code
     return _apply_rewrites(
         robot_code, suite, _typed_value_rewrites(suite), _TYPED_READ_GUARD,
-        "Typed value normalizer", "Get Attribute … value line(s)", "Get Property",
+        "Typed value normalizer", "Get Attribute … value line(s)", _GET_PROPERTY,
     )
 
 
