@@ -146,7 +146,7 @@ class TestGetLlm:
 
         assert llm.additional_params["thinkingConfig"] == {"thinkingBudget": 0}
 
-    @pytest.mark.parametrize("model_name", ["gemini-3.5-flash", "gemini-2.5-flash"])
+    @pytest.mark.parametrize("model_name", ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"])
     def test_vertex_thinking_guard_reaches_the_request_body(self, model_name):
         """The guard is only worth what LiteLLM actually puts on the wire.
 
@@ -303,7 +303,7 @@ class TestResolveThinkingKwargs:
     it — which is exactly how the conflict-detection path ended up unguarded.
     """
 
-    @pytest.mark.parametrize("model_name", ["gemini-3.5-flash", "gemini-2.5-flash"])
+    @pytest.mark.parametrize("model_name", ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"])
     def test_vertex_gemini_gets_a_zero_budget(self, model_name):
         from src.backend.crew_ai.llm_provider_routing import (
             resolve_model_string, resolve_thinking_kwargs,
@@ -351,6 +351,7 @@ class TestResolveThinkingKwargs:
 
     @pytest.mark.parametrize("provider,model_name", [
         ("gemini", "gemini-3.5-flash"),
+        ("gemini", "gemini-3.8-flash"),
         ("local", "llama3"),
     ])
     def test_non_vertex_providers_get_nothing(self, provider, model_name):

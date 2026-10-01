@@ -7,7 +7,7 @@ Usage (repo root; reads bench/baselines, bench/runs and logs/ — no database, n
     python -m bench.gate --write-q10-queries <path.json>
 
 It compares the candidate with the ONE baseline, bench/gate_inputs.BASELINE_CSV
-(2026-09-24-develop-b57b683-bs-1.0.39). 2026-08-02-rule6-url-backstop stays the
+(2026-10-01-develop-fda923f-bs-1.0.39-gemini-3.8-flash-run2). It is also the
 TIMING reference; timing is not gated here. It prints one line per gate —
 PINS/INPUTS, PASS RATE (after provider-miss re-runs), LOCATOR, FLAKE, SALVAGE, the
 four TOKENS families, HOLLOW — then the reported lines (VERIFIED, FRAGILE, NOT

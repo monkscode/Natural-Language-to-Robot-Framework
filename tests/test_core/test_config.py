@@ -209,7 +209,7 @@ def test_local_service_urls_use_ipv4_loopback(monkeypatch):
 # The model every published baseline in bench/baselines/ was measured on. The
 # pass-rate gate, the cost-per-run and the timing figures quoted in the README
 # and CLAUDE.md all describe THIS model and no other.
-BENCHED_ONLINE_MODEL = "gemini-3.5-flash"
+BENCHED_ONLINE_MODEL = "gemini-3.8-flash"
 
 
 def test_default_online_model_is_the_benched_one(monkeypatch):

@@ -143,7 +143,7 @@ mid-run, check `workflow_metrics` for strays from that time window.
 ## Gating a bench
 
 `bench/gate.py` gives one verdict for a bench CSV. It compares the CSV with the one
-baseline, `bench/baselines/2026-09-24-develop-b57b683-bs-1.0.39.csv`, and reads only
+baseline, `bench/baselines/2026-10-01-develop-fda923f-bs-1.0.39-gemini-3.8-flash-run2.csv`, and reads only
 `bench/baselines/`, `bench/runs/` and `logs/` — no database, no network.
 
 ```powershell
@@ -166,7 +166,7 @@ when it cannot compare:
 Reported, never gated: the verified pass rate (passes minus hollow passes), passes read by
 a numeric id, dollars, the browser-use cache share, the median paired token change, and the
 number of 429 / 503 log lines in the bench's window (it says whether timing can be trusted;
-timing is compared with `bench.report` against `2026-08-02-rule6-url-backstop.csv`).
+timing is compared with `bench.report` against `2026-10-01-develop-fda923f-bs-1.0.39-gemini-3.8-flash-run2.csv`).
 
 **Provider misses.** A run whose generation ended on a temporary provider failure — a 429, a
 5xx, a timeout or a connection error (its `test_runs.error_message` is one of the provider

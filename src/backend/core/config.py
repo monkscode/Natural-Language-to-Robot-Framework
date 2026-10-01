@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # gemini-2.5-flash, which no baseline has ever covered, so a new user ran a
     # configuration with no evidence behind it. Keep this and .env.example in step
     # (tests/test_core/test_config.py guards both).
-    ONLINE_MODEL: str = "gemini-3.5-flash"
+    ONLINE_MODEL: str = "gemini-3.8-flash"
     LOCAL_MODEL: str = "llama3"
 
     # Vertex AI Configuration (only required when MODEL_PROVIDER=vertex)

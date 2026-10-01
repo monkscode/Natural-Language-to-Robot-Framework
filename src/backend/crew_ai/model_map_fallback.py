@@ -2,8 +2,8 @@
 
 At ``import litellm``, LiteLLM 1.75.3 downloads its model list from GitHub
 (5 s timeout) and, on ANY failure, silently loads the copy bundled in the
-package (litellm/litellm_core_utils/get_model_cost_map.py). That copy has no
-gemini-3.5-flash, so one failed download at process start turns off schema
+package (litellm/litellm_core_utils/get_model_cost_map.py). That copy has neither
+gemini-3.5-flash nor gemini-3.8-flash, so one failed download at process start turns off schema
 enforcement for the planner and the assembler (get_llm drops response_format),
 moves the system prompt into the user turn of every request, and makes the
 model's cost read $0 for the life of the process. LiteLLM logs nothing about
@@ -21,7 +21,7 @@ the attempt is retried on the next call.
 To add a model (a one-time step per model): copy its entries from LiteLLM's
 online list into pinned_model_entries.json, refresh the existing entries from
 the same download, set pinned_on to that day, and update
-test_the_pin_file_holds_the_three_entries. A model we run but never pinned is
+test_the_pin_file_holds_both_models_entries. A model we run but never pinned is
 reported by the ERROR line, not silently.
 
 Referenced by:

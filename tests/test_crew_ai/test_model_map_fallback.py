@@ -19,7 +19,10 @@ from litellm.utils import supports_response_schema
 
 from src.backend.crew_ai import model_map_fallback as fallback
 
-KEYS = ("vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "gemini-3.5-flash")
+KEYS = (
+    "vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "gemini-3.5-flash",
+    "vertex_ai/gemini-3.8-flash", "gemini/gemini-3.8-flash", "gemini-3.8-flash",
+)
 
 
 @pytest.fixture
@@ -40,6 +43,7 @@ def test_the_fixture_reproduces_the_defect(failed_download):
     assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is False
     with pytest.raises(Exception, match="isn't mapped yet"):
         _cost("vertex_ai/gemini-3.5-flash")
+    assert supports_response_schema(model="vertex_ai/gemini-3.8-flash") is False
 
 
 def test_vertex_gets_schema_and_cost_back(failed_download, caplog):
@@ -48,7 +52,7 @@ def test_vertex_gets_schema_and_cost_back(failed_download, caplog):
     assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is True
     assert _cost("vertex_ai/gemini-3.5-flash") == pytest.approx((0.0015, 0.0009))
     assert [r.levelname for r in caplog.records] == ["WARNING"]
-    assert "2026-09-27" in caplog.records[0].getMessage()
+    assert "2026-10-01" in caplog.records[0].getMessage()
 
 
 def test_gemini_gets_schema_and_cost_back(failed_download, caplog):
@@ -56,6 +60,22 @@ def test_gemini_gets_schema_and_cost_back(failed_download, caplog):
         fallback.ensure_model_entry("gemini", "gemini/gemini-3.5-flash")
     assert supports_response_schema(model="gemini/gemini-3.5-flash") is True
     assert _cost("gemini/gemini-3.5-flash") == pytest.approx((0.0015, 0.0009))
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+
+
+def test_vertex_gets_gemini_3_8_schema_and_cost_back(failed_download, caplog):
+    with caplog.at_level(logging.WARNING, logger=fallback.__name__):
+        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.8-flash")
+    assert supports_response_schema(model="vertex_ai/gemini-3.8-flash") is True
+    assert _cost("vertex_ai/gemini-3.8-flash") == pytest.approx((0.00075, 0.000375))
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+
+
+def test_gemini_gets_gemini_3_8_schema_and_cost_back(failed_download, caplog):
+    with caplog.at_level(logging.WARNING, logger=fallback.__name__):
+        fallback.ensure_model_entry("gemini", "gemini/gemini-3.8-flash")
+    assert supports_response_schema(model="gemini/gemini-3.8-flash") is True
+    assert _cost("gemini/gemini-3.8-flash") == pytest.approx((0.00075, 0.000375))
     assert [r.levelname for r in caplog.records] == ["WARNING"]
 
 
@@ -144,14 +164,18 @@ def test_a_failed_attempt_is_retried_on_the_next_call(failed_download, caplog):
     assert [r.levelname for r in caplog.records if r.name == fallback.__name__] == ["ERROR", "WARNING"]
 
 
-def test_the_pin_file_holds_the_three_entries():
+def test_the_pin_file_holds_both_models_entries():
     doc = json.loads(fallback.PINNED_FILE.read_text(encoding="utf-8"))
-    assert doc["pinned_on"] == "2026-09-27"
+    assert doc["pinned_on"] == "2026-10-01"
     assert sorted(doc["entries"]) == sorted(KEYS)
-    for entry in doc["entries"].values():
+    for key, entry in doc["entries"].items():
         assert entry["supports_response_schema"] is True
-        assert entry["input_cost_per_token"] == 1.5e-06
-        assert entry["output_cost_per_token"] == 9e-06
+        if key.endswith("gemini-3.8-flash"):
+            assert entry["input_cost_per_token"] == 7.5e-07
+            assert entry["output_cost_per_token"] == 3.75e-06
+        else:
+            assert entry["input_cost_per_token"] == 1.5e-06
+            assert entry["output_cost_per_token"] == 9e-06
 
 
 @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
