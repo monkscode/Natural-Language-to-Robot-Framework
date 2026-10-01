@@ -16,6 +16,7 @@ import logging
 import pytest
 
 from src.backend.crew_ai.robot_code_normalizer import (
+    _read_variable,
     _scan_file_guard,
     rewrite_select_text_reads,
     rewrite_typed_value_reads,
@@ -970,3 +971,69 @@ class TestTypedValueLeftAlone:
     def test_empty_and_none(self):
         assert rewrite_typed_value_reads("") == ""
         assert rewrite_typed_value_reads(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Branches of the shared reader no other test reached (PR #120 review, Codecov)
+# ---------------------------------------------------------------------------
+
+# A *** Variables *** value the reader cannot know, or a [Setting] / Settings line before the select read that
+# mentions its variable: (label, the rewrite, the file, the blocking text, its neutral replacement, the read, the read
+# rewritten). The control is the same file with the blocking text replaced, and IS rewritten.
+_N1_UNTOUCHED = _n1(_TYPE, _ATTR, _USE)
+_DENY_BRANCHES = [
+    ("a ... line continues the locator's value", rewrite_typed_value_reads,
+     _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY + "...    id=other\n"), "...    id=other\n", "", _ATTR, _PROP),
+    ("the locator's value in two cells", rewrite_typed_value_reads,
+     _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY.replace("\n", "    id=other\n")), "    id=other\n", "\n",
+     _ATTR, _PROP),
+    ("the locator's value holds a variable", rewrite_typed_value_reads,
+     _N1_UNTOUCHED.replace(_N1_ENTRY, "${base}    id=customer.address\n${customer_city_locator}    ${base}.city\n"),
+     "${base}.city", "id=customer.address.city", _ATTR, _PROP),
+    ("the locator's value holds a backslash", rewrite_typed_value_reads,
+     _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY.replace("customer.address", "customer\\.address")),
+     "customer\\.address", "customer.address", _ATTR, _PROP),
+    ("the test's [Documentation] before the read names its variable", rewrite_select_text_reads,
+     _suite(_SELECT, _READ, _CHECK).replace("Auto-generated test case", "Checks ${selected_option}"),
+     "Checks ${selected_option}", "Checks the selection", _READ, _READ_NEW),
+    ("a Settings line names the read's variable", rewrite_select_text_reads,
+     _with_setting("Metadata    Read    ${selected_option}"), "Read    ${selected_option}", "Read    the selection",
+     _READ, _READ_NEW),
+]
+_DENY_BRANCH_IDS = [case[0] for case in _DENY_BRANCHES]
+
+
+class TestReaderBranches:
+    @pytest.mark.parametrize("label, rewrite, source, blocking, neutral, read, rewritten", _DENY_BRANCHES,
+                             ids=_DENY_BRANCH_IDS)
+    def test_a_value_or_mention_the_reader_cannot_follow_is_left_alone(
+            self, label, rewrite, source, blocking, neutral, read, rewritten):
+        assert read in source, label
+        assert rewrite(source) == source, label
+
+    @pytest.mark.parametrize("label, rewrite, source, blocking, neutral, read, rewritten", _DENY_BRANCHES,
+                             ids=_DENY_BRANCH_IDS)
+    def test_control_the_same_file_without_the_blocking_text_is_rewritten(
+            self, label, rewrite, source, blocking, neutral, read, rewritten):
+        control = source.replace(blocking, neutral)
+        assert control != source, label
+        assert rewrite(control) == control.replace(read, rewritten), label
+
+    @pytest.mark.parametrize("label, source", [
+        ("a Variables line that is not a variable entry",
+         _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY + "timeout    30s\n")),
+        ("a Variables entry with no value", _N1_UNTOUCHED.replace(_N1_ENTRY, _N1_ENTRY + "${empty_value}\n")),
+        ("a Test Cases line before any test name",
+         _N1_UNTOUCHED.replace("*** Test Cases ***\n", "*** Test Cases ***\n    Log    before any test\n")),
+    ])
+    def test_a_line_the_reader_passes_over_still_rewrites(self, label, source):
+        assert source != _N1_UNTOUCHED, label
+        assert rewrite_typed_value_reads(source) == source.replace(_ATTR, _PROP), label
+
+    def test_an_empty_variables_line_keeps_the_last_name(self):
+        # Unreachable through the rewrites: _parse_suite skips blank and comment lines, and indexes the same cells
+        # (`content[0]`) before it calls _read_variable, so only a direct call reaches this line.
+        variables = {"customercitylocator": "id=customer.address.city"}
+        assert _read_variable("", variables, "customercitylocator") == "customercitylocator"
+        assert _read_variable("    # a comment", variables, "customercitylocator") == "customercitylocator"
+        assert variables == {"customercitylocator": "id=customer.address.city"}
