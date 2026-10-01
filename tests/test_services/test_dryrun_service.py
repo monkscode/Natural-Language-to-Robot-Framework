@@ -18,6 +18,7 @@ Covered (§5):
     was refactored out of
 """
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from unittest.mock import patch, MagicMock
@@ -622,6 +623,89 @@ class TestExtractAndNormalize:
                '    Get Element States    ${h}    contains    visible"}')
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert out.endswith("\n    Wait For Elements State    ${h}    visible")
+
+    # The q08 file as the assembler writes it (bench run 0ee28976-9924-4385-90ae-6a7259235cb2),
+    # with the read locator left BARE so the pipeline's css= prefixing runs first.
+    _Q08_RAW = ("*** Settings ***\nLibrary    Browser\nLibrary    BuiltIn\nLibrary    Collections\n\n"
+                "*** Variables ***\n${browser}    chromium\n${headless}    True\n"
+                "${url}    https://the-internet.herokuapp.com/dropdown\n"
+                "${dropdown_locator}    id=dropdown\n\n"
+                "*** Test Cases ***\nGenerated Test\n"
+                "    [Documentation]    Auto-generated test case\n"
+                "    New Browser    ${browser}    headless=${headless}\n"
+                "    New Context    viewport={'width': 1920, 'height': 1080}\n"
+                "    New Page    ${url}\n"
+                "    Select Options By    ${dropdown_locator}    label    Option 2\n"
+                "    ${selected_option}=    Get Text    #dropdown\n"
+                "    Should Contain    ${selected_option}    Option 2\n"
+                "    Close Browser")
+
+    def test_select_text_read_rewritten_by_the_pipeline(self):
+        """The rewrite is only worth anything if it is actually wired in here.
+
+        Without this test, deleting the rewrite call from the pipeline leaves the
+        whole suite green. The bare `#dropdown` also proves the rewrite sees the
+        line AFTER normalize_robot_code made it `css=#dropdown`, which is what lets
+        it match the select's `id=dropdown`.
+        """
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=self._Q08_RAW))
+        assert "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n" in out
+        assert "Get Text" not in out
+
+    def test_select_text_read_rewrite_survives_a_repair_round_trip(self):
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=self._Q08_RAW))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "Get Selected Options" in first
+        assert second == first
+
+    def test_select_text_read_on_the_last_line_survives_a_leaked_json_brace(self):
+        raw = (self._Q08_RAW.replace(
+            "    ${selected_option}=    Get Text    #dropdown\n    Should Contain    ${selected_option}    Option 2\n"
+            "    Close Browser", "    Get Text    #dropdown    contains    Option 2") + '"}')
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert out.endswith("\n    Get Selected Options    css=#dropdown    label    contains    Option 2")
+
+    def test_typed_value_read_rewritten_by_the_pipeline(self):
+        """Bench run 8adaa3c8-ab51-4f78-8f69-38f161ba8360's shape: typed, then the
+        value ATTRIBUTE read back ('' — the run failed). Wired in, and stable
+        across a repair round."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+               "${customer_city_locator}    id=customer.address.city\n\n"
+               "*** Test Cases ***\nT\n"
+               "    Fill Text    ${customer_city_locator}    NewYork\n"
+               "    ${city_value}=    Get Attribute    ${customer_city_locator}    value\n"
+               "    Should Be True    '${city_value}' == 'NewYork'")
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "    ${city_value}=    Get Property    ${customer_city_locator}    value\n" in first
+        assert second == first
+
+    # Both read rewrites are optional and skip-only: one that raises must cost only its own rewrite, never the
+    # paid-for generation. The rest of cleanup (the other rewrite, the Browser timeout) still runs.
+    _N1_RAW = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+               "${customer_city_locator}    id=customer.address.city\n\n"
+               "*** Test Cases ***\nT\n"
+               "    Fill Text    ${customer_city_locator}    NewYork\n"
+               "    ${city_value}=    Get Attribute    ${customer_city_locator}    value\n"
+               "    Should Be True    '${city_value}' == 'NewYork'")
+
+    @pytest.mark.parametrize("failing, raw, still_rewritten", [
+        ("rewrite_select_text_reads", _N1_RAW,
+         "    ${city_value}=    Get Property    ${customer_city_locator}    value\n"),
+        ("rewrite_typed_value_reads", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+    ], ids=["select read rewrite raises", "typed value rewrite raises"])
+    def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
+            self, caplog, failing, raw, still_rewritten):
+        with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),
+              caplog.at_level(logging.WARNING, logger="src.backend.services.dryrun_service")):
+            out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Library    Browser    timeout=30s" in out
+        assert still_rewritten in out
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert [r.getMessage() for r in warnings] == [
+            f"{failing} failed; code left unchanged by it (non-blocking)"]
+        assert warnings[0].exc_info is not None
 
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"

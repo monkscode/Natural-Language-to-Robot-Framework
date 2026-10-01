@@ -32,9 +32,10 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies three smaller deterministic rules defined
-here: `ensure_browser_timeout`, `strip_redundant_css_prefix` and
-`rewrite_visibility_checks_to_wait`.
+The same cleanup step also applies five smaller deterministic rules defined
+here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
+`rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads` and
+`rewrite_typed_value_reads`.
 
 Referenced by:
     src.backend.services.dryrun_service.extract_and_normalize_robot_code
@@ -42,6 +43,7 @@ Referenced by:
 
 import logging
 import re
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -374,16 +376,17 @@ def _section_header_name(line: str) -> str | None:
     return " ".join(cell.split()).strip("* ").title()
 
 
-def _names_get_element_states(line: str, first_part: str) -> bool:
-    """True when a non-indented line's name is (or could resolve to) `Get Element States`.
+def _names_keyword(line: str, first_part: str, keyword: str) -> bool:
+    """True when a non-indented line's name is (or could resolve to) `keyword`.
 
-    Robot picks the separator format per line, so a pipe-separated definition
-    (`| Get Element States | ... |`) can mix legally with space-separated steps
-    elsewhere in the same file; there the name is the first pipe cell, not the
-    whole line. Robot also matches an embedded-argument name (`Get ${what}
-    States`) against the literal call, so `${...}` segments are treated as a
-    wildcard — greedily, so a custom embedded regex containing `}` can only
-    over-match, never under-match.
+    `keyword` is given the way Robot compares names: lowercase, no spaces, no
+    underscores (`getelementstates`). Robot picks the separator format per line,
+    so a pipe-separated definition (`| Get Element States | ... |`) can mix
+    legally with space-separated steps elsewhere in the same file; there the name
+    is the first pipe cell, not the whole line. Robot also matches an
+    embedded-argument name (`Get ${what} States`) against the literal call, so
+    `${...}` segments are treated as a wildcard — greedily, so a custom embedded
+    regex containing `}` can only over-match, never under-match.
     """
     if line[:1] == "|" and line[:2].strip() == "|":
         cell = line.split("|")[1].strip()
@@ -396,7 +399,97 @@ def _names_get_element_states(line: str, first_part: str) -> bool:
         return False
     canon = re.sub(r"[\s_]", "", name.lower())
     pattern = ".*".join(re.escape(piece) for piece in re.split(r"\$\{.*\}", canon))
-    return re.fullmatch(pattern, "getelementstates") is not None
+    return re.fullmatch(pattern, keyword) is not None
+
+
+# Robot's tokenizer splits physical lines on more than "\n" — also a lone "\r"
+# (one not paired into "\r\n"), and the rarer separator characters below. A
+# section header that lands after one of those, glued onto whatever line we
+# split on "\n", would be invisible to a header scan — meaning the section
+# state (and every guard gated on it) could end up wrong in the direction that
+# matters: rewriting a call Robot would actually resolve to the file's own
+# keyword.
+_OTHER_LINEBREAK_CHARS = "\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
+
+
+@dataclass(frozen=True)
+class _FileGuard:
+    """What a rewrite must know about the whole file before it changes one line.
+
+    own_keywords: which of the asked-for keyword names the file defines itself.
+        Robot resolves such a call to the file's own keyword before any library.
+    catches_errors: the file has a `TRY`, or its own keywords together with an
+        error-catching wrapper — a changed check there can be caught and turn
+        into a pass/fail flip or a stall the line cannot see.
+    unsafe_section_state: the file holds a line break Robot honours but a "\n"
+        split does not, so section state cannot be trusted anywhere in it.
+    """
+
+    own_keywords: frozenset[str]
+    catches_errors: bool
+    unsafe_section_state: bool
+
+
+def _scan_file_guard(robot_code: str, keywords: tuple[str, ...]) -> _FileGuard:
+    """Scan the whole file once for the facts every Robot-code rewrite guards on.
+
+    `keywords` are names in `_names_keyword` form. When section state is unsafe
+    (see `_OTHER_LINEBREAK_CHARS`), the own-keyword check falls back to every
+    non-indented line regardless of section, and the TRY/wrapper check treats the
+    file as if it had a Keywords section, since a hidden header could be one.
+    """
+    unsafe_section_state = any(
+        c in robot_code.replace("\r\n", "\n") for c in _OTHER_LINEBREAK_CHARS
+    )
+    own = set()
+    has_try = False
+    has_keywords_section = False
+    has_catching_wrapper = False
+    in_non_keyword_section = False
+    for line in robot_code.split("\n"):
+        section_name = _section_header_name(line)
+        if section_name is not None:
+            in_non_keyword_section = section_name in _NON_KEYWORD_SECTIONS
+            if not in_non_keyword_section:
+                has_keywords_section = True
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("..."):
+            continue
+        parts = _CELL_SPLIT_RE.split(line)
+        cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
+        # A non-indented line names a test or a keyword. Robot resolves a keyword name
+        # to the file's own keyword before any library, ignoring case, spaces and
+        # underscores, and also matching an embedded-argument name or a pipe-separated
+        # definition. Only a section that could define a keyword counts: a
+        # *** Variables *** entry is `${name}    value`, a non-indented line whose first
+        # cell is an embedded-argument wildcard that over-matches every keyword name;
+        # a test, a setting and a comment cannot define keywords either. An
+        # unrecognized header might be a localized Keywords header, so it counts as
+        # "could". When section state is unsafe, the section is ignored entirely.
+        if unsafe_section_state or not in_non_keyword_section:
+            for keyword in keywords:
+                if keyword not in own and _names_keyword(line, parts[0], keyword):
+                    own.add(keyword)
+        # parts[0] is empty only for an indented line; anything else is a
+        # section header or a test/keyword name, never a step.
+        if not cells or parts[0]:
+            continue
+        first = 0
+        while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
+            first += 1
+        if first < len(cells):
+            step_keyword = parts[cells[first]]
+            if step_keyword.strip() == "TRY":
+                has_try = True
+            elif _canon_keyword(step_keyword) in _ERROR_CATCHING_WRAPPERS:
+                has_catching_wrapper = True
+    return _FileGuard(
+        own_keywords=frozenset(own),
+        catches_errors=has_try or (
+            has_catching_wrapper and (has_keywords_section or unsafe_section_state)
+        ),
+        unsafe_section_state=unsafe_section_state,
+    )
 
 
 def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
@@ -444,36 +537,10 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
     if "element states" not in lower and "element_states" not in lower:
         return robot_code
 
-    # Robot's tokenizer splits physical lines on more than "\n" — also a lone "\r"
-    # (one not paired into "\r\n"), and the rarer separator characters below. A
-    # section header that lands after one of those, glued onto whatever line we
-    # split on "\n", would be invisible to the header scan a few lines down —
-    # meaning the section state (and both guards gated on it) could end up
-    # wrong in the direction that matters: converting a call Robot would
-    # actually resolve to the file's own keyword. When any of them is present,
-    # section state is untrustworthy for the whole file: the own-keyword guard
-    # falls back to checking every non-indented line regardless of section —
-    # the same, unconditional check this module used before section tracking
-    # existed — and the TRY/wrapper guard treats the file as if it did have a
-    # Keywords section, since a hidden header could be one.
-    _other_linebreak_chars = "\r\v\f\x1c\x1d\x1e\x85" + chr(0x2028) + chr(0x2029)
-    unsafe_section_state = any(
-        c in robot_code.replace("\r\n", "\n") for c in _other_linebreak_chars
-    )
-
-    has_try = False
-    has_keywords_section = False
-    has_catching_wrapper = False
-    defines_own_keyword = False
-    in_non_keyword_section = False
+    guard = _scan_file_guard(robot_code, ("getelementstates",))
     rewrote = 0
     out_lines = []
     for line in robot_code.split("\n"):
-        section_name = _section_header_name(line)
-        if section_name is not None:
-            in_non_keyword_section = section_name in _NON_KEYWORD_SECTIONS
-            if not in_non_keyword_section:
-                has_keywords_section = True
         stripped = line.lstrip()
         if stripped.startswith("#") or stripped.startswith("..."):
             out_lines.append(line)
@@ -481,19 +548,6 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
         parts = _CELL_SPLIT_RE.split(line)
         cells = [i for i, p in enumerate(parts) if p and not _CELL_SPLIT_RE.fullmatch(p)]
-        # A non-indented line names a test or a keyword. Robot resolves a keyword name
-        # to the file's own keyword before any library, ignoring case, spaces and
-        # underscores, and also matching an embedded-argument name or a pipe-separated
-        # definition, so a file defining `Get Element States` (in any of those forms)
-        # calls its own — rewriting that call would swap in a different keyword. Only a
-        # section that could define a keyword counts: a *** Variables *** entry is
-        # `${name}    value`, a non-indented line whose first cell is an
-        # embedded-argument wildcard that over-matches every keyword name; a test,
-        # a setting and a comment cannot define keywords either. An unrecognized
-        # header might be a localized Keywords header, so it counts as "could". When
-        # section state is unsafe (see above), the section is ignored entirely.
-        if (unsafe_section_state or not in_non_keyword_section) and _names_get_element_states(line, parts[0]):
-            defines_own_keyword = True
         # parts[0] is empty only for an indented line; anything else is a
         # section header or a test/keyword name, never a step.
         if not cells or parts[0]:
@@ -503,13 +557,6 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         first = 0
         while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
             first += 1
-        if first < len(cells):
-            step_keyword = parts[cells[first]]
-            if step_keyword.strip() == "TRY":
-                has_try = True
-            elif _canon_keyword(step_keyword) in _ERROR_CATCHING_WRAPPERS:
-                has_catching_wrapper = True
-
         if first or len(cells) < 4:
             out_lines.append(line)
             continue
@@ -565,14 +612,14 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
 
     if not rewrote:
         return robot_code
-    if defines_own_keyword:
+    if guard.own_keywords:
         logger.info(
             f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
             "unchanged — the file defines its own keyword of that name, which Robot "
             "resolves ahead of the Browser library"
         )
         return robot_code
-    if has_try or (has_catching_wrapper and (has_keywords_section or unsafe_section_state)):
+    if guard.catches_errors:
         logger.info(
             f"Visibility check normalizer: left {rewrote} Get Element States line(s) "
             "unchanged — the file catches errors (TRY, or its own keywords under an "
@@ -584,6 +631,692 @@ def rewrite_visibility_checks_to_wait(robot_code: str) -> str:
         "line(s) to Wait For Elements State"
     )
     return "\n".join(out_lines)
+
+
+# ---------------------------------------------------------------------------
+# Reads that cannot see what the test just did to the same element:
+# rewrite_select_text_reads and rewrite_typed_value_reads. Both follow each
+# test top to bottom, so they share one reader of the suite.
+# ---------------------------------------------------------------------------
+
+_TEST_SECTIONS = frozenset({"Test Cases", "Test Case", "Tasks", "Task"})
+_VARIABLE_SECTIONS = frozenset({"Variables", "Variable"})
+_SETTING_SECTIONS = frozenset({"Settings", "Setting"})
+
+# A test that uses one of these is left alone by both rewrites: a step inside a
+# branch or a loop may run zero, one or many times, so it cannot be followed
+# line by line. Robot only recognizes these markers in upper case. (`VAR` is
+# refused for the whole file instead — see _SCOPED_SETTERS.)
+_UNFOLLOWED_MARKERS = frozenset({
+    "FOR", "WHILE", "IF", "ELSE IF", "ELSE", "END", "TRY", "EXCEPT", "FINALLY",
+    "BREAK", "CONTINUE", "RETURN", "GROUP",
+})
+
+# A file where a content cell anywhere names one of these keywords (compared
+# lower-cased without spaces or underscores, anywhere in the cell), or is
+# exactly `VAR` (Robot only recognizes it in upper case), is left alone as a
+# whole by both rewrites. The scoped setters and `Import Variables` / `Import
+# Resource` set variables beyond the line they sit on, and `Set Selector
+# Prefix` changes the element every later selector names, in later tests too —
+# as a step, as a wrapper's argument, in the file's own keyword, in another
+# test, in a setup, or as a Python call inside `Evaluate` — so no test-by-test
+# reading can tell which element a locator names when a read runs.
+_SCOPED_SETTERS = ("settestvariable", "settaskvariable", "setsuitevariable",
+                   "setglobalvariable", "setlocalvariable",
+                   "importvariables", "importresource", "setselectorprefix")
+
+_BROWSER_PREFIXES = frozenset({"", "browser"})
+_BUILTIN_PREFIXES = frozenset({"", "builtin"})
+
+# One cell that is exactly one scalar variable, e.g. `${dropdown_locator}`.
+_SCALAR_CELL_RE = re.compile(r"\$\{([^{}]+)\}")
+# Anything that is still a variable after resolution: the value is unknown.
+_ANY_VARIABLE_RE = re.compile(r"[$@&%]\{")
+# Every `${name}` / `@{name}` / `&{name}` / `%{name}` in a line, and every `$name`
+# inside an evaluated expression (`Should Be True    $x == 'a'`).
+_VARIABLE_REF_RE = re.compile(r"[$@&%]\{([^{}]*)\}")
+_EXPRESSION_VAR_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+# A variable reference inside another one (`${a${b}}`): a name Robot computes at run time.
+_NESTED_VARIABLE_RE = re.compile(r"[$@&%]\{[^{}]*[$@&%]\{")
+# A *** Variables *** entry's name cell with a plain name: `${x}`, `@{x}`, `&{x}`, `${x: str}`, `${x}=`.
+_VARIABLE_ENTRY_RE = re.compile(r"([$@&])\{([^{}]+)\}\s*=?")
+# A leading assignment cell, capturing the variable name.
+_ASSIGNED_NAME_RE = re.compile(r"[$@&]\{([^}]+)\}")
+# `id=x` and `css=#x` name the same element when x is a plain CSS identifier (no
+# `.`: `css=#a.b` is id `a` with class `b`, `id=a.b` is id `a.b`). A bare `#x` is
+# not listed: Robot reads a cell starting with `#` as a comment, and
+# normalize_robot_code has already turned every locator `#x` into `css=#x`.
+_ID_LOCATOR_RE = re.compile(r"(?:id=|css=#)([A-Za-z_][\w-]*)")
+
+
+def _canon_variable(name: str) -> str:
+    """A variable name the way Robot compares it: case, spaces and underscores ignored."""
+    return re.sub(r"[\s_]", "", name.lower())
+
+
+def _keyword_prefix(cell: str) -> str:
+    """The library prefix of a keyword cell (`Browser.Get Text` -> `browser`), or ''."""
+    name = cell.strip()
+    if "." in name and not name.startswith("."):
+        return re.sub(r"[\s_]", "", name.rsplit(".", 1)[0].lower())
+    return ""
+
+
+def _canon_locator(value: str | None) -> str | None:
+    """A resolved locator in a form where `id=x` and `css=#x` compare equal."""
+    if value is None:
+        return None
+    text = value.strip()
+    match = _ID_LOCATOR_RE.fullmatch(text)
+    return f"id={match.group(1)}" if match else text
+
+
+def _mentions_variable(text: str, canon: str) -> bool:
+    """True when `text` holds a braced reference whose name compares equal to
+    `canon` — `${x}`, `@{x}`, `&{x}`, `%{x}`, also `${x}[0]`, `${x.attr}` or
+    `${ X }` — or `$x` in an expression, and whenever it holds a variable
+    nested inside another (`${x${EMPTY}}`), whose name may resolve to `x`. It
+    does not see a name Robot builds from text (`@x`, `RF_VAR_x`, `\\x24x`,
+    `${vars}[x]`); the select rewrite allows only its check, a Log and a close
+    after the read for that reason. Over-matching only makes a rewrite skip,
+    never fire."""
+    if _NESTED_VARIABLE_RE.search(text):
+        return True
+    for ref in _VARIABLE_REF_RE.findall(text):
+        if canon in (_canon_variable(ref), _canon_variable(re.split(r"[.\[]", ref, maxsplit=1)[0])):
+            return True
+    return any(_canon_variable(name) == canon for name in _EXPRESSION_VAR_RE.findall(text))
+
+
+def _resolve(cell: str, state: dict[str, str | None]) -> str | None:
+    """The literal a cell stands for: the cell itself, or the known value of a
+    whole-cell `${var}`; None when it cannot be known without running the test."""
+    match = _SCALAR_CELL_RE.fullmatch(cell)
+    if match:
+        return state.get(_canon_variable(match.group(1)))
+    return None if _ANY_VARIABLE_RE.search(cell) else cell
+
+
+@dataclass
+class _Step:
+    """One line of a test body that a rewrite may read or change."""
+
+    line_no: int
+    parts: list[str]
+    eol: str
+    assigns: list[str]
+    scalar_assign: bool
+    keyword_idx: int | None
+    keyword: str
+    prefix: str
+    arg_idx: list[int]
+    args: list[str]
+    setting: bool
+    continued: bool = False
+
+
+@dataclass
+class _Test:
+    steps: list[_Step]
+    line_nos: list[int]
+    followable: bool = True
+
+
+@dataclass
+class _Suite:
+    lines: list[str]
+    variables: dict[str, str | None]
+    settings_line_nos: list[int]
+    tests: list[_Test]
+
+
+def _content_cells(parts: list[str]) -> list[int]:
+    """Indices of the content cells of a split line, up to a comment cell."""
+    cells = []
+    for i, part in enumerate(parts):
+        if not part or _CELL_SPLIT_RE.fullmatch(part):
+            continue
+        if part.lstrip().startswith("#"):
+            break
+        cells.append(i)
+    return cells
+
+
+def _line_content(line: str) -> str:
+    """A line's content cells joined, without separators or a trailing comment."""
+    parts = _CELL_SPLIT_RE.split(line)
+    return " ".join(parts[i] for i in _content_cells(parts))
+
+
+def _parse_step(line_no: int, line: str, eol: str) -> _Step | None:
+    """One indented test-body line as a _Step, or None when this reader cannot
+    read it as one: no separator before its first cell (Robot reads a line
+    indented by one space as a NEW test), no keyword after its assignments
+    (`${x}=` alone, its keyword on the next `...` line), a typed assignment
+    (`${x: str}=`: Robot assigns `${x}`), or a nested or item assignment
+    target (`${a${b}}=`, `${x}[0]=`: Robot assigns, it never calls a keyword)."""
+    parts = _CELL_SPLIT_RE.split(line)
+    cells = _content_cells(parts)
+    # parts[0] is empty only for a properly indented line.
+    if parts[0] or not cells:
+        return None
+    first = 0
+    assigns = []
+    while first < len(cells) and _ASSIGN_PREFIX_RE.match(parts[cells[first]]):
+        name = _ASSIGNED_NAME_RE.match(parts[cells[first]]).group(1)
+        if ":" in name:
+            return None  # a typed assignment: Robot strips the type, so `${x: str}=` re-points `${x}`
+        assigns.append(_canon_variable(name))
+        first += 1
+    if first == len(cells):
+        return None
+    head = parts[cells[first]].strip()
+    if re.match(r"[$@&%]\{", head):
+        return None  # a nested or item assignment target: Robot assigns it, so its name is not a keyword
+    setting = head.startswith("[") and head.endswith("]")
+    return _Step(
+        line_no=line_no, parts=parts, eol=eol, assigns=assigns,
+        scalar_assign=first == 1 and parts[cells[0]].lstrip().startswith("${"),
+        keyword_idx=None if setting else cells[first],
+        keyword=head.lower() if setting else _canon_keyword(head),
+        prefix="" if setting else _keyword_prefix(head),
+        arg_idx=cells[first + 1:],
+        args=[parts[i].strip() for i in cells[first + 1:]],
+        setting=setting,
+    )
+
+
+def _read_variable(line: str, variables: dict[str, str | None], last: str | None) -> str | None:
+    """Record one *** Variables *** line; return the base name it defined (for `...`).
+
+    A list (`@{x}`), a dict (`&{x}`) or a typed value (`${x: str}`) makes the
+    base name `x` unknown, and so does any later definition of it: Robot keeps
+    the first of `${x}` / `@{x}`, and `${x}` then names that list."""
+    parts = _CELL_SPLIT_RE.split(line)
+    cells = [parts[i].strip() for i in _content_cells(parts)]
+    if not cells:
+        return last
+    if cells[0].startswith("..."):
+        if last is not None:
+            variables[last] = None  # a value continued on a `...` line is not one plain literal
+        return last
+    match = _VARIABLE_ENTRY_RE.fullmatch(cells[0])
+    if not match:
+        return None
+    name = _canon_variable(match.group(2).split(":", 1)[0])
+    values = cells[1:]
+    if name in variables or match.group(1) != "$" or ":" in match.group(2):
+        variables[name] = None  # defined twice, or not one plain scalar: which value `${x}` has is unknown
+    elif not values:
+        variables[name] = ""
+    elif len(values) == 1 and not _ANY_VARIABLE_RE.search(values[0]) and "\\" not in values[0]:
+        variables[name] = values[0]
+    else:
+        variables[name] = None
+    return name
+
+
+def _parse_suite(robot_code: str) -> _Suite | None:
+    """Read the suite as a top-to-bottom list of tests, or None when this reader
+    cannot be trusted with the file: a pipe-separated line, a template, a line
+    break Robot honours that a "\\n" split does not (`_OTHER_LINEBREAK_CHARS`),
+    a *** Variables *** entry whose name holds another variable (`${a${b}}`:
+    Robot defines a name this reader cannot compute), or — on any line of any
+    section — a scoped setter, `Import Variables`, `Import Resource`, `Set
+    Selector Prefix` or `VAR` (`_SCOPED_SETTERS`). A test is read but marked
+    not followable when it holds
+    a control structure or `[Template]`, when its name line carries more than
+    the name or a `...` line continues its name line (Robot runs that as the
+    test's first step), when an unindented `...` line follows (Robot continues
+    the previous step with it: it starts no test), or when any other body line
+    is not a step this reader can read (`_parse_step`: an assignment-only line,
+    a typed assignment, a nested or item assignment target, a line Robot reads
+    as a new test)."""
+    if any(c in robot_code.replace("\r\n", "\n") for c in _OTHER_LINEBREAK_CHARS):
+        return None
+    lines = robot_code.split("\n")
+    variables: dict[str, str | None] = {}
+    settings_line_nos: list[int] = []
+    tests: list[_Test] = []
+    section = None
+    current = None
+    last_variable = None
+    for line_no, raw in enumerate(lines):
+        line, eol = (raw[:-1], "\r") if raw.endswith("\r") else (raw, "")
+        if line[:1] == "|" and line[:2].strip() == "|":
+            return None
+        header = _section_header_name(line)
+        if header is not None:
+            section, current, last_variable = header, None, None
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = _CELL_SPLIT_RE.split(line)
+        content = [parts[i].strip() for i in _content_cells(parts)]
+        if any(setter in re.sub(r"[\s_]", "", cell.lower()) for cell in content for setter in _SCOPED_SETTERS):
+            return None
+        if "VAR" in content:
+            return None
+        if section in _SETTING_SECTIONS:
+            settings_line_nos.append(line_no)
+            if _canon_keyword(_CELL_SPLIT_RE.split(stripped)[0]) in ("test template", "task template"):
+                return None
+        elif section in _VARIABLE_SECTIONS:
+            if re.match(r"[$@&]\{", content[0]) and not _VARIABLE_ENTRY_RE.fullmatch(content[0]):
+                return None  # a name built from another variable: which name Robot defines is unknown here
+            last_variable = _read_variable(line, variables, last_variable)
+        elif section in _TEST_SECTIONS:
+            if not line[:1].isspace():
+                if content[0] == "...":
+                    if current is not None:
+                        current.followable = False  # Robot continues the previous step with it, even unindented
+                    continue
+                current = _Test(steps=[], line_nos=[])
+                tests.append(current)
+                if len(content) > 1:
+                    current.followable = False  # Robot runs the rest of a test-name line as its first step
+                continue
+            if current is None:
+                continue
+            current.line_nos.append(line_no)
+            if stripped.startswith("..."):
+                if current.steps:
+                    current.steps[-1].continued = True
+                else:
+                    current.followable = False  # it continues the test-name line: Robot runs it as the first step
+                continue
+            step = _parse_step(line_no, line, eol)
+            if step is None:
+                current.followable = False  # a line this reader cannot read as a step (see _parse_step)
+                continue
+            if (step.keyword == "[template]"
+                    or (step.keyword_idx is not None and step.parts[step.keyword_idx].strip() in _UNFOLLOWED_MARKERS)):
+                current.followable = False
+            current.steps.append(step)
+    return _Suite(lines=lines, variables=variables, settings_line_nos=settings_line_nos, tests=tests)
+
+
+def _follow(test: _Test, variables: dict[str, str | None]) -> list[list[str | None]]:
+    """Each step's arguments resolved with the variables as they stand when the step runs."""
+    state = dict(variables)
+    resolved_steps = []
+    for step in test.steps:
+        resolved = [_resolve(arg, state) for arg in step.args]
+        resolved_steps.append(resolved)
+        for name in step.assigns:
+            state[name] = None
+        if (len(step.assigns) == 1 and step.keyword == "set variable" and step.prefix in _BUILTIN_PREFIXES
+                and len(step.args) == 1 and not step.continued):
+            state[step.assigns[0]] = resolved[0]
+    return resolved_steps
+
+
+def _rebuild(step: _Step, keyword: str, *, insert_after_locator: str | None = None,
+             replace_second_arg: str | None = None) -> str:
+    """The step's line with its keyword renamed (library prefix kept) and one cell
+    inserted after the locator or the second argument replaced; separators kept."""
+    parts = list(step.parts)
+    name = parts[step.keyword_idx].strip()
+    prefix = name.rsplit(".", 1)[0].strip() + "." if "." in name and not name.startswith(".") else ""
+    parts[step.keyword_idx] = parts[step.keyword_idx].replace(name, prefix + keyword, 1)
+    if replace_second_arg is not None:
+        cell = parts[step.arg_idx[1]]
+        parts[step.arg_idx[1]] = cell.replace(cell.strip(), replace_second_arg, 1)
+    if insert_after_locator is not None:
+        locator_idx = step.arg_idx[0]
+        parts[locator_idx + 1:locator_idx + 1] = [parts[locator_idx - 1], insert_after_locator]
+    return "".join(parts) + step.eol
+
+
+def _apply_rewrites(robot_code: str, suite: _Suite, rewrites: dict[int, str],
+                    guard_keywords: tuple[str, ...], label: str, noun: str, target: str) -> str:
+    """Apply line rewrites unless a whole-file guard says the file must stay as it is."""
+    if not rewrites:
+        return robot_code
+    guard = _scan_file_guard(
+        robot_code, tuple(re.sub(r"[\s_]", "", k.lower()) for k in guard_keywords)
+    )
+    count = len(rewrites)
+    if guard.own_keywords:
+        own = ", ".join(k for k in guard_keywords if re.sub(r"[\s_]", "", k.lower()) in guard.own_keywords)
+        logger.info(
+            f"{label}: left {count} {noun} unchanged — the file defines its own "
+            f"keyword ({own}), which Robot resolves ahead of the Browser library"
+        )
+        return robot_code
+    if guard.catches_errors:
+        logger.info(
+            f"{label}: left {count} {noun} unchanged — the file catches errors (TRY, "
+            "or its own keywords under an error-catching wrapper), where a check that "
+            "can now fail could change the outcome"
+        )
+        return robot_code
+    lines = list(suite.lines)
+    for line_no, text in rewrites.items():
+        lines[line_no] = text
+    logger.info(f"{label}: rewrote {count} {noun} to {target}")
+    return "\n".join(lines)
+
+
+_SELECT_ATTRIBUTES = frozenset({"label", "value", "text"})
+_CONTAINS_OPERATORS = frozenset({"contains", "*="})
+# Get Text / Get Selected Options / Select Options By are the rewrite's own evidence; Set Variable, Should Contain,
+# Log and the three close keywords are the keywords whose library meaning the reader relies on (_follow, the steps
+# allowed after the read).
+_SELECT_READ_GUARD = ("Get Text", "Get Selected Options", "Select Options By", "Set Variable", "Should Contain", "Log",
+                      "Close Browser", "Close Context", "Close Page")
+# The keywords that change a <select>'s selection, compared lower-cased without spaces or underscores.
+_SELECTION_CHANGES = ("selectoptionsby", "deselectoptions")
+# A `$` that starts no variable, or an escaped `\${`: Robot can build a variable name from it at run time.
+_BARE_OR_ESCAPED_DOLLAR_RE = re.compile(r"\$(?!\{)|\\\$\{")
+# Browser's close keywords, compared lower-cased without spaces: allowed after a rewritten read.
+_CLOSE_KEYWORDS = frozenset({"closebrowser", "closecontext", "closepage"})
+# A character that can name or build a variable: a cell without one is literal text.
+_NOT_LITERAL_RE = re.compile(r"[$@&%\\{}]")
+
+
+def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: str,
+                              values: frozenset[str], resolved: list[list[str | None]]) -> bool:
+    """True when only allowed steps run after the read and at least one is the
+    check `Should Contain ${name} V` with V a selected value.
+
+    Every line of the test after the read must be that check, a `Log` of the
+    bare `${name}` whose other cells are literal, or Browser's `Close Browser`
+    / `Close Context` / `Close Page` with literal arguments (none of
+    `$ @ & % \\ { }`); a `...` line never is, and blank and comment lines hold
+    no step.
+    Anything else — another keyword, an assignment, a second read, a [Setting]
+    line — leaves the read alone: Robot can reach `${name}` through a name it
+    builds at run time (`@name`, `RF_VAR_name`, `\\x24name`, `Get Variables`),
+    which no reading of the text follows. A teardown runs after the read too,
+    so the test may hold no [Teardown] and the Settings section no Test, Task
+    or Suite Teardown. The test's [Setting] lines before the read and the
+    Settings section may not mention `${name}` either.
+    """
+    by_line = {step.line_no: (step, resolved[i]) for i, step in enumerate(test.steps)}
+    read_line = test.steps[read_at].line_no
+    checked = False
+
+    def allowed(line_no: int) -> str:
+        """'skip' (no mention), 'check', 'log' or 'no'."""
+        content = _line_content(suite.lines[line_no])
+        if not _mentions_variable(content, name):
+            return "skip"
+        step, args = by_line.get(line_no, (None, None))
+        if step is None or step.setting or step.continued or step.assigns:
+            return "no"
+        if step.keyword == "log" and step.prefix in _BUILTIN_PREFIXES:
+            # Only the bare `${name}`, outside any other `{…}`: `${x.upper()}`, `${x}[0]`, `$x`, `@{x}` or
+            # `${{ … }}` would work on the list the rewrite returns, not on the text Get Text returned. Its other
+            # cells must be literal: `level=${{ … RF_VAR_x … }}` would evaluate the list too.
+            rest = re.sub(r"\$\{([^{}]*)\}(?!\[)", lambda m: "" if (
+                _canon_variable(m.group(1)) == name
+                and m.string.count("{", 0, m.start()) == m.string.count("}", 0, m.start())) else m.group(0), content)
+            return "no" if _mentions_variable(rest, name) or _NOT_LITERAL_RE.search(rest) else "log"
+        target = _SCALAR_CELL_RE.fullmatch(step.args[0]) if step.args else None
+        if (step.keyword == "should contain" and step.prefix in _BUILTIN_PREFIXES and len(step.args) == 2
+                and target and _canon_variable(target.group(1)) == name and args[1] in values):
+            return "check"
+        return "no"
+
+    def closes(line_no: int) -> bool:
+        """True for Browser's Close Browser / Close Context / Close Page with literal arguments only."""
+        step = by_line.get(line_no, (None, None))[0]
+        return (step is not None and not step.setting and not step.continued and not step.assigns
+                and step.keyword.replace(" ", "") in _CLOSE_KEYWORDS and step.prefix in _BROWSER_PREFIXES
+                and not any(_NOT_LITERAL_RE.search(arg) for arg in step.args))
+
+    for line_no in (no for no in test.line_nos if no > read_line):
+        verdict = allowed(line_no)
+        if verdict == "no" or (verdict == "skip" and not closes(line_no)):
+            return False
+        checked = checked or verdict == "check"
+    if any(s.setting and "teardown" in re.sub(r"[\s_\[\]]", "", s.keyword) for s in test.steps):
+        return False  # a [Teardown] runs after the read, wherever it sits
+    if any("teardown" in re.sub(r"[\s_]", "", _CELL_SPLIT_RE.split(suite.lines[no].strip())[0].lower())
+           for no in suite.settings_line_nos):
+        return False  # so does a Test, Task or Suite Teardown
+    elsewhere = [s.line_no for s in test.steps if s.setting and s.line_no < read_line] + suite.settings_line_nos
+    if any(allowed(line_no) != "skip" for line_no in elsewhere):
+        return False
+    return checked
+
+
+def _update_selected(step: _Step, args: list[str | None],
+                     selected: dict[str, tuple[str, frozenset[str]]]) -> bool:
+    """Apply a step that may change a selection to `selected` (canonical locator
+    -> the select's attribute and values); True when the step is one.
+
+    A select or deselect this reader cannot follow forgets every selection: one
+    named as another step's argument (`Run Keyword    Select Options By …`), one
+    spelled without spaces (`SelectOptionsBy`), another library's, or one on an
+    element it cannot name. A select or deselect on element L also forgets every
+    other selection unless both are plain `id=` locators with different ids: an
+    xpath or css spelling may name the same element.
+    """
+    if any(name in re.sub(r"[\s_]", "", arg.lower()) for arg in step.args for name in _SELECTION_CHANGES):
+        selected.clear()
+        return True
+    if step.keyword.replace(" ", "") not in _SELECTION_CHANGES:
+        return False
+    locator = _canon_locator(args[0]) if args else None
+    if (step.keyword not in ("select options by", "deselect options") or step.prefix not in _BROWSER_PREFIXES
+            or locator is None):
+        selected.clear()  # a select the reader cannot follow may have changed any of them
+        return True
+    for other in [key for key in selected if key != locator]:
+        if not (_ID_LOCATOR_RE.fullmatch(other) and _ID_LOCATOR_RE.fullmatch(locator)):
+            del selected[other]
+    if step.keyword == "deselect options":
+        selected.pop(locator, None)
+        return True
+    attribute = step.args[1] if len(step.args) > 1 else ""
+    values = args[2:]
+    if step.continued or attribute.lower() not in _SELECT_ATTRIBUTES or not values or None in values:
+        selected.pop(locator, None)
+    else:
+        selected[locator] = (attribute, frozenset(values))
+    return True
+
+
+def _select_read_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number -> rewritten line, for every Get Text read the select rule accepts."""
+    rewrites = {}
+    for test in suite.tests:
+        if not test.followable:
+            continue
+        resolved = _follow(test, suite.variables)
+        selected: dict[str, tuple[str, frozenset[str]]] = {}
+        for i, step in enumerate(test.steps):
+            args = resolved[i]
+            if step.setting or _update_selected(step, args, selected):
+                continue
+            if step.keyword != "get text" or step.prefix not in _BROWSER_PREFIXES or step.continued or not args:
+                continue
+            locator = _canon_locator(args[0])
+            if locator not in selected:
+                continue
+            attribute, values = selected[locator]
+            if step.assigns:
+                if (step.scalar_assign and len(step.args) == 1
+                        and _only_checked_as_selected(suite, test, i, step.assigns[0], values, resolved)):
+                    rewrites[step.line_no] = _rebuild(step, "Get Selected Options", insert_after_locator=attribute)
+            elif (len(step.args) == 3 and re.sub(r"[\s_]+", "", step.args[1].lower()) in _CONTAINS_OPERATORS
+                  and args[2] in values):
+                rewrites[step.line_no] = _rebuild(step, "Get Selected Options", insert_after_locator=attribute)
+    return rewrites
+
+
+def rewrite_select_text_reads(robot_code: str) -> str:
+    """Rewrite a `Get Text` read of a native `<select>` the test just set, into
+    `Get Selected Options` on the same attribute — q08's check that cannot fail.
+
+    `Get Text` on a `<select>` returns every option's label ("Please select an
+    option\\nOption 1\\nOption 2"), so `Should Contain    ${x}    Option 2` after
+    selecting Option 2 passes whatever is selected. `Get Selected Options    <L>
+    <attr>` returns the selected options as a list, and Robot's `Should Contain`
+    checks list membership, so the same assertion now fails when the selection
+    did not hold.
+
+    Rewritten, inside one test: `${x}=    Get Text    <L>` when an earlier
+    `Select Options By    <L>    label|value|text    <V>...` targets the same
+    element — the same text once `${var}`s are resolved (from *** Variables ***
+    or an earlier `Set Variable`), with `id=x` and `css=#x` equal — and
+    after the read the test runs only `Should Contain    ${x}    <V>` (V one of
+    the selected values; at least one such line), a `Log` of the bare `${x}`
+    whose other cells are literal, and Browser's `Close Browser` / `Close
+    Context` / `Close Page` with literal arguments (blank and comment lines
+    between are fine), and no teardown: Robot can reach `${x}` through a name
+    it builds at run time (`@x`, `RF_VAR_x`, `\\x24x`, `Get Variables`, a name a
+    keyword or Python computes), so no other step may follow the read. Also
+    the inline form `Get Text    <L>    contains|*=    <V>`, which assigns
+    nothing a later step could reach. `<attr>` is the attribute the select
+    used; the `Browser.` prefix is kept.
+    Nothing else: `index` selects, custom dropdowns (no `Select Options By`), a
+    read of the selected `<option>` itself, `Should Be Equal` or any other step
+    after the read (a second read, a `Click`: such a test gets no fix), a
+    [Teardown] in the test or a Test, Task or Suite Teardown in Settings, a V
+    that is not selected (a "still listed" check), a different element, a `...`
+    continuation on either line, a read before the select, a select or
+    deselect in between that this reader cannot follow (behind a wrapper,
+    spelled without spaces, on an element it cannot name, or on another element
+    not named by a plain `id=`), a locator that *** Variables *** defines as a
+    list, a dict or a typed value, a test with a control structure, a template,
+    a step on its name line or a line this reader cannot read as a step (a
+    nested or item assignment target among them), and whole files that define
+    their own `Get Text` / `Get Selected Options` / `Select Options By` / `Set
+    Variable` / `Should Contain` / `Log` / `Close Browser` / `Close Context` /
+    `Close Page`, catch errors (TRY, or own keywords under an error-catching
+    wrapper), use pipe-separated lines, contain `language:` anywhere (a
+    language setting makes Robot accept translated settings and headers, a
+    teardown among them), name a
+    *** Variables *** entry through another variable, hold a scoped `Set …
+    Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
+    `VAR` anywhere, or hold anywhere a `$` that starts no variable (a `$name`
+    expression, a lone `$`, a price) or an escaped `\\${`: Robot can build a
+    variable name from either at run time. Not seen: a library, resource or
+    listener from outside the file, including one that provides a keyword
+    named like an allowed step, and a hook that Python run before the read
+    sets up. Idempotent.
+
+    Covers the generation path and every dryrun repair round (both run
+    `extract_and_normalize_robot_code`); pasted code and re-runs of stored code
+    never pass through here.
+    """
+    if not robot_code:
+        return robot_code
+    squashed = re.sub(r"[\s_]", "", robot_code.lower())
+    if "selectoptionsby" not in squashed or "gettext" not in squashed:
+        return robot_code
+    if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code):
+        return robot_code  # Robot can build a variable name at run time from any `$` the reader cannot follow
+    # A language setting makes Robot accept translated settings and headers (a teardown among them) the reader
+    # cannot see. Robot honours it in more than one line shape (after a byte-order mark, on a `...` line), and
+    # each holds the text `language:`, so any file holding it is left alone.
+    if "language:" in robot_code.lower():
+        return robot_code
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _select_read_rewrites(suite), _SELECT_READ_GUARD,
+        "Select read normalizer", "Get Text line(s) on a select", "Get Selected Options",
+    )
+
+
+# Keywords that write a field's value AND fail on an element that is not a field
+# (measured, Browser 19.14.2: each raises "Element is not an <input>, <textarea>,
+# <select> or [contenteditable]" on a <div value>, <li value> or custom element).
+# Type Text / Type Secret only fail there because they clear the field first; with
+# `clear` switched off they type into anything, as `Press Keys` does — so neither
+# counts as proof that the element is a field.
+_TYPING_KEYWORDS = frozenset({"fill text", "fill secret", "clear text", "type text", "type secret"})
+# Set Variable: the shared reader trusts BuiltIn's meaning of it (_follow).
+_TYPED_READ_GUARD = ("Get Attribute", "Get Property", "Fill Text", "Fill Secret", "Clear Text",
+                     "Type Text", "Type Secret", "Set Variable")
+
+
+def _proves_a_field(step: _Step) -> bool:
+    """True when the typing step could only have succeeded on a field."""
+    if step.keyword in ("type text", "type secret"):
+        if any(a.startswith(("@{", "&{")) for a in step.args):
+            return False  # an expanded list or dict may carry `clear`
+        rest = step.args[1:]  # `clear=` may be named before the text
+        # Robot resolves an argument name at run time (`${n}=`, `cl\ear=`): deny every name but these.
+        return len(rest) <= 2 and not any(
+            "=" in a and a.split("=", 1)[0] not in ("txt", "secret", "delay") for a in rest
+        )
+    return True
+
+
+def _typed_value_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number -> rewritten line, for every Get Attribute read the typed-value rule accepts."""
+    rewrites = {}
+    for test in suite.tests:
+        if not test.followable:
+            continue
+        resolved = _follow(test, suite.variables)
+        typed: set[str] = set()
+        for i, step in enumerate(test.steps):
+            args = resolved[i]
+            if step.setting or step.prefix not in _BROWSER_PREFIXES or step.continued or not args:
+                continue
+            if step.keyword in _TYPING_KEYWORDS:
+                locator = _canon_locator(args[0])
+                if locator is not None and _proves_a_field(step):
+                    typed.add(locator)
+                continue
+            if (step.keyword == "get attribute" and len(step.args) >= 2
+                    and step.args[1] in ("value", "attribute=value")
+                    and _canon_locator(args[0]) in typed):
+                rewrites[step.line_no] = _rebuild(
+                    step, "Get Property",
+                    replace_second_arg="property=value" if step.args[1] == "attribute=value" else None,
+                )
+    return rewrites
+
+
+def rewrite_typed_value_reads(robot_code: str) -> str:
+    """Rewrite `Get Attribute    <L>    value` to `Get Property    <L>    value`
+    when the same test typed into <L> earlier — a read that cannot see the typing.
+
+    The `value` ATTRIBUTE is the field's initial value; what the test typed
+    lives in the `value` PROPERTY. So after `Fill Text    <L>    NewYork`,
+    `Get Attribute    <L>    value` returns '' (or the prefilled default) and a
+    correct test fails. Only after a typing step on the same element (same
+    resolution rules as `rewrite_select_text_reads`) that proves the element is
+    a field: Fill Text, Fill Secret, Clear Text, and Type Text / Type Secret
+    unless an argument could switch `clear` off (a second argument after the
+    text, `clear` by position; any cell after the locator holding `=` whose
+    name before the first `=` is not `txt`, `secret` or `delay`; an expanded
+    `@{…}` / `&{…}`). The named form `attribute=value` becomes
+    `property=value` (swapping only the keyword would ask for a property
+    literally named "attribute=value", which dryrun cannot catch); inline
+    assertion arguments keep their positions. Nothing else: an element nothing
+    typed into (`<div value>`, `<li value>`, custom elements, `<option>`, a
+    prefilled field the test never typed into — there the property is None or
+    an int), a read in another test, a `...` continuation, a locator that
+    *** Variables *** defines as a list, a dict or a typed value, a test with a
+    control structure, a template, a step on its name line or a line the reader
+    cannot read as a step (a nested or item assignment target among them), and
+    whole files that define their own `Get Attribute` / `Get Property` / typing
+    keyword / `Set Variable`, catch errors, use pipe-separated lines, name a
+    *** Variables *** entry through another variable, or hold a scoped `Set …
+    Variable`, `Import Variables`, `Import Resource`, `Set Selector Prefix` or
+    `VAR` anywhere. Idempotent.
+    """
+    if not robot_code:
+        return robot_code
+    if "getattribute" not in re.sub(r"[\s_]", "", robot_code.lower()):
+        return robot_code
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _typed_value_rewrites(suite), _TYPED_READ_GUARD,
+        "Typed value normalizer", "Get Attribute … value line(s)", "Get Property",
+    )
 
 
 def normalize_robot_code(robot_code: str) -> str:
