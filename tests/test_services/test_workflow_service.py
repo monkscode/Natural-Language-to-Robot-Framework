@@ -171,30 +171,32 @@ class TestRunIsRecordedAtStart:
     def test_row_is_opened_even_when_the_client_leaves_after_one_event(self):
         """The disconnect case is the whole reason the opening row exists.
 
-        Closing an async generator raises GeneratorExit at the suspended
-        `yield`, so anything written after that yield never runs. Recording the
-        id after handing the opening event to the client therefore lost the row
-        for precisely the client that goes away — while the workflow thread
-        keeps running and keeps spending, because a disconnect does not cancel
-        it. That is a vanished run of the exact kind this feature was added to
-        make visible, and the earlier tests all drain to completion so none of
-        them can see it.
+        The stream's job now runs in its own task (`_detached`), so closing
+        the stream no longer stops it: after the client drops, the job still
+        writes the terminal 'generated' row. The opening row is still written
+        before the event is handed on, and it must exist before any terminal
+        write.
 
-        Consume up to and including the first event carrying the id, then close
-        the stream the way a dropped connection does.
+        Consume up to and including the first event carrying the id, close the
+        stream the way a dropped connection does, then wait for the job.
         """
         calls = []
 
         def _capture(run_id, user_arg, user_query, status, **kw):
             calls.append({"run_id": run_id, "status": status})
 
-        events = [
-            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
-            {"status": "complete", "robot_code": "*** Test Cases ***",
-             "workflow_id": self._WF_ID},
-        ]
+        reader_left = threading.Event()
+
+        def _workflow(*args, **kwargs):
+            # The terminal event is not produced until the reader has left.
+            yield {"status": "running", "message": "planning",
+                   "workflow_id": self._WF_ID}
+            reader_left.wait(5)
+            yield {"status": "complete", "robot_code": "*** Test Cases ***",
+                   "workflow_id": self._WF_ID}
+
         with patch("src.backend.services.workflow_service.run_agentic_workflow",
-                   return_value=iter(events)), \
+                   side_effect=_workflow), \
              patch("src.backend.services.workflow_service._record_run",
                    side_effect=_capture), \
              patch("src.backend.services.workflow_service._acquire_workflow_slot",
@@ -208,13 +210,16 @@ class TestRunIsRecordedAtStart:
                     if self._WF_ID in sse:
                         break          # client has the opening event...
                 await agen.aclose()    # ...and now drops the connection
+                reader_left.set()      # only now may the terminal event exist
+                await asyncio.gather(*ws._detached_jobs)
                 return None
 
+            from src.backend.services import workflow_service as ws
             asyncio.run(run_gen())
 
-        assert [c["status"] for c in calls] == ["running"], (
-            "the opening row must be written before the event is handed to the "
-            f"client, not after; got {calls}"
+        assert [c["status"] for c in calls] == ["running", "generated"], (
+            "the opening row must be written first and the job must still "
+            f"write its terminal row after the client left; got {calls}"
         )
         assert calls[0]["run_id"] == self._WF_ID
 

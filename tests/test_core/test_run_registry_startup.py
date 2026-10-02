@@ -8,8 +8,11 @@ completed that migration the collapse ran inside the first request to touch
 History, groups or a report authorization.
 
 These tests stub every other startup dependency (they are startup wiring, not
-storage): what is pinned is that the construction happens, that it happens
-after the org backfill, and that a failure is swallowed.
+storage), including the abandoned-run sweeper: it reaches the registry through
+workflow_service, not the patched get_run_registry, so unstubbed it would start
+for real. What is pinned is that the construction happens, that it happens
+after the org backfill, that a failure is swallowed, and that startup launches
+the sweeper as a task on app.state.
 
 Referenced by: src/backend/main.py.
 Depends on: src/backend/core/run_registry.py (get_run_registry).
@@ -21,8 +24,20 @@ from unittest.mock import MagicMock, patch
 from src.backend import main
 
 
-def _run_startup(calls, registry_side_effect):
-    """Drive startup_event with every dependency but the registry stubbed."""
+def _run_startup(calls, registry_side_effect, sweeps=None):
+    """Drive startup_event with every dependency but the registry stubbed.
+
+    Returns the task startup left on app.state.abandoned_run_sweeper, captured
+    before asyncio.run closes the loop and cancels it."""
+    sweeps = [] if sweeps is None else sweeps
+
+    async def stub_sweeper():
+        sweeps.append(1)
+
+    async def go():
+        await main.startup_event()
+        return getattr(main.app.state, "abandoned_run_sweeper", None)
+
     with (
         patch("src.backend.auth.security_posture.validate_security_posture"),
         patch("src.backend.core.artifact_store.get_artifact_store"),
@@ -43,11 +58,15 @@ def _run_startup(calls, registry_side_effect):
             side_effect=registry_side_effect,
         ),
         patch(
+            "src.backend.services.workflow_service.sweep_abandoned_runs_forever",
+            stub_sweeper,
+        ),
+        patch(
             "src.backend.core.temp_metrics_storage.get_temp_metrics_storage",
             side_effect=lambda: calls.append("temp_cleanup") or MagicMock(),
         ),
     ):
-        asyncio.run(main.startup_event())
+        return asyncio.run(go())
 
 
 def test_startup_constructs_the_registry_after_the_org_backfill():
@@ -67,3 +86,10 @@ def test_startup_survives_a_registry_construction_failure():
     calls = []
     _run_startup(calls, RuntimeError("postgres unreachable"))
     assert calls == ["org_backfill", "temp_cleanup"]
+
+
+def test_startup_launches_the_abandoned_run_sweeper_as_a_task():
+    sweeps = []
+    task = _run_startup([], lambda: MagicMock(), sweeps)
+    assert sweeps == [1]
+    assert isinstance(task, asyncio.Task)

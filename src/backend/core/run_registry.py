@@ -62,6 +62,12 @@ logger = logging.getLogger(__name__)
 # hand and unproven for a database nobody has inspected. Abort beats merge.
 _MIGRATION_SCALE_LIMIT = 5000
 
+# Stored on a run the sweep closes (close_abandoned_runs).
+ABANDONED_RUN_MESSAGE = (
+    "This run never reported a result. The server stopped, or lost the run, "
+    "before it finished."
+)
+
 _SCHEMA_DDL = (
     """
     CREATE TABLE IF NOT EXISTS test_runs (
@@ -1616,6 +1622,29 @@ class RunRegistry:
                 )
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
+
+    def close_abandoned_runs(self, older_than_s: int) -> list[str]:
+        """Turn 'running' rows untouched for older_than_s seconds into 'error'.
+
+        A server that dies mid-run leaves its row on 'running' with nothing
+        alive to correct it. Returns the ids of the rows closed; [] when none
+        qualified and on a storage failure (logged, never raised), like
+        set_status. A run closed by
+        mistake and finished later is corrected by its own set_status, which
+        writes status and message exactly."""
+        try:
+            with self._pool.connection() as conn:
+                cur = conn.execute(
+                    "UPDATE test_runs SET status = 'error', updated_at = now(), "
+                    "error_message = %s WHERE status = 'running' "
+                    "AND updated_at < now() - make_interval(secs => %s) "
+                    "RETURNING run_id",
+                    (ABANDONED_RUN_MESSAGE, older_than_s),
+                )
+                return [row["run_id"] for row in cur.fetchall()]
+        except Exception as e:
+            logger.error(f"[RUN_REGISTRY] close_abandoned_runs failed: {e}")
+            return []
 
     # ------------------------------------------------------------------
     # Run groups (History page folders). Keyed to the ORG and nothing finer:

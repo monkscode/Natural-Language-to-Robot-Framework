@@ -73,7 +73,10 @@ _REPORT_STATUSES = ("passed", "failed")
 # error_message EXACTLY (a pass clears it); generation mints a fresh run id
 # per attempt, so its record_start writes have no earlier message to keep.
 # That leaves "running" as the sole status where record_start's COALESCE can
-# still be showing the previous run's message. Restricting this tuple to
+# still be showing the previous run's message. A second, rare case: a run the
+# abandoned-run sweep closed by mistake that then finishes GENERATION keeps
+# the sweep's message on its "generated" row (record_start COALESCEs it).
+# Restricting this tuple to
 # failed/error is defence in depth for any other status, not the mechanism
 # that clears a stale reason on a pass.
 _FAILURE_STATUSES = ("failed", "error")
