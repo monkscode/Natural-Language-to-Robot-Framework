@@ -3,6 +3,7 @@ import uuid
 import logging
 import json
 import asyncio
+import functools
 import time
 from queue import Queue, Empty
 from threading import Thread
@@ -1250,6 +1251,63 @@ def _run_owner(run_id: str) -> str | None:
         return None
 
 
+# Jobs that outlive their HTTP response. A strong reference per task: the event
+# loop holds tasks weakly, so an unreferenced one can be collected mid-run.
+_detached_jobs: set[asyncio.Task] = set()
+_JOB_DONE = object()
+
+
+def _detached(job_fn):
+    """Run a stream's job to its end whether or not anyone is still reading it.
+
+    Every terminal write of a run — its status and reason, the learning
+    record, artifact persistence — lives inside the stream's own body. Served
+    directly, that body is cancelled the moment the client leaves (Starlette
+    cancels the response; measured: CancelledError at the parked await), while
+    the workflow thread and the Docker run finish with nobody left to record
+    the outcome: the row reads 'running' forever.
+
+    So the job runs in its own task and the response only relays what it
+    emits. A reader that leaves stops the relay, never the job. The job's own
+    finally blocks still release the slot — now when the work has ended, not
+    when the reader went away.
+
+    What this does not cover: the process dying mid-run. Nothing is left
+    alive to write anything then.
+    """
+    @functools.wraps(job_fn)
+    async def stream(*args, **kwargs):
+        events: asyncio.Queue = asyncio.Queue()
+        listening = True
+
+        async def _pump() -> None:
+            try:
+                async for sse in job_fn(*args, **kwargs):
+                    if listening:
+                        events.put_nowait(sse)
+            except Exception as e:
+                # Logged here, always: a reader that leaves between this put
+                # and its own next read would otherwise take the error with it.
+                logging.exception("[DETACHED] stream job failed")
+                if listening:
+                    events.put_nowait(e)
+            finally:
+                events.put_nowait(_JOB_DONE)
+
+        task = asyncio.create_task(_pump())
+        _detached_jobs.add(task)
+        task.add_done_callback(_detached_jobs.discard)
+        try:
+            while (item := await events.get()) is not _JOB_DONE:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            listening = False
+
+    return stream
+
+
 def _capacity_error_sse(stage: str) -> str:
     """Return a formatted SSE capacity-exceeded error string for the given pipeline stage."""
     max_wf = settings.MAX_CONCURRENT_WORKFLOWS
@@ -1313,12 +1371,10 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
-            # BEFORE the yield, not after. Closing an async generator raises
-            # GeneratorExit at the suspended yield, so a client that takes the
-            # opening event and disconnects would never reach this line — and
-            # the disconnect does not stop the workflow thread, which keeps
-            # running and keeps spending. That is exactly the vanished run the
-            # opening row exists to make visible.
+            # The opening row is still written before the event is yielded.
+            # The job no longer dies at a yield when the client leaves (it
+            # runs detached), but the row must exist before any terminal
+            # write can happen, so it is noted first.
             await _note_workflow_id(event)
             yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
             if event.get("status") == "complete" and "robot_code" in event:
@@ -1553,6 +1609,7 @@ async def _confirm_version(
     return f"data: {json.dumps({'stage': 'version', 'status': 'complete', 'test_id': attached, 'n': n, 'run_id': run_id})}\n\n"
 
 
+@_detached
 async def stream_generate_only(
     user_query: str, model_provider: str, model_name: str, user: dict | None = None,
     regenerate_test_id: str | None = None, version_reason: str | None = None,
@@ -1642,6 +1699,7 @@ async def stream_generate_only(
         releaser.done()  # Generator's share of the latch
 
 
+@_detached
 async def stream_execute_only(
     robot_code: str, user_query: str = None, workflow_id: str = None, user: dict | None = None,
     history_query: str | None = None, rerun_of: str | None = None,
@@ -1766,6 +1824,7 @@ async def stream_execute_only(
         releaser.done()
 
 
+@_detached
 async def stream_generate_and_run(
     user_query: str, model_provider: str, model_name: str, user: dict | None = None
 ) -> AsyncGenerator[str, None]:
