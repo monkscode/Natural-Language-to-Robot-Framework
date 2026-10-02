@@ -57,6 +57,13 @@ _HINT_CACHE_MAX_SIZE = 500       # hard ceiling independent of TTL
 _active_workflow_count = 0
 _active_workflow_lock = threading.Lock()
 
+# Run ids with an execution in flight in THIS process. A job outlives its
+# response (_detached), so a client whose stream dropped can re-post the same
+# id while the first run is still going; the second container would
+# force-remove the first one's. Per-process, like the slot counter.
+_executing_run_ids: set[str] = set()
+_executing_run_ids_lock = threading.Lock()
+
 # Belt-and-suspenders lock for _hint_metadata_cache.
 # Individual dict operations are atomic under CPython's GIL, but explicit locking
 # makes the thread-safety guarantee portable across Python implementations.
@@ -505,9 +512,10 @@ def _process_learning_attribution(
 
     Runs after persist_run: fire_usage_attribution makes a 5-30s LLM call on the
     calling thread, and putting it ahead of persistence would delay a durable
-    report by that long. A client disconnect between the two halves therefore
-    loses the credits but keeps the record — hint_attribution_done stays 0, so a
-    later re-execution can still credit them.
+    report by that long. A client disconnect no longer stops this (the job is
+    detached); only the server stopping between the two halves loses the
+    credits but keeps the record — hint_attribution_done stays 0, so a later
+    re-execution can still credit them.
 
     pre_run_record and injected_hint_ids_json come from
     _process_learning_record and must NOT be re-read here. By the time this runs
@@ -1003,8 +1011,9 @@ def run_workflow_in_thread(
     where the CrewAI event bus handlers push real-time progress events directly.
 
     If a _SlotReleaser is provided, calls releaser.done() unconditionally in the
-    finally block so the countdown latch can release the slot even when the SSE
-    client has already disconnected and the generator's finally fired first.
+    finally block so the countdown latch can release the slot even when the
+    job was cancelled (server shutdown) and the generator's finally fired
+    first.
     """
     try:
         for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue, org_id=org_id, user_id=user_id):
@@ -1251,10 +1260,22 @@ def _run_owner(run_id: str) -> str | None:
         return None
 
 
-# An execution is capped at 1,800 s (TEST_EXECUTION_TIMEOUT); a cold image pull
-# was measured at 98.8 s. A row still 'running' after an hour was abandoned.
-_ABANDONED_AFTER_S = 3600
+# After the 'running' write an execution can legitimately wait for the image
+# provision (900 s) and then the execute call (1,860 s by default, from
+# TEST_EXECUTION_TIMEOUT) = 2,760 s. A row still 'running' past that plus one
+# sweep interval, and never under an hour, was abandoned.
 _SWEEP_EVERY_S = 600
+_ABANDONED_AFTER_S = max(
+    3600,
+    runner_exec_client._IMAGE_PROVISION_READ_TIMEOUT_S
+    + runner_exec_client._EXECUTE_READ_TIMEOUT_S + _SWEEP_EVERY_S,
+)
+
+
+def _close_abandoned() -> list[str]:
+    """Registry lookup and sweep in one call, so a slow construction (Postgres
+    down at boot: connect timeout, schema DDL) stays off the event loop."""
+    return get_run_registry().close_abandoned_runs(_ABANDONED_AFTER_S)
 
 
 async def sweep_abandoned_runs_forever() -> None:
@@ -1267,12 +1288,12 @@ async def sweep_abandoned_runs_forever() -> None:
         _ABANDONED_AFTER_S, _SWEEP_EVERY_S)
     while True:
         try:
-            closed = await asyncio.to_thread(
-                get_run_registry().close_abandoned_runs, _ABANDONED_AFTER_S)
+            closed = await asyncio.to_thread(_close_abandoned)
             if closed:
                 logging.warning(
                     "[RUN_REGISTRY] closed %s abandoned run(s) still 'running' "
-                    "after %ss", closed, _ABANDONED_AFTER_S)
+                    "after %ss: %s", len(closed), _ABANDONED_AFTER_S,
+                    ", ".join(closed))
         except Exception as e:
             logging.error(f"[RUN_REGISTRY] abandoned-run sweep failed: {e}")
         await asyncio.sleep(_SWEEP_EVERY_S)
@@ -1315,7 +1336,7 @@ def _detached(job_fn):
             except Exception as e:
                 # Logged here, always: a reader that leaves between this put
                 # and its own next read would otherwise take the error with it.
-                logging.exception("[DETACHED] stream job failed")
+                logging.exception("[DETACHED] stream job failed: %s", job_fn.__name__)
                 if listening:
                     events.put_nowait(e)
             finally:
@@ -1544,8 +1565,8 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # measured gap between the result SSE and Submit being clickable is
         # 606ms and 478ms on two real runs, not milliseconds. The reorder is
         # still worth having for API callers that poll rather than gate on the
-        # stream, and for disconnect robustness — every step this write sits
-        # behind is a step it can lose a race by, for those callers.
+        # stream — every step this write sits behind is a step it can lose a
+        # race by, for those callers.
         learning_ctx = await asyncio.to_thread(
             _process_learning_record, run_id, user_query, robot_code, result)
 
@@ -1674,8 +1695,8 @@ async def stream_generate_only(
 
     # Two-party latch: thread + generator both call done().
     # Slot is released only when the last of the two finishes.
-    # This prevents premature release when the client disconnects mid-stream
-    # while the LLM thread is still running.
+    # This prevents premature release when the job is cancelled (server
+    # shutdown) while the LLM thread is still running.
     releaser = _SlotReleaser()
     try:
         # Computed ONCE for this request — see _compute_is_platform_admin.
@@ -1798,6 +1819,7 @@ async def stream_execute_only(
     # Guard: finally must not raise NameError if we return before run_id is assigned
     # (happens when workflow_id is present but fails UUID validation).
     run_id = None
+    claimed = False
     try:
         # Computed ONCE for this request — see _compute_is_platform_admin.
         # Both re-run routes already have it from history_scope and pass
@@ -1831,6 +1853,16 @@ async def stream_execute_only(
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified): {run_id}")
 
+        # One execution per run id at a time (see _executing_run_ids).
+        with _executing_run_ids_lock:
+            already_running = run_id in _executing_run_ids
+            if not already_running:
+                _executing_run_ids.add(run_id)
+                claimed = True
+        if already_running:
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': 'This run is still in progress on the server. Its result will appear in History when it finishes.'})}\n\n"
+            return
+
         # History row. When this run_id came from a generation by another (or
         # the same) session, the upsert only advances status — the original
         # owner/query attribution is write-once.
@@ -1846,8 +1878,12 @@ async def stream_execute_only(
         # Guard against CancelledError (BaseException, not caught by except above):
         # if the task was cancelled between await points, _process_learning_record never
         # ran and its cache pop never fired. No-op if already consumed.
-        if run_id is not None:
+        # Only the request that claimed the id cleans up: a refused one must not
+        # evict hint metadata, or release the claim, of the run still executing.
+        if claimed:
             _safe_evict_hint_metadata(run_id)
+            with _executing_run_ids_lock:
+                _executing_run_ids.discard(run_id)
         releaser.done()
 
 
@@ -1864,8 +1900,9 @@ async def stream_generate_and_run(
         return
 
     # Two-party latch: thread (phase 1 — LLM generation) + generator (phase 2 — Docker).
-    # Slot is released only when both have finished, preventing premature release on
-    # client disconnect during phase 1 while the LLM thread is still consuming quota.
+    # Slot is released only when both have finished, preventing premature release
+    # when the job is cancelled (server shutdown) during phase 1 while the LLM
+    # thread is still consuming quota.
     releaser = _SlotReleaser()
     # Guard: finally must not raise NameError if we return before run_id is assigned
     # (happens when UUID validation fails or generation errors before reaching execution).

@@ -185,13 +185,18 @@ class TestRunIsRecordedAtStart:
         def _capture(run_id, user_arg, user_query, status, **kw):
             calls.append({"run_id": run_id, "status": status})
 
-        events = [
-            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
-            {"status": "complete", "robot_code": "*** Test Cases ***",
-             "workflow_id": self._WF_ID},
-        ]
+        reader_left = threading.Event()
+
+        def _workflow(*args, **kwargs):
+            # The terminal event is not produced until the reader has left.
+            yield {"status": "running", "message": "planning",
+                   "workflow_id": self._WF_ID}
+            reader_left.wait(5)
+            yield {"status": "complete", "robot_code": "*** Test Cases ***",
+                   "workflow_id": self._WF_ID}
+
         with patch("src.backend.services.workflow_service.run_agentic_workflow",
-                   return_value=iter(events)), \
+                   side_effect=_workflow), \
              patch("src.backend.services.workflow_service._record_run",
                    side_effect=_capture), \
              patch("src.backend.services.workflow_service._acquire_workflow_slot",
@@ -205,6 +210,7 @@ class TestRunIsRecordedAtStart:
                     if self._WF_ID in sse:
                         break          # client has the opening event...
                 await agen.aclose()    # ...and now drops the connection
+                reader_left.set()      # only now may the terminal event exist
                 await asyncio.gather(*ws._detached_jobs)
                 return None
 

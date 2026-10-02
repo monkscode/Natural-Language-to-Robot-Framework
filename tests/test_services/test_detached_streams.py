@@ -99,11 +99,19 @@ class TestExecutionSurvivesTheReader:
 class TestGenerationSurvivesTheReader:
     def _leave_after_first_id(self, events):
         calls = []
+        reader_left = threading.Event()
 
         def _capture(run_id, user, user_query, status, **kw):
             calls.append(status)
 
-        with patch.object(ws, "run_agentic_workflow", return_value=iter(events)), \
+        def _workflow(*args, **kwargs):
+            # Only the opening event exists while the reader is still there;
+            # the terminal one is produced after aclose() returned.
+            yield events[0]
+            reader_left.wait(5)
+            yield from events[1:]
+
+        with patch.object(ws, "run_agentic_workflow", side_effect=_workflow), \
              patch.object(ws, "_record_run", side_effect=_capture), \
              patch.object(ws, "_acquire_workflow_slot", return_value=True):
 
@@ -113,6 +121,7 @@ class TestGenerationSurvivesTheReader:
                     if _WF_ID in sse:
                         break
                 await agen.aclose()
+                reader_left.set()
                 await asyncio.gather(*ws._detached_jobs)
 
             asyncio.run(scenario())
@@ -158,12 +167,12 @@ class TestReaderThatStaysSeesTheSameEvents:
 class TestDetachedHelper:
     @staticmethod
     def _boom_job(gate=None):
-        async def job():
+        async def boom_stream():
             yield "data: one\n\n"
             if gate is not None:
                 await gate.wait()
             raise RuntimeError("boom")
-        return ws._detached(job)
+        return ws._detached(boom_stream)
 
     def test_a_reader_that_stays_gets_the_event_then_the_error(self):
         stream = self._boom_job()
@@ -191,7 +200,8 @@ class TestDetachedHelper:
         with caplog.at_level("ERROR"):
             first = asyncio.run(scenario())
         assert first == "data: one\n\n"
-        assert any("stream job failed" in r.getMessage() and r.exc_info
+        assert any("stream job failed" in r.getMessage()
+                   and "boom_stream" in r.getMessage() and r.exc_info
                    for r in caplog.records)
 
     def test_concurrent_streams_do_not_cross_events(self):
@@ -211,3 +221,112 @@ class TestDetachedHelper:
         a, b = asyncio.run(scenario())
         assert a == ["a0", "a1", "a2"]
         assert b == ["b0", "b1", "b2"]
+
+
+class TestOneExecutionPerRunId:
+    """A run id with an execution in flight refuses a second one (_executing_run_ids)."""
+
+    _REFUSED = ("This run is still in progress on the server. "
+                "Its result will appear in History when it finishes.")
+
+    @staticmethod
+    def _start(tmp_path, execute):
+        statuses, learning, releases, recorded, evicted = [], [], [], [], []
+        patches = _enter(_execute_mocks(tmp_path, execute, statuses, learning, releases))
+        patches += _enter([
+            patch.object(ws, "_record_run",
+                         side_effect=lambda run_id, *a, **k: recorded.append(run_id)),
+            patch.object(ws, "_safe_evict_hint_metadata",
+                         side_effect=lambda run_id: evicted.append(run_id)),
+        ])
+        return patches, statuses, releases, recorded, evicted
+
+    @staticmethod
+    async def _drain(stream_fn):
+        return [sse async for sse in stream_fn(
+            _CODE, "q", workflow_id=_WF_ID, is_platform_admin=False)]
+
+    def test_second_request_for_a_running_id_is_refused_and_touches_nothing(self, tmp_path):
+        entered, gate = threading.Event(), threading.Event()
+        calls = []
+
+        def blocking_execute(run_id, test_filename):
+            calls.append(run_id)
+            entered.set()
+            gate.wait(10)
+            return {"test_status": "passed", "logs": ""}
+
+        patches, statuses, releases, recorded, evicted = self._start(
+            tmp_path, blocking_execute)
+        try:
+            async def scenario():
+                first = asyncio.create_task(self._drain(ws.stream_execute_only))
+                await asyncio.to_thread(entered.wait, 10)
+                before = (len(recorded), len(evicted), len(releases))
+                second = await self._drain(ws.stream_execute_only)
+                after = (len(recorded), len(evicted), len(releases))
+                gate.set()
+                await first
+                await asyncio.gather(*ws._detached_jobs)
+                return before, second, after
+
+            before, second, after = asyncio.run(scenario())
+        finally:
+            gate.set()
+            _exit(patches)
+
+        assert len(second) == 1
+        event = json.loads(second[0].removeprefix("data: ").strip())
+        assert event == {"stage": "execution", "status": "error",
+                         "run_id": _WF_ID, "message": self._REFUSED}
+        assert calls == [_WF_ID], "execute ran once in total"
+        assert after[0] == before[0], "the refused request wrote no history row"
+        assert after[1] == before[1], "the refused request evicted no hint metadata"
+        assert after[2] == before[2] + 1, "the refused request released its own slot"
+        assert statuses == ["passed"]
+
+    def test_a_finished_run_id_can_be_executed_again(self, tmp_path):
+        calls = []
+
+        def execute(run_id, test_filename):
+            calls.append(run_id)
+            return {"test_status": "passed", "logs": ""}
+
+        patches, statuses, *_ = self._start(tmp_path, execute)
+        try:
+            async def scenario():
+                await self._drain(ws.stream_execute_only)
+                await asyncio.gather(*ws._detached_jobs)
+                return await self._drain(ws.stream_execute_only)
+
+            second = asyncio.run(scenario())
+        finally:
+            _exit(patches)
+
+        assert calls == [_WF_ID, _WF_ID]
+        assert statuses == ["passed", "passed"]
+        assert "still in progress" not in "".join(second)
+
+    def test_an_id_whose_run_ended_in_error_is_released_too(self, tmp_path):
+        calls = []
+
+        def execute(run_id, test_filename):
+            calls.append(run_id)
+            if len(calls) == 1:
+                raise RuntimeError("runner down")
+            return {"test_status": "passed", "logs": ""}
+
+        patches, statuses, *_ = self._start(tmp_path, execute)
+        try:
+            async def scenario():
+                await self._drain(ws.stream_execute_only)
+                await asyncio.gather(*ws._detached_jobs)
+                return await self._drain(ws.stream_execute_only)
+
+            second = asyncio.run(scenario())
+        finally:
+            _exit(patches)
+
+        assert calls == [_WF_ID, _WF_ID]
+        assert "still in progress" not in "".join(second)
+        assert statuses[-1] == "passed"

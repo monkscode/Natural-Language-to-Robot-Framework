@@ -1623,12 +1623,13 @@ class RunRegistry:
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] set_status failed for {run_id}: {e}")
 
-    def close_abandoned_runs(self, older_than_s: int) -> int:
+    def close_abandoned_runs(self, older_than_s: int) -> list[str]:
         """Turn 'running' rows untouched for older_than_s seconds into 'error'.
 
         A server that dies mid-run leaves its row on 'running' with nothing
-        alive to correct it. Returns the number of rows closed; 0 on a storage
-        failure (logged, never raised), like set_status. A run closed by
+        alive to correct it. Returns the ids of the rows closed; [] when none
+        qualified and on a storage failure (logged, never raised), like
+        set_status. A run closed by
         mistake and finished later is corrected by its own set_status, which
         writes status and message exactly."""
         try:
@@ -1636,13 +1637,14 @@ class RunRegistry:
                 cur = conn.execute(
                     "UPDATE test_runs SET status = 'error', updated_at = now(), "
                     "error_message = %s WHERE status = 'running' "
-                    "AND updated_at < now() - make_interval(secs => %s)",
+                    "AND updated_at < now() - make_interval(secs => %s) "
+                    "RETURNING run_id",
                     (ABANDONED_RUN_MESSAGE, older_than_s),
                 )
-                return cur.rowcount
+                return [row["run_id"] for row in cur.fetchall()]
         except Exception as e:
             logger.error(f"[RUN_REGISTRY] close_abandoned_runs failed: {e}")
-            return 0
+            return []
 
     # ------------------------------------------------------------------
     # Run groups (History page folders). Keyed to the ORG and nothing finer:

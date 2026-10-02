@@ -22,10 +22,10 @@ def _run(coro):
 
 def test_sweeps_once_before_its_first_sleep_with_the_limit():
     registry = MagicMock()
-    registry.close_abandoned_runs.return_value = 0
+    registry.close_abandoned_runs.return_value = []
     order = []
     registry.close_abandoned_runs.side_effect = (
-        lambda limit: order.append(("sweep", limit)) or 0)
+        lambda limit: order.append(("sweep", limit)) or [])
 
     async def fake_sleep(seconds):
         order.append(("sleep", seconds))
@@ -41,13 +41,17 @@ def test_sweeps_once_before_its_first_sleep_with_the_limit():
 
     assert order == [("sweep", ws._ABANDONED_AFTER_S),
                      ("sleep", ws._SWEEP_EVERY_S)]
-    assert ws._ABANDONED_AFTER_S == 3600
+    assert ws._ABANDONED_AFTER_S == max(
+        3600,
+        ws.runner_exec_client._IMAGE_PROVISION_READ_TIMEOUT_S
+        + ws.runner_exec_client._EXECUTE_READ_TIMEOUT_S + ws._SWEEP_EVERY_S)
+    assert ws._ABANDONED_AFTER_S >= 3600
     assert ws._SWEEP_EVERY_S == 600
 
 
 def test_a_sweep_that_raises_does_not_end_the_loop():
     registry = MagicMock()
-    registry.close_abandoned_runs.side_effect = [RuntimeError("db down"), 2, 0]
+    registry.close_abandoned_runs.side_effect = [RuntimeError("db down"), ["run-x", "run-y"], []]
     sleeps = []
 
     async def fake_sleep(seconds):
@@ -69,7 +73,7 @@ def test_a_sweep_that_raises_does_not_end_the_loop():
 
 def test_cancelling_the_task_ends_it():
     registry = MagicMock()
-    registry.close_abandoned_runs.return_value = 0
+    registry.close_abandoned_runs.return_value = []
     parked = None
 
     async def fake_sleep(seconds):
@@ -90,3 +94,23 @@ def test_cancelling_the_task_ends_it():
 
     task = _run(go())
     assert task.cancelled()
+
+
+def test_the_warning_names_the_closed_run_ids(caplog):
+    registry = MagicMock()
+    registry.close_abandoned_runs.return_value = ["run-x", "run-y"]
+
+    async def fake_sleep(seconds):
+        raise asyncio.CancelledError
+
+    async def go():
+        with patch.object(ws, "get_run_registry", return_value=registry), \
+                patch.object(ws.asyncio, "sleep", fake_sleep):
+            await ws.sweep_abandoned_runs_forever()
+
+    with caplog.at_level("WARNING"), pytest.raises(asyncio.CancelledError):
+        _run(go())
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "run-x" in warnings[0] and "run-y" in warnings[0]

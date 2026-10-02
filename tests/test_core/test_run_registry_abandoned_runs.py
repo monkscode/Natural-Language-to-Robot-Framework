@@ -57,7 +57,7 @@ def test_old_running_row_becomes_error_with_the_message(reg):
     r.record_start("run-1", USER_A, "q", "running", robot_code="code")
     _age(admin, "run-1", LIMIT_S + 60)
 
-    assert r.close_abandoned_runs(LIMIT_S) == 1
+    assert r.close_abandoned_runs(LIMIT_S) == ["run-1"]
 
     assert _row(admin, "run-1") == ("error", ABANDONED_RUN_MESSAGE)
     assert ABANDONED_RUN_MESSAGE == (
@@ -70,7 +70,7 @@ def test_young_running_row_is_untouched(reg):
     r.record_start("run-1", USER_A, "q", "running", robot_code="code")
     _age(admin, "run-1", LIMIT_S - 600)
 
-    assert r.close_abandoned_runs(LIMIT_S) == 0
+    assert r.close_abandoned_runs(LIMIT_S) == []
 
     assert _row(admin, "run-1") == ("running", None)
 
@@ -89,7 +89,7 @@ def test_finished_rows_of_any_age_are_untouched_messages_included(reg):
         _age(admin, run_id, LIMIT_S * 10)
         expected[run_id] = (status, message)
 
-    assert r.close_abandoned_runs(LIMIT_S) == 0
+    assert r.close_abandoned_runs(LIMIT_S) == []
 
     for run_id, want in expected.items():
         assert _row(admin, run_id) == want
@@ -99,7 +99,7 @@ def test_swept_by_mistake_then_finished_ends_passed_with_null_message(reg):
     r, admin = reg
     r.record_start("run-1", USER_A, "q", "running", robot_code="code")
     _age(admin, "run-1", LIMIT_S + 60)
-    assert r.close_abandoned_runs(LIMIT_S) == 1
+    assert r.close_abandoned_runs(LIMIT_S) == ["run-1"]
     assert _row(admin, "run-1")[0] == "error"
 
     r.set_status("run-1", "passed", None)
@@ -107,9 +107,9 @@ def test_swept_by_mistake_then_finished_ends_passed_with_null_message(reg):
     assert _row(admin, "run-1") == ("passed", None)
 
 
-def test_pool_failure_returns_zero_without_raising(reg):
+def test_pool_failure_returns_no_ids_without_raising(reg):
     r, admin = reg
     r.record_start("run-1", USER_A, "q", "running", robot_code="code")
     r.close()  # pool is now unusable
 
-    assert r.close_abandoned_runs(LIMIT_S) == 0
+    assert r.close_abandoned_runs(LIMIT_S) == []
