@@ -64,6 +64,20 @@ _active_workflow_lock = threading.Lock()
 _executing_run_ids: set[str] = set()
 _executing_run_ids_lock = threading.Lock()
 
+
+def _try_claim_run_id(run_id: str) -> bool:
+    """Claim run_id for one execution; False when one is already in flight."""
+    with _executing_run_ids_lock:
+        if run_id in _executing_run_ids:
+            return False
+        _executing_run_ids.add(run_id)
+        return True
+
+
+def _release_run_id(run_id: str) -> None:
+    with _executing_run_ids_lock:
+        _executing_run_ids.discard(run_id)
+
 # Belt-and-suspenders lock for _hint_metadata_cache.
 # Individual dict operations are atomic under CPython's GIL, but explicit locking
 # makes the thread-safety guarantee portable across Python implementations.
@@ -1305,6 +1319,22 @@ _detached_jobs: set[asyncio.Task] = set()
 _JOB_DONE = object()
 
 
+async def _pump_job(job, events: asyncio.Queue, reader_gone: asyncio.Event, name: str) -> None:
+    """Drive one detached job to its end, handing its events to the relay while a reader is there."""
+    try:
+        async for sse in job:
+            if not reader_gone.is_set():
+                events.put_nowait(sse)
+    except Exception as e:
+        # Logged here, always: a reader that leaves between this put
+        # and its own next read would otherwise take the error with it.
+        logging.exception("[DETACHED] stream job failed: %s", name)
+        if not reader_gone.is_set():
+            events.put_nowait(e)
+    finally:
+        events.put_nowait(_JOB_DONE)
+
+
 def _detached(job_fn):
     """Run a stream's job to its end whether or not anyone is still reading it.
 
@@ -1326,23 +1356,9 @@ def _detached(job_fn):
     @functools.wraps(job_fn)
     async def stream(*args, **kwargs):
         events: asyncio.Queue = asyncio.Queue()
-        listening = True
-
-        async def _pump() -> None:
-            try:
-                async for sse in job_fn(*args, **kwargs):
-                    if listening:
-                        events.put_nowait(sse)
-            except Exception as e:
-                # Logged here, always: a reader that leaves between this put
-                # and its own next read would otherwise take the error with it.
-                logging.exception("[DETACHED] stream job failed: %s", job_fn.__name__)
-                if listening:
-                    events.put_nowait(e)
-            finally:
-                events.put_nowait(_JOB_DONE)
-
-        task = asyncio.create_task(_pump())
+        reader_gone = asyncio.Event()
+        task = asyncio.create_task(
+            _pump_job(job_fn(*args, **kwargs), events, reader_gone, job_fn.__name__))
         _detached_jobs.add(task)
         task.add_done_callback(_detached_jobs.discard)
         try:
@@ -1351,7 +1367,7 @@ def _detached(job_fn):
                     raise item
                 yield item
         finally:
-            listening = False
+            reader_gone.set()
 
     return stream
 
@@ -1854,12 +1870,8 @@ async def stream_execute_only(
         logging.info(f"🆔 Execution ID (unified): {run_id}")
 
         # One execution per run id at a time (see _executing_run_ids).
-        with _executing_run_ids_lock:
-            already_running = run_id in _executing_run_ids
-            if not already_running:
-                _executing_run_ids.add(run_id)
-                claimed = True
-        if already_running:
+        claimed = _try_claim_run_id(run_id)
+        if not claimed:
             yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': 'This run is still in progress on the server. Its result will appear in History when it finishes.'})}\n\n"
             return
 
@@ -1882,8 +1894,7 @@ async def stream_execute_only(
         # evict hint metadata, or release the claim, of the run still executing.
         if claimed:
             _safe_evict_hint_metadata(run_id)
-            with _executing_run_ids_lock:
-                _executing_run_ids.discard(run_id)
+            _release_run_id(run_id)
         releaser.done()
 
 
