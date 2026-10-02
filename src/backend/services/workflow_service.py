@@ -1251,6 +1251,33 @@ def _run_owner(run_id: str) -> str | None:
         return None
 
 
+# An execution is capped at 1,800 s (TEST_EXECUTION_TIMEOUT); a cold image pull
+# was measured at 98.8 s. A row still 'running' after an hour was abandoned.
+_ABANDONED_AFTER_S = 3600
+_SWEEP_EVERY_S = 600
+
+
+async def sweep_abandoned_runs_forever() -> None:
+    """Close 'running' rows a dead server left behind, every _SWEEP_EVERY_S.
+
+    Sweeps first, then sleeps. A failed sweep is logged and the loop
+    carries on; cancelling the task is the only way it ends."""
+    logging.info(
+        "[RUN_REGISTRY] abandoned-run sweeper started (limit %ss, every %ss)",
+        _ABANDONED_AFTER_S, _SWEEP_EVERY_S)
+    while True:
+        try:
+            closed = await asyncio.to_thread(
+                get_run_registry().close_abandoned_runs, _ABANDONED_AFTER_S)
+            if closed:
+                logging.warning(
+                    "[RUN_REGISTRY] closed %s abandoned run(s) still 'running' "
+                    "after %ss", closed, _ABANDONED_AFTER_S)
+        except Exception as e:
+            logging.error(f"[RUN_REGISTRY] abandoned-run sweep failed: {e}")
+        await asyncio.sleep(_SWEEP_EVERY_S)
+
+
 # Jobs that outlive their HTTP response. A strong reference per task: the event
 # loop holds tasks weakly, so an unreferenced one can be collected mid-run.
 _detached_jobs: set[asyncio.Task] = set()

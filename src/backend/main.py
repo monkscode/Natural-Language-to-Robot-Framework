@@ -268,6 +268,15 @@ async def startup_event():
     except Exception as e:
         logging.warning(f"[RUN_REGISTRY] startup construction skipped: {e}")
 
+    # Close runs a dead server left on 'running'. Best-effort: never blocks startup.
+    try:
+        import asyncio
+        from src.backend.services.workflow_service import sweep_abandoned_runs_forever
+        app.state.abandoned_run_sweeper = asyncio.create_task(
+            sweep_abandoned_runs_forever())
+    except Exception as e:
+        logging.warning(f"[RUN_REGISTRY] abandoned-run sweeper not started: {e}")
+
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:
         from src.backend.core.temp_metrics_storage import get_temp_metrics_storage
@@ -324,6 +333,10 @@ def _check_learning_health():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    sweeper = getattr(app.state, "abandoned_run_sweeper", None)
+    if sweeper is not None:
+        sweeper.cancel()
+
     # Drain pending learning writes before exit
     try:
         from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
