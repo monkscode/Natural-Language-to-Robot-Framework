@@ -35,6 +35,10 @@ WORKDIR /app
 # Bumped 1.0.37 -> 1.0.39 on 2026-09-24: 1.0.38 accepts a read step's candidate
 # when the agent's index is provably the wrong element, and 1.0.39 reports the
 # tag the returned locator actually resolves to; runtime dependencies identical.
+# Bumped 1.0.39 -> 1.0.40 on 2026-10-02: a locator found inside an iframe now
+# always carries its frame (`iframe[id="x"] >>> <locator>`); the agent-candidate
+# and coordinate-fallback exits returned it bare, so the generated test looked
+# in the main page; runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -67,7 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.39 && \
+    browser-service==1.0.40 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
