@@ -118,6 +118,11 @@ _READERS = ("get text", "get attribute", "get property", "get selected options",
 _COUNTERS = ("get element count", "get elements", "get length")
 _ASSERTION_PREFIXES = ("wait for elements state", "wait until", "wait for condition",
                        "fail", "run keyword if", "run keyword unless")
+# They start with "run keyword if" but test the run's own state, not a value found by
+# the test: `[Teardown]  Run Keyword If Test Failed  Take Screenshot` asserts nothing.
+_RUN_STATE_KEYWORDS = {"run keyword if test failed", "run keyword if test passed",
+                       "run keyword if timeout occurred", "run keyword if all tests passed",
+                       "run keyword if any tests failed"}
 # "Should Be Equal", "Length Should Be", "Element Should Be Visible", "Page Should
 # Contain", "List Should Contain Value": any keyword with the word "should".
 _SHOULD = re.compile(r"(?:^|\s)should(?:\s|$)")
@@ -291,6 +296,8 @@ def _norm_locator(locator: str) -> str:
 
 
 def _is_assertion(stmt: _Statement) -> bool:
+    if stmt.keyword in _RUN_STATE_KEYWORDS:
+        return False
     if stmt.keyword.startswith(_ASSERTION_PREFIXES) or _SHOULD.search(stmt.keyword):
         return True
     return stmt.keyword.startswith("get ") and any(

@@ -425,6 +425,26 @@ class TestVerifyWithoutAssertion:
                          "    Get Text    css=h1    should start with    Welcome\n")
         assert shapes(code, "Open the page and verify the heading starts with Welcome") == set()
 
+    @pytest.mark.parametrize("keyword", [
+        "Run Keyword If Test Failed", "Run Keyword If Test Passed", "Run Keyword If Timeout Occurred",
+        "Run Keyword If All Tests Passed", "Run Keyword If Any Tests Failed"])
+    def test_a_teardown_keyword_that_tests_the_run_is_no_assertion(self, keyword):
+        code = robot(self.SAUCE, self.LOGIN
+                     + "    ${heading}=    Get Text    css=.title\n"
+                     "    Log    Retrieved: ${heading}\n"
+                     f"    [Teardown]    {keyword}    Take Screenshot\n")
+        assert shapes(code, Q07) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_run_keyword_if_on_a_value_is_still_an_assertion(self):
+        code = robot(self.SAUCE, self.LOGIN
+                     + "    ${heading}=    Get Text    css=.title\n"
+                     "    Run Keyword If    '${heading}' != 'Products'    Fail    Wrong heading\n")
+        assert shapes(code, Q07) == set()
+
+    def test_run_keyword_if_on_a_count_still_checks_the_count(self):
+        code = books(GET_LENGTH + "    Run Keyword If    ${elements_count} != 20    Fail\n")
+        assert shapes(code, Q10) == set()
+
     def test_operators_match_browsers_assertion_operator_enum(self):
         # Drift guard: the committed libdoc is the authority. `then` and `evaluate`
         # are excluded because they return the evaluated expression and never fail.
