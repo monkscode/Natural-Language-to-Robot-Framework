@@ -55,11 +55,12 @@ and EMPTY_TEST.
 
 Referenced by: bench/gate_hollow.py (the bench gate's hollow registry),
 api/history_endpoints.py (the History detail's suggestions, via pass_suggestions).
-Depends on: re, dataclasses. Standard library only: importing this module must
+Depends on: bisect, re, dataclasses. Standard library only: importing this module must
 never load config, a database driver or an LLM client.
 """
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 
 READ_NOT_PERFORMED = "READ_NOT_PERFORMED"
@@ -167,8 +168,9 @@ _VARIABLE = re.compile(r"[$@&%]\{([^}]+)\}")
 # Python's variable syntax inside an expression: `len($books) == 20`.
 _PYTHON_VARIABLE = re.compile(r"\$(\w+)")
 # A whole number: "== 20", "${20}" and "20." hold 20; "1920", "20.5", "20,000",
-# "20s" and "item_20" do not.
-_WHOLE_NUMBER = re.compile(r"(?<!\w)(?<!\d[.,])\d+(?![.,]?\d)(?!\w)")
+# "20s" and "item_20" do not. At most 18 digits: a longer run is no count and
+# yields no match at all (int() of 5,000 digits raises).
+_WHOLE_NUMBER = re.compile(r"(?<!\w)(?<!\d[.,])\d{1,18}(?![.,]?\d)(?!\w)")
 _CELL_SPLIT = re.compile(r"\s{2,}|\t")
 _LIBRARY_PREFIX = re.compile(r"^(browser|builtin|collections|string)\.")
 _KEYWORD_SETTINGS = ("[setup]", "[teardown]")
@@ -337,9 +339,23 @@ def _answer_literals(stmt: _Statement, locator: str, query: str) -> list[str]:
 
 
 def _clauses_after(words: re.Pattern[str], query: str) -> list[str]:
-    """The words after each match of `words`, up to the end of the clause, lower-cased."""
-    return [_CLAUSE_END.split(query[m.end():], maxsplit=1)[0].lower()
-            for m in words.finditer(query)]
+    """The words after a match of `words`, up to the end of the clause, lower-cased.
+
+    One clause per stretch between two clause ends: a later match in the same
+    stretch would get the tail of this clause, which holds no word or number the
+    whole clause does not. The clause ends are found once and each match's end by
+    bisect, so a long request takes time in proportion to its length.
+    """
+    ends = [m.start() for m in _CLAUSE_END.finditer(query)]
+    clauses = []
+    previous = -1
+    for m in words.finditer(query):
+        i = bisect_left(ends, m.end())
+        if i == previous:
+            continue
+        previous = i
+        clauses.append(query[m.end():ends[i] if i < len(ends) else len(query)].lower())
+    return clauses
 
 
 def _verify_clauses(query: str) -> list[str]:

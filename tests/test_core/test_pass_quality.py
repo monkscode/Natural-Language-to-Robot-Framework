@@ -8,6 +8,7 @@ same verdicts on the real captures is bench/private/gate/pass_quality_corpus_rep
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,17 @@ class TestReadNotPerformed:
     def test_a_query_without_a_read_verb_is_never_flagged(self):
         code = robot("", "    New Page    https://example.com\n    Click    id=go\n")
         assert READ_NOT_PERFORMED not in shapes(code, "Open https://example.com and click Go, target the button")
+
+    def test_a_number_too_long_to_be_a_count_is_no_number_and_raises_nothing(self):
+        # Python refuses int() of a 5,000-digit string: the number must never reach int()
+        query = Q10.replace("20 books", "9" * 5000 + " books")
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_whole_number_has_at_most_eighteen_digits(self):
+        assert pass_quality._whole_numbers("there are " + "1" * 18 + " books") == {int("1" * 18)}
+        assert pass_quality._whole_numbers("there are " + "1" * 19 + " books") == set()
+        assert pass_quality._whole_numbers("there are " + "1" * 5000 + " books") == set()
 
 
 class TestSelectCheckCannotFail:
@@ -593,6 +605,24 @@ class TestPassSuggestions:
         assert [f.shape for f in check_pass_quality(code, query)] == [
             VERIFY_WITHOUT_ASSERTION, FRAGILE_NUMERIC_ID]
         assert pass_suggestions(code, query) == [SENTENCE_VERIFY]
+
+
+class TestLongRequests:
+    """A request has no length limit: reading it must take time in proportion to its length."""
+
+    CODE = robot("", "    New Page    https://example.com\n    Click    text=Go\n")
+
+    @pytest.mark.parametrize("word", ["get ", "verify "])
+    def test_a_long_request_of_one_repeated_word_takes_under_two_seconds(self, word):
+        query = word * (80_000 // len(word))
+        start = time.perf_counter()
+        pass_suggestions(self.CODE, query)
+        assert time.perf_counter() - start < 2.0
+
+    def test_the_clause_of_each_verify_word_is_what_follows_it_up_to_the_clause_end(self):
+        query = "Go to x, verify there are 20 books, then verify 5 items and check the Total is 7. Done"
+        assert pass_quality._verify_clauses(query) == [
+            " there are 20 books", " 5 items ", " the total is 7"]
 
 
 def test_importing_the_checker_loads_no_config_database_or_llm_client():
