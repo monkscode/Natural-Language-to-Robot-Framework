@@ -30,7 +30,14 @@ reported and never hollow.
   and only when they read that same attribute (`Get Attribute  [title="A Light
   in the Attic"]  title` is flagged; `Get Attribute  text="X"  href` is not).
 - VERIFY_WITHOUT_ASSERTION: the query says verify / check / confirm / ensure /
-  validate / assert / make sure, and the test asserts nothing.
+  validate / assert / make sure, and the test asserts nothing. A read is an
+  assertion here when its element is found by a human-text literal that the
+  verify clause contains, ignoring case (`Get Text  text=Products` for "verify
+  the products page shows the Products heading"): the read fails if the text
+  is not there. The verify clause is what follows the verify word, up to a
+  comma, a semicolon, a sentence end, a line break, "and" or "then". Only Get
+  Text, Get Attribute and Get Property count (Get Element States passes on a
+  missing element), and only a literal on the LAST element part.
 - EMPTY_TEST: the test only starts a browser, opens or navigates pages, logs
   and closes, while the query asks for more than opening a page (or there is
   no query at all).
@@ -117,6 +124,13 @@ _SETUP_ONLY = {"new browser", "new context", "new page", "go to", "close browser
                "set browser timeout"}
 _TEXT_READERS = ("get text", "get texts")
 _LOCATOR_READERS = (*_TEXT_READERS, "get attribute", "get property")
+# Get Text, Get Attribute, Get Property: Browser's strict-mode getters, which fail
+# when their selector finds no element. `Get Texts` is no Browser keyword; Get
+# Element States is not one of them (it returns `detached` and passes).
+_PRESENCE_READERS = tuple(k for k in _LOCATOR_READERS if k != "get texts")
+# Where a verify clause ends, i.e. where the next instruction starts: a comma, a
+# semicolon, a sentence end, a line break, or "and" / "then".
+_CLAUSE_END = re.compile(r",\s|;|\.(?:\s|$)|\n|\b(?:and|then)\b", re.IGNORECASE)
 # The literal kinds that are an attribute of the element itself. Get Attribute /
 # Get Property returns such a literal only when it reads that same attribute.
 _ATTRIBUTE_LITERALS = {name: re.compile(p, re.IGNORECASE) for name, p in (
@@ -278,11 +292,16 @@ def _select_check_cannot_fail(variables: dict[str, str], stmts: list[_Statement]
     return None
 
 
+def _literals(locator: str, patterns: tuple[re.Pattern[str], ...] = _LITERALS) -> list[str]:
+    """Every human-text literal a locator embeds."""
+    found = [m.group(1).strip() for rx in patterns for m in rx.finditer(locator)]
+    return [lit for lit in found if lit]
+
+
 def _locator_literals(locator: str, query: str,
                       patterns: tuple[re.Pattern[str], ...] = _LITERALS) -> list[str]:
     lowered = query.lower()
-    found = [m.group(1).strip() for rx in patterns for m in rx.finditer(locator)]
-    return [lit for lit in found if lit and lit.lower() not in lowered]
+    return [lit for lit in _literals(locator, patterns) if lit.lower() not in lowered]
 
 
 def _element_part(locator: str) -> str:
@@ -313,6 +332,32 @@ def _answer_literals(stmt: _Statement, locator: str, query: str) -> list[str]:
     return _locator_literals(part, query, (_ATTRIBUTE_LITERALS[attribute],))
 
 
+def _verify_clauses(query: str) -> list[str]:
+    """What the query asks to verify: the words after each verify word, lower-cased."""
+    return [_CLAUSE_END.split(query[m.end():], maxsplit=1)[0].lower()
+            for m in _VERIFY_Q.finditer(query)]
+
+
+def _checks_presence(stmt: _Statement, variables: dict[str, str], clauses: list[str]) -> bool:
+    """A read that fails unless the text the query asks to verify is on the page.
+
+    The reader finds its element by a human-text literal that a verify clause
+    contains: `Get Text  text=Products` for "verify the page shows the Products
+    heading". A literal from another clause ("click the Login button") proves
+    nothing about what is verified.
+    """
+    if stmt.keyword not in _PRESENCE_READERS or not stmt.args:
+        return False
+    part = _element_part(_resolve(stmt.args[0], variables))
+    return any(lit.lower() in clause for lit in _literals(part) for clause in clauses)
+
+
+def _asserts(query: str, variables: dict[str, str], stmts: list[_Statement]) -> bool:
+    """True when the test holds an assertion, or a read that is one for this query."""
+    clauses = _verify_clauses(query)
+    return any(_is_assertion(s) or _checks_presence(s, variables, clauses) for s in stmts)
+
+
 def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]:
     """Every pass-quality shape found in one generated test, one Finding per shape.
 
@@ -327,7 +372,7 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
 
     if is_read and not any(s.keyword.startswith(_READERS) for s in stmts):
         found[READ_NOT_PERFORMED] = ""
-    if is_verify and not any(_is_assertion(s) for s in stmts):
+    if is_verify and not _asserts(query, variables, stmts):
         found[VERIFY_WITHOUT_ASSERTION] = ""
     select_locator = _select_check_cannot_fail(variables, stmts)
     if select_locator is not None:
