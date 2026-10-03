@@ -163,7 +163,7 @@ when it cannot compare:
 | FLAKE | `flake_retries - dryrun_repairs` is 0 on every generated run |
 | SALVAGE | no crewai Converter (salvage) call in any run's traces, and every generated run's planner answer is captured and parses (a generated run with no planner answer in its traces makes the line CANNOT) |
 | TOKENS (x4) | crewai prompt <= +10%, crewai completion <= +15%, browser-use prompt <= +5%, browser-use completion <= +15% (sum of per-query medians vs the baseline; a query whose own baseline runs spread more than 25%, or whose candidate median is 0, is listed, not summed; a family whose summed medians fall more than 25% below the baseline reads CANNOT — a lost measurement until shown otherwise) |
-| HOLLOW | no hollow pass outside the registry {(q10, READ_NOT_PERFORMED), (q05, READ_LOCATOR_IS_THE_ANSWER)} (`src/backend/core/pass_quality.py`) |
+| HOLLOW | no hollow pass outside the registry {(q05, READ_LOCATOR_IS_THE_ANSWER)} (`src/backend/core/pass_quality.py`) |
 
 Reported, never gated: the verified pass rate (passes minus hollow passes), passes read by
 a numeric id, dollars, the browser-use cache share, the median paired token change, and the
@@ -186,9 +186,3 @@ python -m bench.gate <candidate.csv> --rerun <candidate>-rerun1-q03.csv --rerun 
 A re-run that misses on the provider again stays pending and may be re-run again; a real
 failure is never re-run. A re-run recorded on other code (a different `git_sha` in its
 `.meta.json`) is refused.
-
-**The q10 add-on** (q10 run ten times after a planner change): write its query file with
-`python -m bench.gate --write-q10-queries <file>`, run
-`run_bench.py --queries <file> --repeats 10 --out <fresh>.csv`, then
-`python -m bench.gate --q10-addon <fresh>.csv`. It passes when at least 6 of the 10 tests
-read the titles.
