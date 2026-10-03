@@ -698,9 +698,11 @@ class TestWordsThatAreNotInstructions:
     def test_a_controls_name_is_not_an_instruction(self, query, body):
         assert shapes(self.page("https://example.com", body), query) == set()
 
-    def test_the_control_verb_still_asks_for_more_than_opening(self):
-        query = "Go to https://playwright.dev and click the Get started button"
-        assert shapes(self.page("https://playwright.dev"), query) == {EMPTY_TEST}
+    @pytest.mark.parametrize("verb", ["click", "clicks", "press", "presses", "tap", "taps", "hover", "hovers"])
+    def test_the_control_verb_still_asks_for_more_than_opening(self, verb):
+        query = f"Go to https://example.com and {verb} Login"
+        assert shapes(self.page("https://example.com"), query) == {EMPTY_TEST}
+        assert pass_suggestions(self.page("https://example.com"), query) == [SENTENCE_EMPTY]
 
     @pytest.mark.parametrize("query", [
         pytest.param("Go to https://playwright.dev, click the Get started button and get the page title",

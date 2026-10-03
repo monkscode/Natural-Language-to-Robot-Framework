@@ -106,7 +106,7 @@ _VERIFY_Q = re.compile(
 # that says nothing but "open X" is satisfied by a test that only opens X.
 _ACTION_Q = re.compile(
     r"\b(click|clicks|type|types|enter|enters|fill|fills|select|selects|search|searches|"
-    r"press|presses|submit|submits|log ?in|login|sign ?in|hover|scroll|upload|drag|choose|"
+    r"press|presses|tap|taps|submit|submits|log ?in|login|sign ?in|hover|hovers|scroll|upload|drag|choose|"
     r"add|remove|delete|sort|filter|count)\b", re.IGNORECASE)
 
 # Reader keywords, matched as a prefix of the normalised keyword name ("get text"
