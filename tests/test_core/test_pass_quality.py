@@ -305,27 +305,31 @@ class TestVerifyWithoutAssertion:
         return robot(self.SAUCE.replace("css=span.title", locator), self.LOGIN
                      + "    ${result}=    " + reader + "\n    Log    Retrieved: ${result}\n")
 
-    def test_a_read_located_by_the_text_to_verify_is_a_presence_check(self):
-        # mirrors d2762c18-8a5f-4714-b6cc-8b372e76bf53: the read fails when no element shows "Products"
-        assert shapes(self.heading_read("text=Products"), Q07) == set()
-
-    def test_the_text_to_verify_is_matched_ignoring_case(self):
-        assert shapes(self.heading_read('text="PRODUCTS"'), Q07) == set()
-
-    def test_get_attribute_on_the_text_to_verify_is_a_presence_check(self):
-        code = self.heading_read("text=Products", "Get Attribute    ${products_heading_locator}    class")
-        assert shapes(code, Q07) == set()
-
-    def test_a_literal_the_query_does_not_hold_is_no_presence_check(self):
-        assert shapes(self.heading_read("text=Swag Labs"), Q07) == {VERIFY_WITHOUT_ASSERTION}
-
-    def test_a_literal_from_another_clause_of_the_query_is_no_presence_check(self):
-        # "Login" is what the query clicks, not what it asks to verify: the button's text proves nothing
-        assert shapes(self.heading_read("text=Login"), Q07) == {VERIFY_WITHOUT_ASSERTION}
-
-    def test_a_literal_on_an_ancestor_part_is_no_presence_check(self):
-        code = self.heading_read('css=div:has-text("Products") >> span')
-        assert shapes(code, Q07) == {VERIFY_WITHOUT_ASSERTION}
+    @pytest.mark.parametrize("build, query", [
+        # mirrors d2762c18-8a5f-4714-b6cc-8b372e76bf53
+        pytest.param(lambda t: t.heading_read("text=Products"), Q07,
+                     id="text-literal-of-the-word-to-verify"),
+        pytest.param(lambda t: t.heading_read('text="PRODUCTS"'), Q07,
+                     id="same-literal-in-another-case"),
+        pytest.param(lambda t: t.heading_read(
+            "text=Products", "Get Attribute    ${products_heading_locator}    class"), Q07,
+            id="get-attribute-on-that-literal"),
+        pytest.param(lambda t: t.heading_read("text=Swag Labs"), Q07,
+                     id="literal-the-query-does-not-hold"),
+        # "Login" is what the query clicks, not what it asks to verify
+        pytest.param(lambda t: t.heading_read("text=Login"), Q07,
+                     id="literal-from-another-clause"),
+        pytest.param(lambda t: t.heading_read('css=div:has-text("Products") >> span'), Q07,
+                     id="literal-on-an-ancestor-part"),
+        pytest.param(lambda t: robot("${dropdown_locator}    id=dropdown\n",
+                                     "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                                     "    Select Options By    ${dropdown_locator}    label    Option 2\n"
+                                     "    ${selected_option}=    Get Text    text=Option 2\n"
+                                     "    Log    Retrieved: ${selected_option}\n"), Q08,
+                     id="state-request-read-by-its-text"),
+    ])
+    def test_a_read_that_is_only_logged_is_flagged_whatever_its_locator(self, build, query):
+        assert shapes(build(self), query) == {VERIFY_WITHOUT_ASSERTION}
 
     def test_get_element_states_never_fails_on_a_missing_element(self):
         # it returns `detached` instead of failing, so it proves nothing
