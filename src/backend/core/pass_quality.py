@@ -53,8 +53,8 @@ reported and never hollow.
 Pasted code (empty query): only the query-free rules run, SELECT_CHECK_CANNOT_FAIL
 and EMPTY_TEST.
 
-Referenced by: bench/gate_hollow.py (the bench gate's hollow registry). A later
-History / SSE pass-quality note will read it too (not built yet).
+Referenced by: bench/gate_hollow.py (the bench gate's hollow registry),
+api/history_endpoints.py (the History detail's suggestions, via pass_suggestions).
 Depends on: re, dataclasses. Standard library only: importing this module must
 never load config, a database driver or an LLM client.
 """
@@ -439,3 +439,42 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
 def hollow_shapes(robot_code: str, user_query: str | None) -> set[str]:
     """The hollow shapes (never FRAGILE_NUMERIC_ID) of one test."""
     return {f.shape for f in check_pass_quality(robot_code, user_query) if f.hollow}
+
+
+# The user-facing sentences of the History drawer's "Suggestion" block, one per
+# hollow shape. FRAGILE_NUMERIC_ID has none: that green is true, so it is never shown.
+_SUGGESTION_TEXT_LIMIT = 40  # check_pass_quality already cuts a literal's detail to this
+_SUGGESTION_SENTENCES = {
+    READ_NOT_PERFORMED: ("The request asks to get a value, and this test does not read one. "
+                         "Consider adding a read step."),
+    SELECT_CHECK_CANNOT_FAIL: ("The check reads the whole dropdown's text, which lists every option. "
+                               "Consider checking the selected option instead."),
+    VERIFY_WITHOUT_ASSERTION: ("The request asks to verify something, and this test reads values "
+                               "without comparing them. Consider adding a check."),
+    EMPTY_TEST: "This test only opens the page. Consider generating it again with the steps you need.",
+}
+_LOCATOR_ANSWER_SENTENCE = ('This test finds the element by its text "{text}". '
+                            "If that text can change, consider locating it by position instead.")
+
+
+def pass_suggestions(robot_code: str, user_query: str | None) -> list[str]:
+    """The sentences to show a user about one PASSED test, in SHAPE_ORDER.
+
+    One sentence per hollow shape; EMPTY_TEST, when present, is returned alone
+    (an empty test also trips the other shapes). The text in the locator sentence
+    is the checker's detail, which it cuts at 40 characters: a detail of that
+    length is treated as cut and shown with an ellipsis. Pure, like the checker.
+    """
+    findings = [f for f in check_pass_quality(robot_code, user_query) if f.hollow]
+    if any(f.shape == EMPTY_TEST for f in findings):
+        return [_SUGGESTION_SENTENCES[EMPTY_TEST]]
+    sentences = []
+    for finding in findings:
+        if finding.shape == READ_LOCATOR_IS_THE_ANSWER:
+            text = finding.detail
+            if len(text) >= _SUGGESTION_TEXT_LIMIT:
+                text = text[:_SUGGESTION_TEXT_LIMIT] + "…"
+            sentences.append(_LOCATOR_ANSWER_SENTENCE.format(text=text))
+        else:
+            sentences.append(_SUGGESTION_SENTENCES[finding.shape])
+    return sentences

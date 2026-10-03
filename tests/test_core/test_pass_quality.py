@@ -23,6 +23,7 @@ from src.backend.core.pass_quality import (
     Finding,
     check_pass_quality,
     hollow_shapes,
+    pass_suggestions,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -486,6 +487,112 @@ class TestRobotSyntax:
         code = robot("", "    New Page    https://books.toscrape.com\n")
         assert [f.shape for f in check_pass_quality(code, Q10)] == [
             READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION, EMPTY_TEST]
+
+
+SENTENCE_READ_NOT_PERFORMED = ("The request asks to get a value, and this test does not read one. "
+                               "Consider adding a read step.")
+SENTENCE_SELECT_CHECK = ("The check reads the whole dropdown's text, which lists every option. "
+                         "Consider checking the selected option instead.")
+SENTENCE_VERIFY = ("The request asks to verify something, and this test reads values without "
+                   "comparing them. Consider adding a check.")
+SENTENCE_EMPTY = "This test only opens the page. Consider generating it again with the steps you need."
+
+
+def locator_answer_sentence(text: str) -> str:
+    return (f'This test finds the element by its text "{text}". '
+            "If that text can change, consider locating it by position instead.")
+
+
+def answer_in_locator(literal: str) -> str:
+    """q05's shape: the cell is found by a text literal the query does not contain, then read."""
+    return robot("${cell}    text=\"" + literal + "\" >> nth=0\n",
+                 "    New Page    https://the-internet.herokuapp.com/tables\n"
+                 "    ${value}=    Get Text    ${cell}\n"
+                 "    Should Not Be Empty    ${value}\n")
+
+
+class TestPassSuggestions:
+    def test_each_hollow_shape_has_its_sentence(self):
+        select = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                           "    Select Options By    id=dropdown    label    Option 2\n"
+                           "    Get Text    css=#dropdown    contains    Option 2\n")
+        verify = robot("", "    New Page    https://www.saucedemo.com\n"
+                           "    Click    css=#login-button\n")
+        read = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    Click    css=h3 a\n")
+        empty = robot("", "    New Page    https://the-internet.herokuapp.com/tables\n")
+        assert pass_suggestions(select, Q08) == [SENTENCE_SELECT_CHECK]
+        assert pass_suggestions(verify, "Go to https://www.saucedemo.com and verify the login button works") == [
+            SENTENCE_VERIFY]
+        assert pass_suggestions(read, "Go to https://books.toscrape.com and get the title of the first book") == [
+            SENTENCE_READ_NOT_PERFORMED]
+        assert pass_suggestions(empty, Q04) == [SENTENCE_EMPTY]
+        assert pass_suggestions(answer_in_locator("John"), Q05) == [locator_answer_sentence("John")]
+
+    def test_a_clean_test_has_no_sentence(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                         "    Select Options By    id=dropdown    label    Option 2\n"
+                         "    ${selected}=    Get Selected Options    id=dropdown\n"
+                         "    Should Be Equal    ${selected}[0]    Option 2\n")
+        assert pass_suggestions(code, Q08) == []
+
+    @pytest.mark.parametrize("literal, shown", [
+        pytest.param("X" * 39, "X" * 39, id="39-shown-whole"),
+        pytest.param("X" * 40, "X" * 40 + "…", id="40-treated-as-cut"),
+        pytest.param("X" * 41, "X" * 40 + "…", id="41-cut-at-40"),
+        pytest.param("HOTSTYLE Loafers , Running Shoes For Men (Black)",
+                     "HOTSTYLE Loafers , Running Shoes For Men…", id="real-product-title"),
+    ])
+    def test_the_text_is_cut_at_forty_characters_with_an_ellipsis(self, literal, shown):
+        assert pass_suggestions(answer_in_locator(literal), Q05) == [locator_answer_sentence(shown)]
+
+    def test_empty_test_is_shown_alone(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n")
+        # the checker finds three shapes here; the user is told the one that explains the others
+        assert [f.shape for f in check_pass_quality(code, Q10)] == [
+            READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION, EMPTY_TEST]
+        assert pass_suggestions(code, Q10) == [SENTENCE_EMPTY]
+
+    def test_pasted_code_with_an_empty_test_gets_the_empty_sentence(self):
+        code = robot("", "    New Page    https://example.com\n")
+        assert pass_suggestions(code, None) == [SENTENCE_EMPTY]
+        assert pass_suggestions(code, "") == [SENTENCE_EMPTY]
+
+    def test_pasted_code_that_does_something_has_no_sentence(self):
+        code = robot("", "    New Page    https://example.com\n    Click    css=a\n")
+        assert pass_suggestions(code, None) == []
+
+    def test_two_shapes_come_in_the_checkers_order(self):
+        code = answer_in_locator("John").replace("    Should Not Be Empty    ${value}\n",
+                                                 "    Log    ${value}\n")
+        query = Q05 + " and verify it"
+        assert [f.shape for f in check_pass_quality(code, query)] == [
+            READ_LOCATOR_IS_THE_ANSWER, VERIFY_WITHOUT_ASSERTION]
+        assert pass_suggestions(code, query) == [locator_answer_sentence("John"), SENTENCE_VERIFY]
+
+    def test_a_read_that_is_missing_comes_before_a_missing_assertion(self):
+        code = books(GET_LENGTH + "    Log    ${elements_count}\n")
+        assert [f.shape for f in check_pass_quality(code, Q10)] == [
+            READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION]
+        assert pass_suggestions(code, Q10) == [SENTENCE_READ_NOT_PERFORMED, SENTENCE_VERIFY]
+
+    def test_a_fragile_numeric_id_alone_has_no_sentence(self):
+        code = robot("${pinned_project_locator}    id=880667900\n",
+                     "    New Page    https://github.com/monkscode\n"
+                     "    ${name}=    Get Text    ${pinned_project_locator}\n"
+                     "    Log    ${name}\n")
+        assert check_pass_quality(code, Q01) == [Finding(FRAGILE_NUMERIC_ID, "id=880667900")]
+        assert pass_suggestions(code, Q01) == []
+
+    def test_a_fragile_numeric_id_beside_a_hollow_shape_adds_no_sentence(self):
+        code = robot("${pinned_project_locator}    id=880667900\n",
+                     "    New Page    https://github.com/monkscode\n"
+                     "    ${name}=    Get Text    ${pinned_project_locator}\n"
+                     "    Log    ${name}\n")
+        query = Q01 + " and verify it"
+        assert [f.shape for f in check_pass_quality(code, query)] == [
+            VERIFY_WITHOUT_ASSERTION, FRAGILE_NUMERIC_ID]
+        assert pass_suggestions(code, query) == [SENTENCE_VERIFY]
 
 
 def test_importing_the_checker_loads_no_config_database_or_llm_client():
