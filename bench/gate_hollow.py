@@ -1,44 +1,41 @@
-"""Bench gate, part 3: hollow passes — the (query, shape) registry, the verified rate, the q10 add-on.
+"""Bench gate, part 3: hollow passes — the (query, shape) registry and the verified rate.
 
 A hollow pass is a passed run whose test src/backend/core/pass_quality.py flags
 with a hollow shape. The gate FAILS on any hollow (query, shape) pair NOT in
-REGISTERED_HOLLOW. Registered today (owner, 2026-09-25): (q10, READ_NOT_PERFORMED)
-— the planner drops the read; a planner rule is approved — and (q05,
+REGISTERED_HOLLOW. Registered today (owner, 2026-09-25): (q05,
 READ_LOCATOR_IS_THE_ANSWER) — bs builds the locator from the observed text.
+(q10, READ_NOT_PERFORMED) was registered until 2026-10-03. The owner ruled on
+2026-10-01 that a q10 test which only counts is not hollow, and the rule no
+longer fires on one: the count the query asks to verify is asserted. A q10 test
+that still trips the rule asserts no count in a form the checker recognises, and
+fails the gate like any other hollow pass — read the test before calling it
+hollow.
 (q08, SELECT_CHECK_CANNOT_FAIL) is deliberately NOT registered: this gate lands
 BEFORE the q08 normalizer fix, so every pre-fix bench that holds one fails here —
 the intended signal. After the fix, its return is a live regression.
 
 REPORTED, never gated: the verified pass rate (passes minus hollow passes, over
-all slots — 4 of 4 recent unchanged benches would fail a 96.7% verified gate:
-93.3 / 86.7 / 83.3 / 70.0%); FRAGILE_NUMERIC_ID passes (right today, pinned to
+all slots — 3 of the 4 benches of 2026-09-16..24 would fail a 96.7% verified gate:
+96.7 / 90.0 / 90.0 / 80.0%); FRAGILE_NUMERIC_ID passes (right today, pinned to
 one repository id); and a standing line that a read of the wrong cell (the q05
 wrong column, 3555f609-1258-48df-8188-ecf1a07fa12a) is not statically detectable.
 
-The q10 add-on (a later bench runs q10 ten times after the planner read rule):
-PASS when at least Q10_ADDON_MIN_READS of exactly Q10_ADDON_RUNS runs perform a
-read — pass_quality's READ_NOT_PERFORMED does not fire on the run's test. A run
-with no test (a generation error) does not read.
-
 Referenced by: bench/gate.py.
 Depends on: src/backend/core/pass_quality.py, bench/gate_inputs.py (GateLine, Run,
-Slot, PASSED, classify).
+Slot, PASSED).
 """
 
 from collections import Counter
 
-from bench.gate_inputs import PASSED, GateLine, Run, Slot, classify
+from bench.gate_inputs import PASSED, GateLine, Run, Slot
 from src.backend.core.pass_quality import (
     FRAGILE_NUMERIC_ID,
     READ_LOCATOR_IS_THE_ANSWER,
-    READ_NOT_PERFORMED,
     check_pass_quality,
 )
 
-REGISTERED_HOLLOW = frozenset({("q10", READ_NOT_PERFORMED), ("q05", READ_LOCATOR_IS_THE_ANSWER)})
+REGISTERED_HOLLOW = frozenset({("q05", READ_LOCATOR_IS_THE_ANSWER)})
 WRONG_CELL_EXAMPLE = "3555f609-1258-48df-8188-ecf1a07fa12a"
-Q10_ADDON_RUNS = 10
-Q10_ADDON_MIN_READS = 6
 
 
 def _code(run: Run) -> str | None:
@@ -92,22 +89,3 @@ def hollow_lines(slots: list[Slot]) -> list[GateLine]:
         GateLine("NOT CHECKED", "INFO", "a read of the wrong cell is not statically detectable "
                  f"(e.g. the q05 wrong column, {WRONG_CELL_EXAMPLE})"),
     ]
-
-
-def q10_addon_line(runs: list[Run]) -> GateLine:
-    reads, details = 0, []
-    for run in runs:
-        code = _code(run)
-        if code is None:
-            outcome, reason = classify(run)
-            details.append(f"no test: {run.label} ({outcome}{': ' + reason if reason else ''})")
-            continue
-        shapes = {f.shape for f in check_pass_quality(code, run.row.get("query") or "")}
-        if READ_NOT_PERFORMED in shapes:
-            details.append(f"no read: {run.label}")
-        else:
-            reads += 1
-            details.append(f"reads: {run.label}")
-    status = "PASS" if reads >= Q10_ADDON_MIN_READS else "FAIL"
-    return GateLine("Q10 READS", status, f"{reads}/{len(runs)} runs read the titles "
-                    f"(acceptance >= {Q10_ADDON_MIN_READS}/{Q10_ADDON_RUNS})", details)

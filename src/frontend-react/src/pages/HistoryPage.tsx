@@ -105,6 +105,10 @@ interface RunDetail extends Run {
   // sentence map only covers execution-time failure types.
   error_message?: string | null
   failure_sentence?: string | null
+  // Only present when status is passed and the run has code (the server
+  // withholds the key for every other status). Finished sentences; an empty
+  // array means there is nothing to say.
+  suggestions?: string[]
 }
 
 interface HistoryResponse {
@@ -528,6 +532,20 @@ function RunDrawerCode({ d, detailError, copied, onCopy, onDownload }: Readonly<
       </div>
 
       {drawerCodeBody(detailError, d)}
+
+      {/* Pass-quality suggestions: finished sentences the server sends for a
+          PASSED run only. A quiet muted block, no icon and no colour — a
+          suggestion the user may take or leave, shown nowhere else. */}
+      {d?.status === 'passed' && d.suggestions && d.suggestions.length > 0 && (
+        <div className="flex shrink-0 flex-col gap-1">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {d.suggestions.length === 1 ? 'Suggestion' : 'Suggestions'}
+          </span>
+          {d.suggestions.map(s => (
+            <p key={s} className="text-sm text-muted-foreground break-words">{s}</p>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
