@@ -607,12 +607,165 @@ class TestPassSuggestions:
         assert pass_suggestions(code, query) == [SENTENCE_VERIFY]
 
 
+class TestWordsThatAreNotInstructions:
+    """A URL and a control's name hold words that look like instructions and are not."""
+
+    @staticmethod
+    def page(url: str, body: str = "") -> str:
+        return robot("", f"    New Page    {url}\n" + body)
+
+    @pytest.mark.parametrize("query, url", [
+        pytest.param("Open https://the-internet.herokuapp.com/login",
+                     "https://the-internet.herokuapp.com/login", id="login-path"),
+        pytest.param("Open https://the-internet.herokuapp.com/upload",
+                     "https://the-internet.herokuapp.com/upload", id="upload-path"),
+        pytest.param("Open www.example.com/login", "https://www.example.com/login", id="www-host"),
+        pytest.param("Open example.com/login", "https://example.com/login", id="host-and-path"),
+        pytest.param("Open https://example.com/get-started", "https://example.com/get-started",
+                     id="read-word-in-the-path"),
+        pytest.param("Open https://example.com/verify-email", "https://example.com/verify-email",
+                     id="verify-word-in-the-path"),
+        pytest.param("Open (https://example.com/login).", "https://example.com/login",
+                     id="url-in-brackets-then-a-full-stop"),
+    ])
+    def test_a_word_in_a_url_is_not_an_instruction(self, query, url):
+        assert shapes(self.page(url), query) == set()
+        assert pass_suggestions(self.page(url), query) == []
+
+    def test_a_real_instruction_beside_a_url_is_still_read(self):
+        query = "Open https://the-internet.herokuapp.com/login and log in as tomsmith"
+        assert shapes(self.page("https://the-internet.herokuapp.com/login"), query) == {EMPTY_TEST}
+
+    def test_a_click_beside_a_url_with_a_word_in_it_is_satisfied(self):
+        query = "Go to https://example.com/get-started and click the Sign up button"
+        code = self.page("https://example.com/get-started", "    Click    text=Sign up\n")
+        assert pass_suggestions(code, query) == []
+
+    def test_a_read_beside_a_url_with_a_word_in_it_is_still_asked_for(self):
+        query = "Go to https://example.com/get-started and get the page title"
+        code = self.page("https://example.com/get-started", "    Click    text=Go\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_the_literal_check_reads_the_whole_request_url_included(self):
+        code = self.page("https://shop.example.com/Nike-Air",
+                         '    ${name}=    Get Text    text="Nike-Air" >> nth=0\n')
+        assert shapes(code, "Open https://shop.example.com/Nike-Air and get the name of the first product") == set()
+        assert shapes(code, "Open https://shop.example.com and get the name of the first product") == {
+            READ_LOCATOR_IS_THE_ANSWER}
+
+    @pytest.mark.parametrize("query, body", [
+        pytest.param("Go to https://playwright.dev and click the Get started button",
+                     "    Click    text=Get started\n", id="get-in-a-button-name"),
+        pytest.param("Go to https://example.com/blog and click Read more on the first post",
+                     "    Click    text=Read more >> nth=0\n", id="read-in-a-link-name"),
+        pytest.param("Go to https://example.com/checkout and click Confirm",
+                     "    Click    id=confirm\n", id="confirm-is-a-button-name"),
+        pytest.param("Go to https://example.com and clicks the Verify email link",
+                     "    Click    text=Verify email\n", id="clicks"),
+        pytest.param("Go to https://example.com and press the Get started button",
+                     "    Click    text=Get started\n", id="press"),
+        pytest.param("Go to https://example.com and presses the Get started button",
+                     "    Click    text=Get started\n", id="presses"),
+        pytest.param("Go to https://example.com and tap the Get started button",
+                     "    Click    text=Get started\n", id="tap"),
+        pytest.param("Go to https://example.com and taps the Get started button",
+                     "    Click    text=Get started\n", id="taps"),
+        pytest.param("Go to https://example.com and hover the Read more link",
+                     "    Hover    text=Read more\n", id="hover"),
+        pytest.param("Go to https://example.com and hovers the Read more link",
+                     "    Hover    text=Read more\n", id="hovers"),
+    ])
+    def test_a_controls_name_is_not_an_instruction(self, query, body):
+        assert shapes(self.page("https://example.com", body), query) == set()
+
+    def test_the_control_verb_still_asks_for_more_than_opening(self):
+        query = "Go to https://playwright.dev and click the Get started button"
+        assert shapes(self.page("https://playwright.dev"), query) == {EMPTY_TEST}
+
+    @pytest.mark.parametrize("query", [
+        pytest.param("Go to https://playwright.dev, click the Get started button and get the page title",
+                     id="and"),
+        pytest.param("Go to https://playwright.dev, click the Get started button, get the page title",
+                     id="comma"),
+        pytest.param("Go to https://playwright.dev, click the Get started button then get the page title",
+                     id="then"),
+    ])
+    def test_a_request_after_the_controls_name_is_still_read(self, query):
+        code = self.page("https://playwright.dev", "    Click    text=Get started\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_verify_after_the_controls_name_is_still_read(self):
+        query = "Go to https://example.com, click Login and verify the dashboard is shown"
+        assert shapes(self.page("https://example.com", "    Click    text=Login\n"), query) == {
+            VERIFY_WITHOUT_ASSERTION}
+
+
+class TestCheckThatMeansTick:
+    """`check` is a verify word unless it ticks a box or means "check out"."""
+
+    BOXES = "https://the-internet.herokuapp.com/checkboxes"
+
+    @staticmethod
+    def page(url: str, body: str = "") -> str:
+        return robot("", f"    New Page    {url}\n" + body)
+
+    @pytest.mark.parametrize("query, url, body", [
+        pytest.param(f"Go to {BOXES} and check checkbox 1", BOXES,
+                     "    Check Checkbox    css=#checkboxes input >> nth=0\n", id="checkbox"),
+        pytest.param(f"Go to {BOXES} and checks checkbox 1", BOXES,
+                     "    Check Checkbox    css=#checkboxes input >> nth=0\n", id="checks"),
+        pytest.param("Go to https://example.com/login, check the Remember me box and click Login",
+                     "https://example.com/login",
+                     "    Check Checkbox    text=Remember me\n    Click    text=Login\n", id="box-then-a-click"),
+        pytest.param("Go to https://example.com/form and check the Male radio button",
+                     "https://example.com/form", "    Check Checkbox    css=#male\n", id="radio-button"),
+        pytest.param("Go to https://www.saucedemo.com, add the backpack to the cart and check out",
+                     "https://www.saucedemo.com",
+                     "    Click    id=add-to-cart-sauce-labs-backpack\n    Click    id=checkout\n", id="check-out"),
+    ])
+    def test_checking_a_box_or_checking_out_is_an_action_not_a_verify(self, query, url, body):
+        assert shapes(self.page(url, body), query) == set()
+
+    def test_an_action_check_still_asks_for_more_than_opening(self):
+        assert shapes(self.page(self.BOXES), f"Go to {self.BOXES} and check checkbox 1") == {EMPTY_TEST}
+        assert pass_suggestions(self.page(self.BOXES), f"Go to {self.BOXES} and check checkbox 1") == [
+            SENTENCE_EMPTY]
+
+    @pytest.mark.parametrize("query, url, body", [
+        pytest.param(f"Go to {BOXES}, check that checkbox 1 is checked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="that-and-is"),
+        pytest.param(f"Go to {BOXES}, check if checkbox 1 is ticked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="if"),
+        pytest.param(f"Go to {BOXES}, check whether the box is ticked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="whether"),
+        pytest.param(f"Go to {BOXES}, check the boxes are ticked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="are"),
+        pytest.param("Open example.com and check the page title is not empty", "https://example.com",
+                     "    ${title}=    Get Title\n    Log    ${title}\n", id="no-box-at-all"),
+        pytest.param("Open example.com and check outside links work", "https://example.com",
+                     "    Click    text=Go\n", id="outside-is-not-out"),
+    ])
+    def test_a_check_that_states_something_is_still_a_verify(self, query, url, body):
+        assert shapes(self.page(url, body), query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_box_in_a_later_clause_does_not_make_this_check_an_action(self):
+        query = "Go to https://example.com, check the title is not empty and click the Remember me box"
+        code = self.page("https://example.com", "    Click    text=Remember me\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_verify_word_after_an_action_check_is_still_a_verify(self):
+        query = f"Go to {self.BOXES}, check checkbox 1 and verify it is ticked"
+        code = self.page(self.BOXES, "    Check Checkbox    css=#checkboxes input >> nth=0\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+
 class TestLongRequests:
     """A request has no length limit: reading it must take time in proportion to its length."""
 
     CODE = robot("", "    New Page    https://example.com\n    Click    text=Go\n")
 
-    @pytest.mark.parametrize("word", ["get ", "verify "])
+    @pytest.mark.parametrize("word", ["get ", "verify ", "check ", "check box ", "click ", "https://a.com/get ",
+                                      "(", "a.", "https://a.com/get"])
     def test_a_long_request_of_one_repeated_word_takes_under_two_seconds(self, word):
         query = word * (80_000 // len(word))
         start = time.perf_counter()

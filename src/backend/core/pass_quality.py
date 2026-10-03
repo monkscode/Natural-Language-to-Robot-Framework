@@ -25,7 +25,9 @@ reported and never hollow.
   an assertion that uses a variable a counting keyword filled (`Should Be True
   ${n} == 20`), with N as a whole number ("1920", "20.5" and "20s" hold no 20).
   A number word ("twenty"), another number, or no assertion on the count: still
-  reported.
+  reported. Words inside a URL ("/get-started") and the words after click /
+  press / tap / hover, up to the clause end ("click the Get started button"),
+  are not read as instructions.
 - SELECT_CHECK_CANNOT_FAIL: `Select Options By  L  <attr>  V`, then `Get Text`
   on the same <select> checked with `Should Contain  <that text>  V` (or inline
   `contains V`). A whole <select>'s text lists every option, so the check passes
@@ -42,10 +44,13 @@ reported and never hollow.
   and only when they read that same attribute (`Get Attribute  [title="A Light
   in the Attic"]  title` is flagged; `Get Attribute  text="X"  href` is not).
 - VERIFY_WITHOUT_ASSERTION: the query says verify / check / confirm / ensure /
-  validate / assert / make sure, and the test asserts nothing.
+  validate / assert / make sure, and the test asserts nothing. A `check` that
+  ticks a box ("check checkbox 1": its clause names a checkbox, box or radio and
+  holds no that / if / whether / is / are) or means "check out" is an action.
 - EMPTY_TEST: the test only starts a browser, opens or navigates pages, logs
   and closes, while the query asks for more than opening a page (or there is
-  no query at all).
+  no query at all). A URL's words are no request ("Open example.com/login" asks
+  for nothing more); an action `check` and a click's verb are requests.
 - FRAGILE_NUMERIC_ID (reported only): a read query's reader locates its element
   by a numeric id such as `id=880667900` (a repository id). It is right today
   and pinned to one record.
@@ -131,9 +136,24 @@ _SETUP_ONLY = {"new browser", "new context", "new page", "go to", "close browser
                "set browser timeout"}
 _TEXT_READERS = ("get text", "get texts")
 _LOCATOR_READERS = (*_TEXT_READERS, "get attribute", "get property")
-# Where a verify clause ends, i.e. where the next instruction starts: a comma, a
-# semicolon, a sentence end, a line break, or "and" / "then".
+# Where a clause ends, i.e. where the next instruction starts: a comma, a
+# semicolon, a sentence end, a line break, or "and" / "then". It ends a read or
+# verify clause, a control's name and the clause of a `check`.
 _CLAUSE_END = re.compile(r",\s|;|\.(?:\s|$)|\n|\b(?:and|then)\b", re.IGNORECASE)
+# A whitespace-free token that is a URL: it holds "://", starts with "www.", or is a
+# dotted host name followed by "/" and a path ("example.com/login"). An opening
+# bracket or quote in front of it belongs to the token.
+_HOST_AND_PATH = re.compile(r"(?:[\w-]+\.)+[a-z]{2,}/", re.IGNORECASE)
+_OPENING_PUNCTUATION = "([\"'<"
+_TRAILING_PUNCTUATION = ",;.!?)]}\"'>"
+_WHITESPACE_FREE = re.compile(r"\S+")
+# The words after these verbs are a control's name ("click the Get started button").
+_CONTROL_VERB = re.compile(r"\b(?:click|clicks|press|presses|tap|taps|hover|hovers)\b", re.IGNORECASE)
+# `check` / `checks` ticks a box or means "check out" instead of verifying when it is
+# followed by "out", or its clause names a box and states nothing ("is", "that" ...).
+_CHECK_OUT = re.compile(r"\s+out\b", re.IGNORECASE)
+_BOX_WORD = re.compile(r"\b(?:checkbox(?:es)?|box(?:es)?|radios?)\b", re.IGNORECASE)
+_STATES_SOMETHING = re.compile(r"\b(?:that|if|whether|is|are)\b", re.IGNORECASE)
 # A request for every item of a collection, not for one value: "all books", "each row".
 _COLLECTION_WORD = re.compile(r"\b(?:all|every|each)\b", re.IGNORECASE)
 # The literal kinds that are an attribute of the element itself. Get Attribute /
@@ -338,34 +358,102 @@ def _answer_literals(stmt: _Statement, locator: str, query: str) -> list[str]:
     return _locator_literals(part, query, (_ATTRIBUTE_LITERALS[attribute],))
 
 
-def _clauses_after(words: re.Pattern[str], query: str) -> list[str]:
-    """The words after a match of `words`, up to the end of the clause, lower-cased.
+def _clause_end_positions(text: str) -> list[int]:
+    return [m.start() for m in _CLAUSE_END.finditer(text)]
+
+
+def _clause_end(ends: list[int], text: str, after: int) -> int:
+    """Where the clause that holds position `after` ends (`ends` from `_clause_end_positions`)."""
+    i = bisect_left(ends, after)
+    return ends[i] if i < len(ends) else len(text)
+
+
+def _is_url(token: str) -> bool:
+    token = token.lstrip(_OPENING_PUNCTUATION)
+    return ("://" in token or (token[:4].lower() == "www." and len(token) > 4)
+            or bool(_HOST_AND_PATH.match(token)))
+
+
+def _without_urls(query: str) -> str:
+    """`query` with every URL token removed; the punctuation that ends one stays, so clauses still end."""
+    def drop(m: re.Match[str]) -> str:
+        token = m.group()
+        return token[len(token.rstrip(_TRAILING_PUNCTUATION)):] if _is_url(token) else token
+    return _WHITESPACE_FREE.sub(drop, query)
+
+
+def _without_control_names(text: str) -> str:
+    """`text` with the words after click / press / tap / hover removed, up to the clause end; the verb stays."""
+    ends = _clause_end_positions(text)
+    pieces, kept = [], 0
+    for m in _CONTROL_VERB.finditer(text):
+        if m.start() < kept:      # inside a control name already removed
+            continue
+        pieces.append(text[kept:m.end()] + " ")
+        kept = _clause_end(ends, text, m.end())
+    pieces.append(text[kept:])
+    return "".join(pieces)
+
+
+def _request_words(query: str) -> str:
+    """The words of a request that can be instructions: no URL, no control's name."""
+    return _without_control_names(_without_urls(query))
+
+
+def _is_action_check(m: re.Match[str], text: str, ends: list[int],
+                     boxes: list[int], statements: list[int]) -> bool:
+    """True when this `check` ticks a box or means "check out" instead of verifying."""
+    if _CHECK_OUT.match(text, m.end()):
+        return True
+    end = _clause_end(ends, text, m.end())
+
+    def holds(starts: list[int]) -> bool:
+        i = bisect_left(starts, m.end())
+        return i < len(starts) and starts[i] < end
+    return holds(boxes) and not holds(statements)
+
+
+def _verify_words(text: str) -> list[re.Match[str]]:
+    """The verify words of a request: every verify word except a `check` that is an action."""
+    found = list(_VERIFY_Q.finditer(text))
+    if not any(m.group(1).lower() in ("check", "checks") for m in found):
+        return found
+    ends = _clause_end_positions(text)
+    boxes = [m.start() for m in _BOX_WORD.finditer(text)]
+    statements = [m.start() for m in _STATES_SOMETHING.finditer(text)]
+    return [m for m in found if m.group(1).lower() not in ("check", "checks")
+            or not _is_action_check(m, text, ends, boxes, statements)]
+
+
+def _clauses_after(matches: list[re.Match[str]], text: str) -> list[str]:
+    """The words after a match, up to the end of the clause, lower-cased.
 
     One clause per stretch between two clause ends: a later match in the same
     stretch would get the tail of this clause, which holds no word or number the
     whole clause does not. The clause ends are found once and each match's end by
     bisect, so a long request takes time in proportion to its length.
     """
-    ends = [m.start() for m in _CLAUSE_END.finditer(query)]
+    ends = _clause_end_positions(text)
     clauses = []
     previous = -1
-    for m in words.finditer(query):
+    for m in matches:
         i = bisect_left(ends, m.end())
         if i == previous:
             continue
         previous = i
-        clauses.append(query[m.end():ends[i] if i < len(ends) else len(query)].lower())
+        clauses.append(text[m.end():_clause_end(ends, text, m.end())].lower())
     return clauses
 
 
 def _verify_clauses(query: str) -> list[str]:
     """What the query asks to verify: the words after each verify word."""
-    return _clauses_after(_VERIFY_Q, query)
+    return _clauses_after(_verify_words(query), query)
 
 
 def _asks_for_a_whole_collection(query: str) -> bool:
     """True when a read clause holds all / every / each: "get the titles of all books"."""
-    return any(_COLLECTION_WORD.search(clause) for clause in _clauses_after(_READ_Q, query))
+    return any(_COLLECTION_WORD.search(clause)
+               for clause in _clauses_after(list(_READ_Q.finditer(query)), query))
 
 
 def _whole_numbers(text: str) -> set[int]:
@@ -422,13 +510,14 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
     query runs only the query-free rules.
     """
     query = (user_query or "").strip()
+    request = _request_words(query)   # the words that can be instructions; `query` keeps the rest
     variables, stmts = _parse(robot_code)
     found: dict[str, str] = {}
-    is_read = bool(query) and bool(_READ_Q.search(query))
-    is_verify = bool(query) and bool(_VERIFY_Q.search(query))
+    is_read = bool(query) and bool(_READ_Q.search(request))
+    is_verify = bool(query) and bool(_verify_words(request))
 
     if (is_read and not any(s.keyword.startswith(_READERS) for s in stmts)
-            and not _count_is_checked(query, variables, stmts)):
+            and not _count_is_checked(request, variables, stmts)):
         found[READ_NOT_PERFORMED] = ""
     if is_verify and not any(_is_assertion(s) for s in stmts):
         found[VERIFY_WITHOUT_ASSERTION] = ""
@@ -445,8 +534,8 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
                 found.setdefault(READ_LOCATOR_IS_THE_ANSWER, literals[0][:40])
             if _NUMERIC_ID.search(locator):
                 found.setdefault(FRAGILE_NUMERIC_ID, locator[:80])
-    asks_more = not query or bool(_READ_Q.search(query) or _VERIFY_Q.search(query)
-                                  or _ACTION_Q.search(query))
+    asks_more = not query or bool(_READ_Q.search(request) or _VERIFY_Q.search(request)
+                                  or _ACTION_Q.search(request))
     if asks_more and all(s.keyword in _SETUP_ONLY for s in stmts):
         found[EMPTY_TEST] = ""
     return [Finding(shape, found[shape]) for shape in SHAPE_ORDER if shape in found]
