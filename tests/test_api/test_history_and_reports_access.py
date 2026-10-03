@@ -865,7 +865,7 @@ _SUG_CLICKS = (
     "    Close Browser\n"
 )
 _SUG_EMPTY_SENTENCE = (
-    "This test only opens the page. Consider generating it again with the steps you need."
+    "This test only opens the page. Consider adding the steps you need."
 )
 
 

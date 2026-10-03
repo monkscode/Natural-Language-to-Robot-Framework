@@ -525,9 +525,9 @@ SENTENCE_READ_NOT_PERFORMED = ("The request asks to get a value, and this test d
                                "Consider adding a read step.")
 SENTENCE_SELECT_CHECK = ("The check reads the whole dropdown's text, which lists every option. "
                          "Consider checking the selected option instead.")
-SENTENCE_VERIFY = ("The request asks to verify something, and this test reads values without "
-                   "comparing them. Consider adding a check.")
-SENTENCE_EMPTY = "This test only opens the page. Consider generating it again with the steps you need."
+SENTENCE_VERIFY = ("The request asks to verify something, and this test never compares what it "
+                   "finds with the expected value. Consider adding a check.")
+SENTENCE_EMPTY = "This test only opens the page. Consider adding the steps you need."
 
 
 def locator_answer_sentence(text: str) -> str:

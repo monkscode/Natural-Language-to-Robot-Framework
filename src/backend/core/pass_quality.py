@@ -561,9 +561,9 @@ _SUGGESTION_SENTENCES = {
                          "Consider adding a read step."),
     SELECT_CHECK_CANNOT_FAIL: ("The check reads the whole dropdown's text, which lists every option. "
                                "Consider checking the selected option instead."),
-    VERIFY_WITHOUT_ASSERTION: ("The request asks to verify something, and this test reads values "
-                               "without comparing them. Consider adding a check."),
-    EMPTY_TEST: "This test only opens the page. Consider generating it again with the steps you need.",
+    VERIFY_WITHOUT_ASSERTION: ("The request asks to verify something, and this test never compares "
+                               "what it finds with the expected value. Consider adding a check."),
+    EMPTY_TEST: "This test only opens the page. Consider adding the steps you need.",
 }
 _LOCATOR_ANSWER_SENTENCE = ('This test finds the element by its text "{text}". '
                             "If that text can change, consider locating it by position instead.")

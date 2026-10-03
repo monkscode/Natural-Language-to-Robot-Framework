@@ -584,7 +584,7 @@ describe('HistoryPage drawer — suggestions for a passed run', () => {
   // exists: finished sentences, [] when there is nothing to say. The drawer
   // shows them as a quiet muted block under the code, never anywhere else.
   const ONE = 'This test finds the element by its text "A Light in the Attic". If that text can change, consider locating it by position instead.'
-  const TWO = 'The request asks to verify something, and this test reads values without comparing them. Consider adding a check.'
+  const TWO = 'The request asks to verify something, and this test never compares what it finds with the expected value. Consider adding a check.'
 
   it('shows the heading "Suggestion" and the sentence for one suggestion', async () => {
     setup({ data: null, error: '' }, RUN.run_id, { status: 'passed', robot_code: '*** Test Cases ***', suggestions: [ONE] })
