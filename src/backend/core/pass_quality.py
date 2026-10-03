@@ -13,13 +13,16 @@ Shapes. Every shape in HOLLOW_SHAPES makes a pass hollow; FRAGILE_NUMERIC_ID is
 reported and never hollow.
 - READ_NOT_PERFORMED: the query asks to get / read / extract / retrieve / fetch
   a value, and the test runs no reader keyword. Counting keywords (Get Elements,
-  Get Length, Get Element Count) are deliberately NOT readers. A count request
-  whose count is checked is not reported: the query's verify clause (what
-  follows the verify word, up to a comma, a semicolon, a sentence end, a line
-  break, "and" or "then") names an integer N (q10: "get the titles ... verify
-  there are 20 books") and the test asserts a count against N — a counting
-  keyword's own inline assertion (`Get Element Count  L  ==  20`), or an
-  assertion that uses a variable a counting keyword filled (`Should Be True
+  Get Length, Get Element Count) are deliberately NOT readers. A request for a
+  whole collection whose count is checked is not reported: a read clause holds
+  all / every / each, the query's verify clause names an integer N (q10: "get
+  the titles of all books ... verify there are 20 books") and the test asserts
+  a count against N. A clause is what follows the read or verify word, up to a
+  comma, a semicolon, a sentence end, a line break, "and" or "then". "Get the
+  price of the first book and verify there is 1 item in the basket" asks for
+  one value and is reported whatever is counted. A count is asserted by a
+  counting keyword's own inline assertion (`Get Element Count  L  ==  20`), or
+  an assertion that uses a variable a counting keyword filled (`Should Be True
   ${n} == 20`), with N as a whole number ("1920", "20.5" and "20s" hold no 20).
   A number word ("twenty"), another number, or no assertion on the count: still
   reported.
@@ -130,6 +133,8 @@ _LOCATOR_READERS = (*_TEXT_READERS, "get attribute", "get property")
 # Where a verify clause ends, i.e. where the next instruction starts: a comma, a
 # semicolon, a sentence end, a line break, or "and" / "then".
 _CLAUSE_END = re.compile(r",\s|;|\.(?:\s|$)|\n|\b(?:and|then)\b", re.IGNORECASE)
+# A request for every item of a collection, not for one value: "all books", "each row".
+_COLLECTION_WORD = re.compile(r"\b(?:all|every|each)\b", re.IGNORECASE)
 # The literal kinds that are an attribute of the element itself. Get Attribute /
 # Get Property returns such a literal only when it reads that same attribute.
 _ATTRIBUTE_LITERALS = {name: re.compile(p, re.IGNORECASE) for name, p in (
@@ -331,10 +336,20 @@ def _answer_literals(stmt: _Statement, locator: str, query: str) -> list[str]:
     return _locator_literals(part, query, (_ATTRIBUTE_LITERALS[attribute],))
 
 
-def _verify_clauses(query: str) -> list[str]:
-    """What the query asks to verify: the words after each verify word, lower-cased."""
+def _clauses_after(words: re.Pattern[str], query: str) -> list[str]:
+    """The words after each match of `words`, up to the end of the clause, lower-cased."""
     return [_CLAUSE_END.split(query[m.end():], maxsplit=1)[0].lower()
-            for m in _VERIFY_Q.finditer(query)]
+            for m in words.finditer(query)]
+
+
+def _verify_clauses(query: str) -> list[str]:
+    """What the query asks to verify: the words after each verify word."""
+    return _clauses_after(_VERIFY_Q, query)
+
+
+def _asks_for_a_whole_collection(query: str) -> bool:
+    """True when a read clause holds all / every / each: "get the titles of all books"."""
+    return any(_COLLECTION_WORD.search(clause) for clause in _clauses_after(_READ_Q, query))
 
 
 def _whole_numbers(text: str) -> set[int]:
@@ -349,11 +364,13 @@ def _used_variables(args: tuple[str, ...]) -> set[str]:
 
 
 def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statement]) -> bool:
-    """True when the query asks to verify a number N and the test asserts a count against N.
+    """True when the query reads a whole collection, asks to verify a number N and the test asserts a count against N.
 
-    q10 ("get the titles of all books ... verify there are 20 books") answered by
+    q10 ("get the titles of ALL books ... verify there are 20 books") answered by
     `Get Elements` / `Get Length` / `Should Be True  ${n} == 20`: the one thing the
-    query lets pass or fail is checked, so the missing read is not reported.
+    query lets pass or fail is checked, so the missing read is not reported. A
+    request for one value ("get the price of the first book and verify there is 1
+    item in the basket") is not excused: its value is still unread.
 
     The assertion must be ON the count: a counting keyword's own inline assertion,
     or an assertion that uses a variable a counting keyword filled (directly, or
@@ -362,6 +379,8 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
     variable assigned in the test body is never replaced by its declared start
     value: `${n}    0` under Variables is not what `${n} < 5` compares.
     """
+    if not _asks_for_a_whole_collection(query):
+        return False
     wanted = {n for clause in _verify_clauses(query) for n in _whole_numbers(clause)}
     if not wanted:
         return False

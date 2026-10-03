@@ -112,6 +112,8 @@ class TestReadNotPerformed:
         pytest.param("    ${n}=    Evaluate JavaScript    ${books_locator}    (all) => all.length"
                      "    all_elements=True\n    Should Be Equal As Integers    ${n}    20\n",
                      {READ_NOT_PERFORMED}, id="no-counting-keyword"),
+        pytest.param(GET_COUNT + "    Log    Found ${count} books, expected 20\n",
+                     {READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION}, id="number-only-in-a-log-message"),
     ])
     def test_a_count_request_whose_count_is_not_asserted_is_still_flagged(self, body, expected):
         assert shapes(books(body), Q10) == expected
@@ -127,6 +129,32 @@ class TestReadNotPerformed:
     def test_only_a_number_the_query_asks_to_verify_waives_the_read(self, query):
         code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
         assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    BASKET_COUNT = ("    ${count}=    Get Element Count    ${basket_locator}\n"
+                    "    Should Be Equal As Integers    ${count}    1\n")
+
+    @pytest.mark.parametrize("query, body", [
+        pytest.param("Go to https://books.toscrape.com, get the price of the first book and verify "
+                     "there is 1 item in the basket", BASKET_COUNT, id="one-book-asked-for"),
+        pytest.param("Go to https://the-internet.herokuapp.com/checkboxes, check checkbox 2 and get its label",
+                     "    Click    css=#checkboxes input >> nth=1\n"
+                     "    ${count}=    Get Element Count    ${boxes_locator}\n"
+                     "    Should Be Equal As Integers    ${count}    2\n", id="check-is-the-verify-word"),
+        pytest.param("Go to https://books.toscrape.com, accept all cookies, get the price of the first book "
+                     "and verify there is 1 item in the basket", BASKET_COUNT,
+                     id="collection-word-in-another-clause"),
+        pytest.param("Go to https://books.toscrape.com, get the price of the small book and verify there "
+                     "is 1 item in the basket", BASKET_COUNT, id="word-that-only-contains-all"),
+    ])
+    def test_a_count_waives_the_read_only_for_a_request_for_a_whole_collection(self, query, body):
+        assert shapes(robot("", "    New Page    https://books.toscrape.com\n" + body), query) == {
+            READ_NOT_PERFORMED}
+
+    @pytest.mark.parametrize("word", ["every", "each"])
+    def test_every_and_each_ask_for_a_whole_collection_like_all(self, word):
+        query = Q10.replace("titles of all books", f"titles of {word} book")
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == set()
 
     def test_a_declared_start_value_is_not_the_number_compared(self):
         # ${error_count} is declared as 0 and then assigned at run time: `< 5` does not check 0
@@ -308,19 +336,22 @@ class TestVerifyWithoutAssertion:
     @pytest.mark.parametrize("build, query", [
         # mirrors d2762c18-8a5f-4714-b6cc-8b372e76bf53
         pytest.param(lambda t: t.heading_read("text=Products"), Q07,
-                     id="text-literal-of-the-word-to-verify"),
+                     id="text-locator-of-the-word-to-verify"),
         pytest.param(lambda t: t.heading_read('text="PRODUCTS"'), Q07,
-                     id="same-literal-in-another-case"),
+                     id="same-text-in-another-case"),
         pytest.param(lambda t: t.heading_read(
             "text=Products", "Get Attribute    ${products_heading_locator}    class"), Q07,
-            id="get-attribute-on-that-literal"),
+            id="get-attribute-on-that-text"),
         pytest.param(lambda t: t.heading_read("text=Swag Labs"), Q07,
-                     id="literal-the-query-does-not-hold"),
-        # "Login" is what the query clicks, not what it asks to verify
+                     id="text-the-query-does-not-hold"),
         pytest.param(lambda t: t.heading_read("text=Login"), Q07,
-                     id="literal-from-another-clause"),
+                     id="text-from-another-clause"),
         pytest.param(lambda t: t.heading_read('css=div:has-text("Products") >> span'), Q07,
-                     id="literal-on-an-ancestor-part"),
+                     id="text-on-an-ancestor-part"),
+        # Get Element States returns `detached` instead of failing, so it proves nothing
+        pytest.param(lambda t: t.heading_read(
+            "text=Products", "Get Element States    ${products_heading_locator}"), Q07,
+            id="get-element-states"),
         pytest.param(lambda t: robot("${dropdown_locator}    id=dropdown\n",
                                      "    New Page    https://the-internet.herokuapp.com/dropdown\n"
                                      "    Select Options By    ${dropdown_locator}    label    Option 2\n"
@@ -331,12 +362,7 @@ class TestVerifyWithoutAssertion:
     def test_a_read_that_is_only_logged_is_flagged_whatever_its_locator(self, build, query):
         assert shapes(build(self), query) == {VERIFY_WITHOUT_ASSERTION}
 
-    def test_get_element_states_never_fails_on_a_missing_element(self):
-        # it returns `detached` instead of failing, so it proves nothing
-        code = self.heading_read("text=Products", "Get Element States    ${products_heading_locator}")
-        assert shapes(code, Q07) == {VERIFY_WITHOUT_ASSERTION}
-
-    def test_a_read_with_no_literal_and_only_a_log_is_flagged(self):
+    def test_a_typed_value_read_and_only_logged_is_flagged(self):
         # mirrors 41f4f78d-7007-42b8-86c4-ddb28e978472 and 5db3e7ed-a987-44df-8a73-411f01084e4a
         typed = robot('${editable_p_locator}    iframe[id="iframeResult"] >>> xpath=//body/p\n',
                       "    New Page    https://www.w3schools.com/tags/tryit.asp\n"
