@@ -2,18 +2,25 @@
 
 A green run can be hollow: it passes whatever the page shows, or it never checks
 what the user asked for. Over the 114 bench gate passes since E2 (2026-09-16),
-15 were hollow: q10 count-only 7, q08 cannot-fail select check 5, q05
-answer-in-the-locator 2, q05 wrong column 1. The last one is not statically
-detectable (the right and the wrong cell are both a positional `td`). This
-module flags the detectable shapes from two strings, the Robot source and the
-user's query. It reads no database, no network and no file.
+8 were hollow: q08 cannot-fail select check 5, q05 answer-in-the-locator 2, q05
+wrong column 1. The last one is not statically detectable (the right and the
+wrong cell are both a positional `td`). 7 more were q10 count-only tests, which
+are not hollow (owner, 2026-10-01: the count the query asks to verify is
+asserted). This module flags the detectable shapes from two strings, the Robot
+source and the user's query. It reads no database, no network and no file.
 
 Shapes. Every shape in HOLLOW_SHAPES makes a pass hollow; FRAGILE_NUMERIC_ID is
 reported and never hollow.
 - READ_NOT_PERFORMED: the query asks to get / read / extract / retrieve / fetch
   a value, and the test runs no reader keyword. Counting keywords (Get Elements,
-  Get Length, Get Element Count) are deliberately NOT readers: q10's count-only
-  tests ("get the titles ... verify there are 20") are exactly this shape.
+  Get Length, Get Element Count) are deliberately NOT readers. A count request
+  whose count is checked is not reported: the query's verify clause names an
+  integer N (q10: "get the titles ... verify there are 20 books") and the test
+  asserts a count against N — a counting keyword's own inline assertion (`Get
+  Element Count  L  ==  20`), or an assertion that uses a variable a counting
+  keyword filled (`Should Be True  ${n} == 20`), with N as a whole number
+  ("1920", "20.5" and "20s" hold no 20). A number word ("twenty"), another
+  number, or no assertion on the count: still reported.
 - SELECT_CHECK_CANNOT_FAIL: `Select Options By  L  <attr>  V`, then `Get Text`
   on the same <select> checked with `Should Contain  <that text>  V` (or inline
   `contains V`). A whole <select>'s text lists every option, so the check passes
@@ -48,9 +55,8 @@ reported and never hollow.
 Pasted code (empty query): only the query-free rules run, SELECT_CHECK_CANNOT_FAIL
 and EMPTY_TEST.
 
-Referenced by: bench/gate_hollow.py (the bench gate's hollow registry and the
-q10 add-on). A later History / SSE pass-quality note will read it too (not
-built yet).
+Referenced by: bench/gate_hollow.py (the bench gate's hollow registry). A later
+History / SSE pass-quality note will read it too (not built yet).
 Depends on: re, dataclasses. Standard library only: importing this module must
 never load config, a database driver or an LLM client.
 """
@@ -104,6 +110,8 @@ _ACTION_Q = re.compile(
 _READERS = ("get text", "get attribute", "get property", "get selected options",
             "get title", "get url", "get value", "get element states",
             "get checkbox state", "get style", "get classes")
+# Counting keywords: they return how many (or the things counted), never a value.
+_COUNTERS = ("get element count", "get elements", "get length")
 _ASSERTION_PREFIXES = ("wait for elements state", "wait until", "wait for condition",
                        "fail", "run keyword if", "run keyword unless")
 # "Should Be Equal", "Length Should Be", "Element Should Be Visible", "Page Should
@@ -160,6 +168,11 @@ _ID_FORMS = tuple(re.compile(p) for p in (
 ))
 _ASSIGN = re.compile(r"^[$@&]\{[^}]+\}\s*=?$")
 _VARIABLE = re.compile(r"[$@&%]\{([^}]+)\}")
+# Python's variable syntax inside an expression: `len($books) == 20`.
+_PYTHON_VARIABLE = re.compile(r"\$(\w+)")
+# A whole number: "== 20", "${20}" and "20." hold 20; "1920", "20.5", "20,000",
+# "20s" and "item_20" do not.
+_WHOLE_NUMBER = re.compile(r"(?<!\w)(?<!\d[.,])\d+(?![.,]?\d)(?!\w)")
 _CELL_SPLIT = re.compile(r"\s{2,}|\t")
 _LIBRARY_PREFIX = re.compile(r"^(browser|builtin|collections|string)\.")
 _KEYWORD_SETTINGS = ("[setup]", "[teardown]")
@@ -352,6 +365,49 @@ def _checks_presence(stmt: _Statement, variables: dict[str, str], clauses: list[
     return any(lit.lower() in clause for lit in _literals(part) for clause in clauses)
 
 
+def _whole_numbers(text: str) -> set[int]:
+    return {int(n) for n in _WHOLE_NUMBER.findall(text)}
+
+
+def _used_variables(args: tuple[str, ...]) -> set[str]:
+    """The variables a statement's arguments use: `${n}`, `@{items}`, Python's `$items`."""
+    text = "  ".join(args)
+    return ({_var_key(m.group(0)) for m in _VARIABLE.finditer(text)}
+            | {_var_key(name) for name in _PYTHON_VARIABLE.findall(text)})
+
+
+def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statement]) -> bool:
+    """True when the query asks to verify a number N and the test asserts a count against N.
+
+    q10 ("get the titles of all books ... verify there are 20 books") answered by
+    `Get Elements` / `Get Length` / `Should Be True  ${n} == 20`: the one thing the
+    query lets pass or fail is checked, so the missing read is not reported.
+
+    The assertion must be ON the count: a counting keyword's own inline assertion,
+    or an assertion that uses a variable a counting keyword filled (directly, or
+    through a keyword fed by one). An assertion that merely holds the number
+    (`Wait For Elements State  xpath=(//li)[20]  visible`) checks no count. A
+    variable assigned in the test body is never replaced by its declared start
+    value: `${n}    0` under Variables is not what `${n} < 5` compares.
+    """
+    wanted = {n for clause in _verify_clauses(query) for n in _whole_numbers(clause)}
+    if not wanted:
+        return False
+    assigned = {name for stmt in stmts for name in stmt.assigned}
+    declared = {name: value for name, value in variables.items() if name not in assigned}
+    counts: set[str] = set()
+    for stmt in stmts:
+        counter = stmt.keyword in _COUNTERS
+        if not counter and not counts & _used_variables(stmt.args):
+            continue
+        # A counting keyword's first argument is what it counts, never the number expected.
+        compared = "  ".join(stmt.args[1:] if counter else stmt.args)
+        if _is_assertion(stmt) and wanted & _whole_numbers(_resolve(compared, declared)):
+            return True
+        counts.update(stmt.assigned)
+    return False
+
+
 def _asserts(query: str, variables: dict[str, str], stmts: list[_Statement]) -> bool:
     """True when the test holds an assertion, or a read that is one for this query."""
     clauses = _verify_clauses(query)
@@ -370,7 +426,8 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
     is_read = bool(query) and bool(_READ_Q.search(query))
     is_verify = bool(query) and bool(_VERIFY_Q.search(query))
 
-    if is_read and not any(s.keyword.startswith(_READERS) for s in stmts):
+    if (is_read and not any(s.keyword.startswith(_READERS) for s in stmts)
+            and not _count_is_checked(query, variables, stmts)):
         found[READ_NOT_PERFORMED] = ""
     if is_verify and not _asserts(query, variables, stmts):
         found[VERIFY_WITHOUT_ASSERTION] = ""

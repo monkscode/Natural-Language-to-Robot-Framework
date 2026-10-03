@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import src.backend.core.pass_quality as pass_quality
 from src.backend.core.pass_quality import (
     EMPTY_TEST,
@@ -57,14 +59,94 @@ def shapes(code: str, query: str | None) -> set[str]:
     return {f.shape for f in check_pass_quality(code, query)}
 
 
+GET_ELEMENTS = "    @{elements}=    Get Elements    ${books_locator}\n"
+GET_LENGTH = GET_ELEMENTS + "    ${elements_count}=    Get Length    ${elements}\n"
+GET_COUNT = "    ${count}=    Get Element Count    ${books_locator}\n"
+
+
+def books(body: str, variables: str = "") -> str:
+    """The books page opened, then `body` (q10's generated shape)."""
+    return robot("${url}    https://books.toscrape.com\n${books_locator}    ol > li\n" + variables,
+                 "    New Page    ${url}\n" + body)
+
+
 class TestReadNotPerformed:
-    def test_count_only_q10_test_is_flagged(self):  # mirrors edf75fe8-0bc9-45c6-ab15-0085fe7ca8c3
-        code = robot("${url}    https://books.toscrape.com\n${books_locator}    css=h3 a\n",
-                     "    New Page    ${url}\n"
-                     "    @{books_elements}=    Get Elements    ${books_locator}\n"
-                     "    ${books_count}=    Get Length    ${books_elements}\n"
-                     "    Should Be True    ${books_count} == 20\n")
-        assert shapes(code, Q10) == {READ_NOT_PERFORMED}
+    @pytest.mark.parametrize("body, variables", [
+        # mirrors 041606ee-dd82-4dad-9e4b-858f6081b61d (118 of the 124 stored count-only tests)
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n", "", id="get-length"),
+        # mirrors 04dd81c7-6a94-4e6e-8b48-7b75e4652fb1
+        pytest.param(GET_ELEMENTS + GET_COUNT + "    Should Be Equal As Integers    ${count}    20\n", "",
+                     id="count-as-integers"),
+        # mirrors 3a563d81-737c-4888-ac49-4db024a471aa
+        pytest.param("    @{books}=    Get Elements    ${books_locator}\n"
+                     "    Should Be True    len($books) == 20\n", "", id="python-len"),
+        # mirrors 4bab7a83-790c-41c6-a9d4-1146ad2a3dd0: the list variable is also declared, empty
+        pytest.param("    ${titles}=    Get Elements    ${books_locator}\n"
+                     "    Should Be True    len(${titles}) == 20\n", "${titles}\n", id="declared-list"),
+        pytest.param("    Get Element Count    ${books_locator}    ==    20\n", "", id="inline-operator"),
+        pytest.param(GET_ELEMENTS + "    Length Should Be    ${elements}    20\n", "", id="length-should-be"),
+        pytest.param(GET_COUNT + "    Should Be Equal    ${count}    ${20}\n", "", id="integer-literal"),
+        pytest.param(GET_COUNT + "    Should Be Equal As Integers    ${count}    ${expected_count}\n",
+                     "${expected_count}    20\n", id="number-in-a-variable"),
+        pytest.param(GET_ELEMENTS + "    ${n}=    Evaluate    len($elements)\n"
+                     "    Should Be Equal As Integers    ${n}    20\n", "", id="count-through-evaluate"),
+    ])
+    def test_a_count_request_whose_count_is_asserted_is_not_flagged(self, body, variables):
+        assert shapes(books(body, variables), Q10) == set()
+
+    @pytest.mark.parametrize("body, expected", [
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} == 10\n",
+                     {READ_NOT_PERFORMED}, id="another-number"),
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} == 120\n",
+                     {READ_NOT_PERFORMED}, id="inside-a-longer-number"),
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} > 20.5\n",
+                     {READ_NOT_PERFORMED}, id="inside-a-decimal"),
+        pytest.param(GET_LENGTH + "    Log    ${elements_count}\n",
+                     {READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION}, id="count-only-logged"),
+        # the assertion that holds 20 is about an element, not about the count
+        pytest.param(GET_COUNT + "    Log    ${count}\n"
+                     "    Wait For Elements State    xpath=(//article)[20]    visible    timeout=10s\n",
+                     {READ_NOT_PERFORMED}, id="number-in-an-unrelated-assertion"),
+        pytest.param("    Get Element Count    css=li:nth-child(20)    >    0\n",
+                     {READ_NOT_PERFORMED}, id="number-in-the-counted-locator"),
+        pytest.param("    ${n}=    Evaluate JavaScript    ${books_locator}    (all) => all.length"
+                     "    all_elements=True\n    Should Be Equal As Integers    ${n}    20\n",
+                     {READ_NOT_PERFORMED}, id="no-counting-keyword"),
+    ])
+    def test_a_count_request_whose_count_is_not_asserted_is_still_flagged(self, body, expected):
+        assert shapes(books(body), Q10) == expected
+
+    @pytest.mark.parametrize("query", [
+        pytest.param(Q10.replace("20 books", "twenty books"), id="a-number-word"),
+        pytest.param(Q10.replace("20 books", "20,000 books"), id="a-longer-number"),
+        pytest.param("Go to https://books.toscrape.com, verify the page is open and get the titles of "
+                     "the 20 books", id="the-number-is-in-another-clause"),
+        pytest.param("Go to https://books.toscrape.com and get the titles of the 20 books",
+                     id="no-verify-clause"),
+    ])
+    def test_only_a_number_the_query_asks_to_verify_waives_the_read(self, query):
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_declared_start_value_is_not_the_number_compared(self):
+        # ${error_count} is declared as 0 and then assigned at run time: `< 5` does not check 0
+        code = robot("${error_count}    0\n",
+                     "    New Page    https://shop.example.com\n"
+                     "    ${error_count}=    Get Element Count    css=.error\n"
+                     "    Should Be True    ${error_count} < 5\n")
+        query = "Open https://shop.example.com, get the error messages and verify there are 0 errors"
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_the_same_request_with_no_count_and_no_assertion_is_still_flagged(self):
+        # mirrors d6965269-4143-43c4-bb8d-5597690c2c6c: the page is opened, nothing else
+        assert shapes(books(""), Q10) == {READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION, EMPTY_TEST}
+
+    def test_a_read_request_with_no_reader_is_still_flagged(self):
+        # mirrors 5b33729e-a6ca-496e-86e4-9c425da5439d and 474a0f7c-5ea7-406f-a723-d9e98e05916d
+        opened = robot("", "    New Page    https://example.com/\n")
+        assert shapes(opened, "Open https://example.com and get the page title") == {
+            READ_NOT_PERFORMED, EMPTY_TEST}
+        assert shapes(robot("", ""), Q01) == {READ_NOT_PERFORMED, EMPTY_TEST}
 
     def test_titles_read_in_a_loop_is_not_flagged(self):  # mirrors 34b47637-f785-4a41-9b2a-f6e517f4070a
         code = robot("${url}    https://books.toscrape.com\n${book_titles_locator}    css=h3 a\n",
@@ -85,7 +167,8 @@ class TestReadNotPerformed:
     def test_get_element_count_is_not_a_read(self):
         code = robot("", "    New Page    https://books.toscrape.com\n"
                          "    Get Element Count    css=h3 a    ==    20\n")
-        assert shapes(code, Q10) == {READ_NOT_PERFORMED}
+        query = "Go to https://books.toscrape.com and get the titles of all books on the first page"
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
 
     def test_a_query_without_a_read_verb_is_never_flagged(self):
         code = robot("", "    New Page    https://example.com\n    Click    id=go\n")

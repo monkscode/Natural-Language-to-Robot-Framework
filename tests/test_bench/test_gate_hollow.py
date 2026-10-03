@@ -2,7 +2,7 @@
 
 from bench.gate_hollow import REGISTERED_HOLLOW, hollow_lines
 from bench.gate_inputs import build_slots, load_runs
-from src.backend.core.pass_quality import READ_LOCATOR_IS_THE_ANSWER, READ_NOT_PERFORMED
+from src.backend.core.pass_quality import READ_LOCATOR_IS_THE_ANSWER
 from tests.test_bench.gate_fixtures import (
     ANSWER_LOCATOR_Q05,
     COUNT_ONLY_Q10,
@@ -20,8 +20,8 @@ def lines_for(tmp_path, codes=None, overrides=None):
     return {line.name: line for line in lines}
 
 
-def test_the_registry_is_the_owners_two_pairs():
-    assert REGISTERED_HOLLOW == {("q10", READ_NOT_PERFORMED), ("q05", READ_LOCATOR_IS_THE_ANSWER)}
+def test_the_registry_is_the_owners_one_pair():
+    assert REGISTERED_HOLLOW == {("q05", READ_LOCATOR_IS_THE_ANSWER)}
 
 
 def test_a_clean_bench_passes_with_a_full_verified_rate(tmp_path):
@@ -30,12 +30,31 @@ def test_a_clean_bench_passes_with_a_full_verified_rate(tmp_path):
     assert lines["VERIFIED"].text.startswith("verified pass rate 30/30 = 100.0%")
 
 
-def test_registered_pairs_pass_and_lower_the_verified_rate(tmp_path):
-    lines = lines_for(tmp_path, codes={("q10", 1): COUNT_ONLY_Q10, ("q05", 2): ANSWER_LOCATOR_Q05})
+def test_a_registered_pair_passes_and_lowers_the_verified_rate(tmp_path):
+    lines = lines_for(tmp_path, codes={("q05", 2): ANSWER_LOCATOR_Q05})
     assert lines["HOLLOW"].status == "PASS"
-    assert "(q05, READ_LOCATOR_IS_THE_ANSWER) x1, (q10, READ_NOT_PERFORMED) x1" in lines["HOLLOW"].text
-    assert lines["VERIFIED"].text.startswith("verified pass rate 28/30 = 93.3% (30 passes minus 2 hollow)")
+    assert lines["HOLLOW"].text.endswith("registered ones seen: (q05, READ_LOCATOR_IS_THE_ANSWER) x1")
+    assert lines["VERIFIED"].text.startswith("verified pass rate 29/30 = 96.7% (30 passes minus 1 hollow)")
     assert lines["VERIFIED"].status == "INFO"
+
+
+def test_a_count_only_q10_pass_is_not_hollow(tmp_path):
+    # owner, 2026-10-01: "verify there are 20 books" is asserted, so the pass is verified
+    lines = lines_for(tmp_path, codes={("q10", 1): COUNT_ONLY_Q10})
+    assert (lines["HOLLOW"].status, lines["HOLLOW"].details) == ("PASS", [])
+    assert lines["HOLLOW"].text.endswith("registered ones seen: none")
+    assert lines["VERIFIED"].text.startswith("verified pass rate 30/30 = 100.0% (30 passes minus 0 hollow)")
+
+
+def test_a_q10_pass_that_asserts_no_count_fails_like_any_other_hollow_pass(tmp_path):
+    counted_not_asserted = HEADER + ("    @{b}=    Get Elements    css=h3 a\n    ${n}=    Get Length    ${b}\n"
+                                     "    Log    ${n}\n    Close Browser\n")
+    lines = lines_for(tmp_path, codes={("q10", 1): counted_not_asserted})
+    assert lines["HOLLOW"].status == "FAIL"
+    assert lines["HOLLOW"].details == [
+        f"(q10, READ_NOT_PERFORMED) q10 r1 {wf_id('cand', 'q10', 1)}",
+        f"(q10, VERIFY_WITHOUT_ASSERTION) q10 r1 {wf_id('cand', 'q10', 1)}"]
+    assert lines["VERIFIED"].text.startswith("verified pass rate 29/30 = 96.7% (30 passes minus 1 hollow)")
 
 
 def test_an_unregistered_pair_fails_and_names_the_run(tmp_path):
