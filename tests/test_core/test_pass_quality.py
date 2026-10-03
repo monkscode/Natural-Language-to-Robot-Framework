@@ -122,8 +122,8 @@ class TestReadNotPerformed:
         pytest.param(Q10.replace("20 books", "twenty books"), id="a-number-word"),
         pytest.param(Q10.replace("20 books", "20,000 books"), id="a-longer-number"),
         pytest.param("Go to https://books.toscrape.com, verify the page is open and get the titles of "
-                     "the 20 books", id="the-number-is-in-another-clause"),
-        pytest.param("Go to https://books.toscrape.com and get the titles of the 20 books",
+                     "all the 20 books", id="the-number-is-in-another-clause"),
+        pytest.param("Go to https://books.toscrape.com and get the titles of all the 20 books",
                      id="no-verify-clause"),
     ])
     def test_only_a_number_the_query_asks_to_verify_waives_the_read(self, query):
@@ -162,7 +162,7 @@ class TestReadNotPerformed:
                      "    New Page    https://shop.example.com\n"
                      "    ${error_count}=    Get Element Count    css=.error\n"
                      "    Should Be True    ${error_count} < 5\n")
-        query = "Open https://shop.example.com, get the error messages and verify there are 0 errors"
+        query = "Open https://shop.example.com, get all the error messages and verify there are 0 errors"
         assert shapes(code, query) == {READ_NOT_PERFORMED}
 
     def test_the_same_request_with_no_count_and_no_assertion_is_still_flagged(self):
