@@ -68,8 +68,8 @@ pgdata/
 # Docker
 docker-compose.yml
 docker-compose.vertex.yml
-.env*
-!src/backend/.env.example
+**/.env*
+!**/.env.example
 
 # Secrets. Mounted at runtime by docker-compose.vertex.yml, never built in.
 credentials.json
