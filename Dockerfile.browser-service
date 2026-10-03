@@ -39,6 +39,10 @@ WORKDIR /app
 # always carries its frame (`iframe[id="x"] >>> <locator>`); the agent-candidate
 # and coordinate-fallback exits returned it bare, so the generated test looked
 # in the main page; runtime dependencies identical.
+# Bumped 1.0.40 -> 1.0.41 on 2026-10-03: the discovery-time Playwright
+# fallback now performs a step inside its iframe (it handed Playwright the
+# `>>>` locator, which Playwright reads as a child of the iframe element, so
+# no in-frame step was performed); runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -71,7 +75,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.40 && \
+    browser-service==1.0.41 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
