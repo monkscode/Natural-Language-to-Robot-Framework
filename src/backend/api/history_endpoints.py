@@ -42,7 +42,8 @@ Referenced by: main.py (router registration), api/endpoints.py
 Depends on: core/run_registry.py, api/history_scope.py (the shared run scope,
 shared with /api/groups, and may_move_test -- the TEST authority half of
 can_move, shared with /api/tests), auth/jwt_utils.py, auth/ownership.py
-(caller_can_access), core/artifact_store.py (get_artifact_store).
+(caller_can_access), core/artifact_store.py (get_artifact_store),
+core/pass_quality.py (pass_suggestions).
 """
 
 import logging
@@ -58,6 +59,7 @@ from src.backend.auth.jwt_utils import require_user
 from src.backend.auth.ownership import caller_can_access
 from src.backend.core.run_registry import RunOwnership, get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.pass_quality import pass_suggestions
 from src.backend.core.failure_sentences import failure_sentence
 
 logger = logging.getLogger(__name__)
@@ -409,6 +411,17 @@ def run_detail(run_id: str, user: dict | None = Depends(require_user)):
         raise HTTPException(status_code=404, detail="Run not found")
 
     run["robot_code"] = resolve_robot_code(run)
+    # Pass-quality suggestions: passed runs only, computed on read from the
+    # code the drawer shows and the row's own query. A checker failure must
+    # never fail the detail, so the key is simply left out (log: run id only).
+    if (run["status"] == "passed" and isinstance(run["robot_code"], str)
+            and run["robot_code"]):
+        try:
+            run["suggestions"] = pass_suggestions(run["robot_code"], run.get("user_query"))
+        except Exception as exc:
+            # The exception type only: its message or traceback could quote the code.
+            logger.warning("pass-quality suggestions failed for run %s (%s)",
+                           run_id, type(exc).__name__)
     run["has_report"] = run["status"] in _REPORT_STATUSES
     # R7: only a failed/errored run carries a reason. Every other status pops
     # the column the SELECT put on the dict and adds no sentence — a reused
