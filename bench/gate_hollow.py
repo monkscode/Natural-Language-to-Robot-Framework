@@ -1,4 +1,4 @@
-"""Bench gate, part 3: hollow passes — the (query, shape) registry, the verified rate, the q10 add-on.
+"""Bench gate, part 3: hollow passes — the (query, shape) registry and the verified rate.
 
 A hollow pass is a passed run whose test src/backend/core/pass_quality.py flags
 with a hollow shape. The gate FAILS on any hollow (query, shape) pair NOT in
@@ -15,19 +15,14 @@ all slots — 4 of 4 recent unchanged benches would fail a 96.7% verified gate:
 one repository id); and a standing line that a read of the wrong cell (the q05
 wrong column, 3555f609-1258-48df-8188-ecf1a07fa12a) is not statically detectable.
 
-The q10 add-on (a later bench runs q10 ten times after the planner read rule):
-PASS when at least Q10_ADDON_MIN_READS of exactly Q10_ADDON_RUNS runs perform a
-read — pass_quality's READ_NOT_PERFORMED does not fire on the run's test. A run
-with no test (a generation error) does not read.
-
 Referenced by: bench/gate.py.
 Depends on: src/backend/core/pass_quality.py, bench/gate_inputs.py (GateLine, Run,
-Slot, PASSED, classify).
+Slot, PASSED).
 """
 
 from collections import Counter
 
-from bench.gate_inputs import PASSED, GateLine, Run, Slot, classify
+from bench.gate_inputs import PASSED, GateLine, Run, Slot
 from src.backend.core.pass_quality import (
     FRAGILE_NUMERIC_ID,
     READ_LOCATOR_IS_THE_ANSWER,
@@ -37,8 +32,6 @@ from src.backend.core.pass_quality import (
 
 REGISTERED_HOLLOW = frozenset({("q10", READ_NOT_PERFORMED), ("q05", READ_LOCATOR_IS_THE_ANSWER)})
 WRONG_CELL_EXAMPLE = "3555f609-1258-48df-8188-ecf1a07fa12a"
-Q10_ADDON_RUNS = 10
-Q10_ADDON_MIN_READS = 6
 
 
 def _code(run: Run) -> str | None:
@@ -92,22 +85,3 @@ def hollow_lines(slots: list[Slot]) -> list[GateLine]:
         GateLine("NOT CHECKED", "INFO", "a read of the wrong cell is not statically detectable "
                  f"(e.g. the q05 wrong column, {WRONG_CELL_EXAMPLE})"),
     ]
-
-
-def q10_addon_line(runs: list[Run]) -> GateLine:
-    reads, details = 0, []
-    for run in runs:
-        code = _code(run)
-        if code is None:
-            outcome, reason = classify(run)
-            details.append(f"no test: {run.label} ({outcome}{': ' + reason if reason else ''})")
-            continue
-        shapes = {f.shape for f in check_pass_quality(code, run.row.get("query") or "")}
-        if READ_NOT_PERFORMED in shapes:
-            details.append(f"no read: {run.label}")
-        else:
-            reads += 1
-            details.append(f"reads: {run.label}")
-    status = "PASS" if reads >= Q10_ADDON_MIN_READS else "FAIL"
-    return GateLine("Q10 READS", status, f"{reads}/{len(runs)} runs read the titles "
-                    f"(acceptance >= {Q10_ADDON_MIN_READS}/{Q10_ADDON_RUNS})", details)

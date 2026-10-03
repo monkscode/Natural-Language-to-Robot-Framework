@@ -1,4 +1,4 @@
-"""bench/gate.py end to end: the report, the exit codes, re-run files, the q10 add-on, import hygiene."""
+"""bench/gate.py end to end: the report, the exit codes, re-run files, import hygiene."""
 
 import io
 import json
@@ -12,7 +12,6 @@ import pytest
 from bench.gate import exit_code, main, run_gate
 from bench.gate_inputs import BASELINE_CSV, GateLine
 from tests.test_bench.gate_fixtures import (
-    COUNT_ONLY_Q10,
     GOOD_TESTS,
     PINS,
     PROVIDER_503,
@@ -181,52 +180,15 @@ def test_run_gate_takes_explicit_paths(tmp_path):
     assert exit_code(lines) == 0
 
 
-def q10_csv(tmp_path, reads: int, n: int = 10) -> Path:
-    rows = []
-    for i in range(1, n + 1):
-        wf = wf_id("addon", "q10", i)
-        write_capture(tmp_path / "bench" / "runs", wf, code=GOOD_TESTS["q10"] if i <= reads else COUNT_ONLY_Q10)
-        rows.append(row("q10", i, wf))
-    return write_csv(tmp_path / "bench" / "baselines" / "q10x10.csv", rows)
-
-
-def test_q10_addon_exit_codes(tmp_path, capsys):
+@pytest.mark.parametrize("flag", ["--q10-addon", "--write-q10-queries"])
+def test_the_retired_q10_addon_flags_are_a_usage_error(tmp_path, capsys, flag):
     write_bench(tmp_path, BASE_NAME)
-    assert gate(tmp_path, ["--q10-addon", q10_csv(tmp_path, 6)], capsys)[0] == 0
-    assert gate(tmp_path, ["--q10-addon", q10_csv(tmp_path, 5)], capsys)[0] == 1
-    code, out = gate(tmp_path, ["--q10-addon", q10_csv(tmp_path, 6, n=9)], capsys)
-    assert code == 2 and "exactly 10 runs" in out
-
-
-@pytest.mark.parametrize("case, expected", [
-    ("another query", "off-query: ['q01 r5 "),
-    ("another wording", "off-query: ['q10 r5 "),
-    ("another model", "a new baseline is needed"),
-])
-def test_q10_addon_refusals(tmp_path, capsys, case, expected):
-    write_bench(tmp_path, BASE_NAME)
-    rows, meta = [], json.loads(json.dumps(PINS))
-    for i in range(1, 11):
-        wf = wf_id("addon", "q10", i)
-        write_capture(tmp_path / "bench" / "runs", wf, code=GOOD_TESTS["q10"])
-        rows.append(row("q10", i, wf))
-    if case == "another query":
-        rows[4] = row("q01", 5, rows[4]["workflow_id"])
-    elif case == "another wording":
-        rows[4]["query"] = QUERIES["q10"].replace("20 books", "21 books")
-    else:
-        meta["nlrf_pins"]["online_model"] = "gemini-4-flash"
-    addon = write_csv(tmp_path / "bench" / "baselines" / "q10x10.csv", rows, meta)
-    code, out = gate(tmp_path, ["--q10-addon", addon], capsys)
-    assert code == 2 and "REFUSED" in out and expected in out
-
-
-def test_write_q10_queries_writes_the_baseline_wording(tmp_path, capsys):
-    write_bench(tmp_path, BASE_NAME)
-    target = tmp_path / "q10.json"
-    code, _ = gate(tmp_path, ["--write-q10-queries", target], capsys)
-    assert code == 0
-    assert json.loads(target.read_text(encoding="utf-8"))["queries"] == [{"id": "q10", "query": QUERIES["q10"]}]
+    target = tmp_path / "q10x10"
+    with patch("bench.gate.REPO_ROOT", tmp_path), pytest.raises(SystemExit) as exit_info:
+        main([flag, str(target)])
+    assert exit_info.value.code == 2
+    assert f"unrecognized arguments: {flag}" in capsys.readouterr().err
+    assert not target.exists()
 
 
 def test_a_crash_exits_2_with_the_traceback_on_stderr(tmp_path, capsys):
@@ -241,13 +203,6 @@ def test_a_crash_exits_2_with_the_traceback_on_stderr(tmp_path, capsys):
     assert "the gate crashed: JSONDecodeError" in captured.out and "not a gate verdict" in captured.out
     assert captured.out.rstrip().endswith("CANNOT COMPARE (exit 2)")
     assert "Traceback" in captured.err
-
-
-def test_write_q10_queries_without_a_baseline_is_refused(tmp_path, capsys):
-    target = tmp_path / "q10.json"
-    code, out = gate(tmp_path, ["--write-q10-queries", target], capsys)
-    assert code == 2 and "REFUSED" in out
-    assert not target.exists()
 
 
 def test_a_cp1252_stdout_gets_utf8_and_the_same_exit_code(tmp_path, capsys):
