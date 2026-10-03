@@ -579,6 +579,77 @@ describe('HistoryPage drawer — why a run failed', () => {
   })
 })
 
+describe('HistoryPage drawer — suggestions for a passed run', () => {
+  // GET /api/history/{run_id} sends `suggestions` for a PASSED run whose code
+  // exists: finished sentences, [] when there is nothing to say. The drawer
+  // shows them as a quiet muted block under the code, never anywhere else.
+  const ONE = 'This test finds the element by its text "A Light in the Attic". If that text can change, consider locating it by position instead.'
+  const TWO = 'The request asks to verify something, and this test reads values without comparing them. Consider adding a check.'
+
+  it('shows the heading "Suggestion" and the sentence for one suggestion', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { status: 'passed', robot_code: '*** Test Cases ***', suggestions: [ONE] })
+
+    await openDrawer()
+
+    const heading = await screen.findByText('Suggestion')
+    expect(heading).toHaveClass('text-xs', 'font-semibold', 'uppercase', 'tracking-wider', 'text-muted-foreground')
+    const sentence = screen.getByText(ONE)
+    expect(sentence).toHaveClass('text-sm', 'text-muted-foreground', 'break-words')
+    expect(screen.queryByText('Suggestions')).toBeNull()
+  })
+
+  it('shows the heading "Suggestions" and both sentences, in order, for two', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { status: 'passed', robot_code: '*** Test Cases ***', suggestions: [ONE, TWO] })
+
+    await openDrawer()
+
+    const heading = await screen.findByText('Suggestions')
+    expect(heading).toHaveClass('text-xs', 'font-semibold', 'uppercase', 'tracking-wider', 'text-muted-foreground')
+    const first = screen.getByText(ONE)
+    const second = screen.getByText(TWO)
+    expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('Suggestion')).toBeNull()
+  })
+
+  it('shows no block when suggestions is an empty array', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { status: 'passed', robot_code: '*** Test Cases ***', suggestions: [] })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText(/Suggestion/)).toBeNull()
+  })
+
+  it('shows no block when the suggestions key is absent', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { status: 'passed', robot_code: '*** Test Cases ***' })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText(/Suggestion/)).toBeNull()
+  })
+
+  it('shows no block for a failed run even when a stray suggestions array arrives', async () => {
+    setup({ data: null, error: '' }, RUN.run_id, { status: 'failed', robot_code: '*** Test Cases ***', suggestions: [ONE] })
+
+    await openDrawer()
+
+    expect(await screen.findByTitle('Copy run id')).toBeInTheDocument()
+    expect(screen.queryByText(/Suggestion/)).toBeNull()
+    expect(screen.queryByText(ONE)).toBeNull()
+  })
+
+  it('renders nothing about suggestions in the History list, drawer closed', async () => {
+    setup({ data: null, error: '' })
+    mockApi.mockResolvedValue({ runs: [{ ...RUN, suggestions: [ONE] }], total: 1, scope: 'own' })
+    render(<MemoryRouter><HistoryPage /></MemoryRouter>)
+
+    expect(await screen.findByText('search flipkart for shoes')).toBeInTheDocument()
+    expect(screen.queryByText(/Suggestion/)).toBeNull()
+    expect(screen.queryByText(ONE)).toBeNull()
+  })
+})
+
 describe('HistoryPage drawer — the re-run-of id', () => {
   // The owner's standing rule is unconditional: a run/workflow id shown in
   // any UI is full AND click-to-copy. The accessible branch already satisfies
