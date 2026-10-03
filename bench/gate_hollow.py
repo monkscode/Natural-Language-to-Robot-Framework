@@ -7,8 +7,9 @@ READ_LOCATOR_IS_THE_ANSWER) — bs builds the locator from the observed text.
 (q10, READ_NOT_PERFORMED) was registered until 2026-10-03. The owner ruled on
 2026-10-01 that a q10 test which only counts is not hollow, and the rule no
 longer fires on one: the count the query asks to verify is asserted. A q10 test
-that still trips the rule asserts no count, and fails the gate like any other
-hollow pass.
+that still trips the rule asserts no count in a form the checker recognises, and
+fails the gate like any other hollow pass — read the test before calling it
+hollow.
 (q08, SELECT_CHECK_CANNOT_FAIL) is deliberately NOT registered: this gate lands
 BEFORE the q08 normalizer fix, so every pre-fix bench that holds one fails here —
 the intended signal. After the fix, its return is a live regression.
