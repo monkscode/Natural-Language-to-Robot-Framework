@@ -18,7 +18,8 @@ reported and never hollow.
   all / every / each, the query's verify clause names an integer N (q10: "get
   the titles of all books ... verify there are 20 books") and the test asserts
   a count against N. A clause is what follows the read or verify word, up to a
-  comma, a semicolon, a sentence end, a line break, "and" or "then". "Get the
+  comma, a semicolon, a sentence end, a line break, "and", "then", a step number
+  ("2)"), an arrow or "&". "Get the
   price of the first book and verify there is 1 item in the basket" asks for
   one value and is reported whatever is counted. A count is asserted by a
   counting keyword's own inline assertion (`Get Element Count  L  ==  20`), or
@@ -26,8 +27,8 @@ reported and never hollow.
   ${n} == 20`), with N as a whole number ("1920", "20.5" and "20s" hold no 20).
   A number word ("twenty"), another number, or no assertion on the count: still
   reported. Words inside a URL ("/get-started") and the words after click /
-  press / tap / hover, up to the clause end ("click the Get started button"),
-  are not read as instructions.
+  press / tap / hover, up to the clause end or a "to get / to verify" purpose
+  ("click the Get started button"), are not read as instructions.
 - SELECT_CHECK_CANNOT_FAIL: `Select Options By  L  <attr>  V`, then `Get Text`
   on the same <select> checked with `Should Contain  <that text>  V` (or inline
   `contains V`). A whole <select>'s text lists every option, so the check passes
@@ -142,9 +143,11 @@ _SETUP_ONLY = {"new browser", "new context", "new page", "go to", "close browser
 _TEXT_READERS = ("get text", "get texts")
 _LOCATOR_READERS = (*_TEXT_READERS, "get attribute", "get property")
 # Where a clause ends, i.e. where the next instruction starts: a comma, a
-# semicolon, a sentence end, a line break, or "and" / "then". It ends a read or
-# verify clause, a control's name and the clause of a `check`.
-_CLAUSE_END = re.compile(r",\s|;|\.(?:\s|$)|\n|\b(?:and|then)\b", re.IGNORECASE)
+# semicolon, a sentence end, a line break, "and" / "then", a step number with its
+# closing bracket ("2)", "(3)"; "2.5" is none), "->", an arrow or "&". It ends a read
+# or verify clause, a control's name and the clause of a `check`.
+_CLAUSE_END = re.compile(
+    r",\s|;|\.(?:\s|$)|\n|\b(?:and|then)\b|(?<![\w.])\(?\d{1,3}\)|->|→|&", re.IGNORECASE)
 # A whitespace-free token that is a URL: it holds "://", starts with "www.", or is a
 # dotted host name followed by "/" and a path ("example.com/login"). An opening
 # bracket or quote in front of it belongs to the token.
@@ -152,8 +155,12 @@ _HOST_AND_PATH = re.compile(r"(?:[\w-]+\.)+[a-z]{2,}/", re.IGNORECASE)
 _OPENING_PUNCTUATION = "([\"'<"
 _TRAILING_PUNCTUATION = ",;.!?)]}\"'>"
 _WHITESPACE_FREE = re.compile(r"\S+")
-# The words after these verbs are a control's name ("click the Get started button").
+# The words after these verbs are a control's name ("click the Get started button"),
+# up to the clause end or to a stated purpose ("press Enter to verify results appear").
 _CONTROL_VERB = re.compile(r"\b(?:click|clicks|press|presses|tap|taps|hover|hovers)\b", re.IGNORECASE)
+_PURPOSE = re.compile(
+    r"\bto\s+(?:get|read|extract|retrieve|fetch|verify|check|confirm|ensure|validate|assert|make\s+sure)\b",
+    re.IGNORECASE)
 # `check` / `checks` ticks a box or means "check out" instead of verifying when it is
 # followed by "out", or its clause names a box and states nothing ("is", "that" ...).
 _CHECK_OUT = re.compile(r"\s+out\b", re.IGNORECASE)
@@ -390,14 +397,18 @@ def _without_urls(query: str) -> str:
 
 
 def _without_control_names(text: str) -> str:
-    """`text` with the words after click / press / tap / hover removed, up to the clause end; the verb stays."""
+    """`text` with the words after click / press / tap / hover removed, up to the clause end or a "to <read or verify word>"; the verb stays."""
     ends = _clause_end_positions(text)
+    purposes = [m.start() for m in _PURPOSE.finditer(text)]
     pieces, kept = [], 0
     for m in _CONTROL_VERB.finditer(text):
         if m.start() < kept:      # inside a control name already removed
             continue
         pieces.append(text[kept:m.end()] + " ")
         kept = _clause_end(ends, text, m.end())
+        i = bisect_left(purposes, m.end())
+        if i < len(purposes) and purposes[i] < kept:
+            kept = purposes[i]
     pieces.append(text[kept:])
     return "".join(pieces)
 

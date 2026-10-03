@@ -722,6 +722,67 @@ class TestWordsThatAreNotInstructions:
             VERIFY_WITHOUT_ASSERTION}
 
 
+    LOGIN_PAGE = "https://example.com/login"
+
+    @pytest.mark.parametrize("query", [
+        pytest.param("1) Open https://example.com/login 2) Click Login 3) Verify the dashboard is shown",
+                     id="numbered-steps"),
+        pytest.param("(1) Open https://example.com/login (2) Click Login (3) Verify the dashboard is shown",
+                     id="numbers-in-brackets"),
+        pytest.param("Open https://example.com/login -> click Login -> verify the dashboard is shown",
+                     id="ascii-arrow"),
+        pytest.param("Open https://example.com/login → click Login → verify the dashboard is shown",
+                     id="unicode-arrow"),
+        pytest.param("Open https://example.com/login, click Login & verify the dashboard is shown",
+                     id="ampersand"),
+    ])
+    def test_a_step_marker_ends_a_controls_name(self, query):
+        code = self.page(self.LOGIN_PAGE, "    Click    text=Login\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_purpose_after_a_controls_name_is_still_read(self):
+        query = ("Go to https://www.amazon.in, type laptop in the search field and press Enter "
+                 "to verify results appear")
+        code = self.page("https://www.amazon.in", "    Fill Text    id=twotabsearchtextbox    laptop\n"
+                                                  "    Keyboard Key    press    Enter\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_read_purpose_after_a_controls_name_is_still_asked_for(self):
+        query = "Click the first product on https://www.saucedemo.com/inventory.html to read its price"
+        code = self.page("https://www.saucedemo.com/inventory.html", "    Click    css=.inventory_item_name\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_to_that_is_not_a_purpose_stays_in_the_controls_name(self):
+        query = "Go to https://example.com and click Go to cart"
+        assert shapes(self.page("https://example.com", "    Click    text=Go to cart\n"), query) == set()
+
+    @pytest.mark.parametrize("query, body", [
+        pytest.param("Go to https://playwright.dev and click the Get started button",
+                     "    Click    text=Get started\n", id="get-in-a-button-name"),
+        pytest.param("Go to https://example.com/blog and click Read more on the first post",
+                     "    Click    text=Read more >> nth=0\n", id="read-in-a-link-name"),
+        pytest.param("Go to https://example.com/hotel, press the Check availability button and get the first price",
+                     "    Click    text=Check availability\n    ${price}=    Get Text    css=.price\n",
+                     id="check-in-a-button-name-then-a-read"),
+        pytest.param("Go to https://example.com/plans and click the 2.5 GB plan",
+                     "    Click    text=2.5 GB\n", id="a-decimal-is-no-step-marker"),
+        pytest.param("Go to https://example.com/plans and click the Python 3.12 plan",
+                     "    Click    text=Python 3.12\n", id="a-version-is-no-step-marker"),
+    ])
+    def test_a_controls_name_is_still_not_an_instruction(self, query, body):
+        assert shapes(self.page("https://example.com", body), query) == set()
+
+    def test_the_count_rule_still_reads_n_from_its_own_clause(self):
+        assert shapes(books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n"), Q10) == set()
+
+    def test_a_step_marker_ends_a_read_clause_and_a_verify_clause(self):
+        # a number in the next step is not the number to verify
+        query = "1) Get the titles of all books 2) Verify there are 20 books"
+        assert pass_quality._verify_clauses(query) == [" there are 20 books"]
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == set()
+
+
 class TestCheckThatMeansTick:
     """`check` is a verify word unless it ticks a box or means "check out"."""
 
@@ -787,7 +848,7 @@ class TestLongRequests:
     CODE = robot("", "    New Page    https://example.com\n    Click    text=Go\n")
 
     @pytest.mark.parametrize("word", ["get ", "verify ", "check ", "check box ", "click ", "https://a.com/get ",
-                                      "(", "a.", "https://a.com/get"])
+                                      "(", "a.", "https://a.com/get", "click to get ", "2) click ", "tap -> "])
     def test_a_long_request_of_one_repeated_word_takes_under_two_seconds(self, word):
         query = word * (80_000 // len(word))
         start = time.perf_counter()
