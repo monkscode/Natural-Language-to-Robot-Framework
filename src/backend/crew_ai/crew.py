@@ -24,8 +24,8 @@ class RunCrewResult(NamedTuple):
 
     A NamedTuple rather than a plain tuple so callers can read fields by name
     while every existing positional access keeps working. Members 0-4 are in
-    their original order for exactly that reason; the two additions are
-    appended rather than inserted.
+    their original order for exactly that reason; the additions are appended
+    rather than inserted (change_waits is one more appended member).
 
     shared_llm sits last despite being the more useful handle: llm_monitor is
     index 4 in released code and in test assertions, and reordering to put the
@@ -40,6 +40,7 @@ class RunCrewResult(NamedTuple):
     stage_metrics: dict            # {"planner": {...}, "assembler": {...}}
     shared_llm: Any                # the CleanedLLMWrapper itself, for get_workflow_usage()
     guardrail_attempts: dict       # the main crew's RobotTasks counter (assembly_output)
+    change_waits: tuple = ()       # F1: ({"read_locator", "action_locator"}, ...) — kept beside the steps
 
 # CrewAI log file path and rotation settings
 CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
@@ -575,6 +576,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 result, assembler_crew, optimization_metrics, hint_metadata,
                 agents.llm._monitor, task_callback.stage_metrics, agents.llm,
                 dict(tasks.guardrail_attempts),
+                tuple(identification.get("change_waits") or ()),
             )
 
         except Exception as e:

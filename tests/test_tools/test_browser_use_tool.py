@@ -199,6 +199,24 @@ class TestLocatorMappingFoundEntries:
         assert entry["row_anchored"] is False
         assert entry["row_anchor_ambiguous"] is False
 
+    def test_changed_by_action_forwarded(self, tool):
+        """F1: browser-service marks a read whose text changed because of an
+        earlier action with that action's element id; the mapping carries it."""
+        mapping = _run_mapping(tool, [
+            _found("elem_1", "a:has-text('Laptops')"),
+            _found("elem_2", "css=#t >> nth=0 >> a", changed_by_action="elem_1"),
+        ])
+        assert mapping["elem_2"]["changed_by_action"] == "elem_1"
+
+    def test_changed_by_action_key_absent_without_a_mark(self, tool):
+        """No mark (or an empty one) must leave the key out, not None / ''."""
+        mapping = _run_mapping(tool, [
+            _found("elem_1", "id=username"),
+            _found("elem_2", "id=password", changed_by_action=""),
+        ])
+        assert "changed_by_action" not in mapping["elem_1"]
+        assert "changed_by_action" not in mapping["elem_2"]
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""

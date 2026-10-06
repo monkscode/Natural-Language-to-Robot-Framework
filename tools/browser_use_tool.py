@@ -493,6 +493,11 @@ class BatchBrowserUseTool(BaseTool):
                             "row_anchored": elem_result.get("row_anchored", False),
                             "row_anchor_ambiguous": elem_result.get("row_anchor_ambiguous", False),
                         }
+                        # F1: bs marks a read whose text changed because of an
+                        # earlier action with that action's element id. Carried
+                        # only when set; NLRF keeps it beside the steps.
+                        if elem_result.get("changed_by_action"):
+                            locator_mapping[element_id]["changed_by_action"] = elem_result["changed_by_action"]
                     else:
                         locator_mapping[element_id] = {
                             "found": False,

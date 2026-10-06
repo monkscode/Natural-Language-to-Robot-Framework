@@ -696,6 +696,34 @@ def _fetch_locator_mapping(
     return response.get("locator_mapping") or {}
 
 
+def change_waits_from(
+    steps: list[Any],
+    step_element_ids: dict[int, str],
+    locator_mapping: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """F1: (read locator, action locator) for each Get Text step bs marked as changed by an earlier action.
+
+    The marks travel BESIDE the merged steps: the assembler never sees them, so it can neither copy nor drop
+    them. A mark whose action element was not found, or that names the read itself, gives no wait.
+    """
+    waits: list[dict[str, str]] = []
+    for index, raw in enumerate(steps):
+        step = _as_dict(raw)
+        if _normalize_keyword(step.get("keyword")) != "get text":
+            continue
+        entry = locator_mapping.get(step_element_ids.get(index, ""))
+        if not _entry_found(entry):
+            continue
+        action_id = entry.get("changed_by_action")
+        action_entry = locator_mapping.get(action_id) if action_id else None
+        if action_id == step_element_ids.get(index) or not _entry_found(action_entry):
+            continue
+        wait = {"read_locator": entry["best_locator"], "action_locator": action_entry["best_locator"]}
+        if wait not in waits:
+            waits.append(wait)
+    return waits
+
+
 def _stage_summary_message(found: int, total: int) -> str:
     """Honest stage completion: a failed tool call must not read as success."""
     if total == 0:
@@ -779,4 +807,5 @@ def identify_elements(
             "found": found,
             "not_found": len(elements) - found,
         },
+        "change_waits": change_waits_from(dict_steps, step_element_ids, locator_mapping),
     }

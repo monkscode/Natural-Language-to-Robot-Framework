@@ -28,6 +28,7 @@ import pytest
 from src.backend.crew_ai.element_identification import (
     action_for_keyword,
     build_elements,
+    change_waits_from,
     extract_plan_url,
     identify_elements,
     merge_locators,
@@ -1364,3 +1365,70 @@ class TestOrphanNavigation:
         elements, step_element_ids = build_elements(steps)
         assert step_element_ids == {1: "elem_1", 3: "elem_2"}
         assert [e["id"] for e in elements] == ["elem_1", "elem_2"]
+
+
+# ---------------------------------------------------------------------------
+# F1: change marks carried BESIDE the merged steps
+# ---------------------------------------------------------------------------
+
+def test_change_waits_pair_the_read_with_the_action_locator():
+    steps = [{"keyword": "New Page", "value": "https://x"},
+             {"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"}]
+    ids = {1: "elem_1", 2: "elem_2"}
+    mapping = {"elem_1": {"found": True, "best_locator": "a:has-text('Laptops')"},
+               "elem_2": {"found": True, "best_locator": "css=#t >> nth=0 >> a", "changed_by_action": "elem_1"}}
+    assert change_waits_from(steps, ids, mapping) == [
+        {"read_locator": "css=#t >> nth=0 >> a", "action_locator": "a:has-text('Laptops')"}]
+
+
+@pytest.mark.parametrize("read_entry_extra,action_entry", [
+    ({}, {"found": True, "best_locator": "a:has-text('Laptops')"}),                       # no mark
+    ({"changed_by_action": "elem_1"}, {"found": False, "error": "x"}),                     # action not found
+    ({"changed_by_action": "elem_2"}, {"found": True, "best_locator": "a:has-text('Laptops')"}),  # names itself
+])
+def test_no_wait_without_a_usable_mark(read_entry_extra, action_entry):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"}]
+    mapping = {"elem_1": action_entry,
+               "elem_2": {"found": True, "best_locator": "css=#t >> nth=0 >> a", **read_entry_extra}}
+    assert change_waits_from(steps, {0: "elem_1", 1: "elem_2"}, mapping) == []
+
+
+def test_only_get_text_steps_get_a_wait():
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Hover", "element_description": "first laptop name"}]   # bs reads a hover as get_text
+    mapping = {"elem_1": {"found": True, "best_locator": "a:has-text('Laptops')"},
+               "elem_2": {"found": True, "best_locator": "css=#t", "changed_by_action": "elem_1"}}
+    assert change_waits_from(steps, {0: "elem_1", 1: "elem_2"}, mapping) == []
+
+
+def test_the_mark_never_reaches_the_assembler_steps():
+    # _step() adds the required step_description (the merge builds PlannedStep models).
+    steps = [_step("New Page", value="https://www.demoblaze.com"),
+             _step("Click", "Laptops link"),
+             _step("Get Text", "first laptop name")]
+    mapping = {"elem_1": {"found": True, "best_locator": "a:has-text('Laptops')"},
+               "elem_2": {"found": True, "best_locator": "css=#t >> nth=0 >> a", "changed_by_action": "elem_1"}}
+    out = identify_elements(steps, "q", run_tool=lambda e, u, q: {"status": "success", "locator_mapping": mapping})
+    assert all("changed_by_action" not in s for s in out["steps"])
+    assert out["change_waits"] == [{"read_locator": "css=#t >> nth=0 >> a", "action_locator": "a:has-text('Laptops')"}]
+
+
+def test_change_waits_is_empty_when_nothing_is_marked():
+    steps = [_step("New Page", value="https://www.demoblaze.com"),
+             _step("Get Text", "first laptop name")]
+    mapping = {"elem_1": {"found": True, "best_locator": "css=#t"}}
+    out = identify_elements(steps, "q", run_tool=lambda e, u, q: {"status": "success", "locator_mapping": mapping})
+    assert out["change_waits"] == []
+
+
+def test_change_waits_are_deduplicated_in_plan_order():
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"},
+             {"keyword": "  get   TEXT ", "element_description": "first laptop name again"}]
+    mapping = {"elem_1": {"found": True, "best_locator": "a:has-text('Laptops')"},
+               "elem_2": {"found": True, "best_locator": "css=#t", "changed_by_action": "elem_1"},
+               "elem_3": {"found": True, "best_locator": "css=#t", "changed_by_action": "elem_1"}}
+    assert change_waits_from(steps, {0: "elem_1", 1: "elem_2", 2: "elem_3"}, mapping) == [
+        {"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"}]
