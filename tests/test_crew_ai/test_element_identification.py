@@ -1423,6 +1423,32 @@ def test_change_waits_is_empty_when_nothing_is_marked():
     assert out["change_waits"] == []
 
 
+def test_a_malformed_change_mark_never_fails_identification(caplog):
+    """browser-service's JSON is external input: a non-string mark (a list is
+    unhashable) must cost the wait, never the generation."""
+    steps = [_step("New Page", value="https://www.demoblaze.com"),
+             _step("Click", "Laptops link"),
+             _step("Get Text", "first laptop name")]
+    clean = {"elem_1": {"found": True, "best_locator": "a:has-text('Laptops')"},
+             "elem_2": {"found": True, "best_locator": "css=#t >> nth=0 >> a"}}
+    marked = {"elem_1": clean["elem_1"],
+              "elem_2": {**clean["elem_2"], "changed_by_action": ["elem_1"]}}
+
+    def run(mapping):
+        return identify_elements(
+            steps, "q", run_tool=lambda e, u, q: {"status": "success", "locator_mapping": mapping})
+
+    expected_steps = run(clean)["steps"]
+    with caplog.at_level("WARNING", logger="src.backend.crew_ai.element_identification"):
+        out = run(marked)
+    assert out["change_waits"] == []
+    assert out["steps"] == expected_steps
+    warnings = [r for r in caplog.records
+                if r.name == "src.backend.crew_ai.element_identification"
+                and r.levelname == "WARNING"]
+    assert len(warnings) == 1
+
+
 def test_change_waits_are_deduplicated_in_plan_order():
     steps = [{"keyword": "Click", "element_description": "Laptops link"},
              {"keyword": "Get Text", "element_description": "first laptop name"},

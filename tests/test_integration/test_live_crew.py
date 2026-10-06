@@ -95,9 +95,9 @@ class TestExtractUrlFromQueryLive:
 class TestLiveLLMCrewOnline:
     """Tests that invoke the real configured LLM (vertex or gemini)."""
 
-    def test_run_crew_returns_eight_values(self):
+    def test_run_crew_returns_nine_values(self):
         """run_crew() returns a RunCrewResult: the original five members plus
-        stage_metrics, shared_llm and guardrail_attempts."""
+        stage_metrics, shared_llm, guardrail_attempts and change_waits."""
         from src.backend.crew_ai.crew import run_crew
         result = run_crew(
             "click the login button on example.com",
@@ -105,7 +105,7 @@ class TestLiveLLMCrewOnline:
             model_name=_MODEL,
             workflow_id="live-test-001",
         )
-        assert len(result) == 8
+        assert len(result) == 9
 
     def test_run_crew_output_is_non_empty_string(self):
         """The assembler task's raw output is a non-empty string.

@@ -800,6 +800,14 @@ def identify_elements(
     # completion text differs on partial/failed identification.
     notify(60, _stage_summary_message(found, len(elements)))
 
+    # F1: browser-service's marks are external input — a malformed one costs
+    # the wait, never the generation.
+    try:
+        change_waits = change_waits_from(dict_steps, step_element_ids, locator_mapping)
+    except Exception:
+        logger.warning("change-wait marks skipped — test generated without them", exc_info=True)
+        change_waits = []
+
     return {
         "steps": merged,
         "summary": {
@@ -807,5 +815,5 @@ def identify_elements(
             "found": found,
             "not_found": len(elements) - found,
         },
-        "change_waits": change_waits_from(dict_steps, step_element_ids, locator_mapping),
+        "change_waits": change_waits,
     }
