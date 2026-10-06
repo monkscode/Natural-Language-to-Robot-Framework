@@ -15,7 +15,6 @@ project_get_element_states_no_wait).
 
 import logging
 import re
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -381,7 +380,6 @@ class TestInsertPlacesThePair:
         assert _warnings(caplog) == []
 
 
-_PROBE_DIR = Path("bench/private/bs31_eval/probe_pr42/exec_check")
 _READ_LOCATOR = "css=#tbodyid >> div.col-lg-4 >> nth=0 >> a.hrefch"
 
 _REAL_HEAD = (
@@ -409,7 +407,7 @@ _REAL_BODY_TAIL = (
     "    Log    @@ARG@@\n"
     "    Close Browser"
 )
-# The two real files (bench/private/bs31_eval/probe_pr42/exec_check/p03_*.robot): CRLF, no trailing newline.
+# Two real generated files (demoblaze, bench probe p03), inlined as the fixture: CRLF, no trailing newline.
 _REAL_60A0 = _crlf(
     _REAL_HEAD
     + "${laptops_category_locator}    a:has-text('Laptops')\n"
@@ -462,13 +460,6 @@ class TestTheRealFiles:
         assert out[i - 1].lstrip().startswith("# WARNING")
         assert out[i + 1] == "    Click    ${laptops_link_locator}"
 
-    @pytest.mark.skipif(not _PROBE_DIR.is_dir(), reason="bench/private is not in this checkout")
-    def test_the_inlined_text_is_the_real_file(self):
-        for stamp, text in (("60a0b526-0c2b-4f66-9f88-0b82609782d7", _REAL_60A0),
-                            ("c84f4e64-5f69-41f3-bf0c-d892bf0214ef", _REAL_C84F)):
-            real = (_PROBE_DIR / f"p03_{stamp}.robot").read_bytes().decode("utf-8")
-            assert real == text
-
 
 class TestCrlfLastLineIsTheRead:
     def test_both_inserted_lines_end_with_crlf(self):
@@ -510,6 +501,9 @@ R_FOLLOW = "cannot be followed line by line"
 R_ACTION = "no action line"
 R_READ = "no Get Text"
 R_HALF = "only one of its two lines"
+R_TIMEOUT = "Robot timeout"
+R_REPOINT = "assigned between the first action line and the read"
+R_TAKEN = "already assigned"
 
 
 def _blocked(
@@ -544,6 +538,8 @@ _PIPE_CONTROL = (
     "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nGenerated Test\n"
     "    Click    id=go\n    ${total}=    Get Text    css=#total\n"
 )
+
+_OWN_HEAD = _HEAD.replace("${total_locator}    css=#total", "${total}    css=#total")
 
 _BLOCKED_CASES = [
     _blocked(_NO_ACTION, _BASE, R_ACTION, case_id="no action line"),
@@ -594,6 +590,69 @@ _BLOCKED_CASES = [
     _blocked(
         _doc(*_OPEN, "    SeleniumLibrary.Click    ${btn_locator}", _READ, _CLOSE),
         _BASE, R_ACTION, case_id="another library's SeleniumLibrary.Click",
+    ),
+    # F1: the read variable re-pointed between the first action line and the read
+    _blocked(
+        _doc(*_OPEN, _CLICK, _REPOINT, _READ, _CLOSE),
+        _doc(*_OPEN, _REPOINT, _CLICK, _READ, _CLOSE),
+        R_REPOINT, case_id="the read variable re-pointed between the Click and the read",
+        waits=[_w("id=other")], control_waits=[_w("id=other")],
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _REPOINT, _READ, _CLOSE, head=_HEAD.replace("${total_locator}    css=#total\n", "")),
+        _doc(*_OPEN, _REPOINT, _CLICK, _READ, _CLOSE, head=_HEAD.replace("${total_locator}    css=#total\n", "")),
+        R_REPOINT, case_id="the read variable first assigned between the Click and the read",
+        waits=[_w("id=other")], control_waits=[_w("id=other")],
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, _REPOINT, _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _REPOINT, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPOINT, case_id="the read variable re-pointed between two action lines",
+        waits=[_w("id=other", "id=q")], control_waits=[_w("id=other", "id=q")],
+    ),
+    # F2: a Robot timeout is not caught by Run Keyword And Ignore Error or Wait Until Keyword Succeeds
+    _blocked(
+        _doc(*_OPEN, "    [Timeout]    5s", _CLICK, _READ, _CLOSE),
+        _doc(*_OPEN, "    [Documentation]    5s", _CLICK, _READ, _CLOSE),
+        R_TIMEOUT, case_id="a [Timeout] setting in the test",
+    ),
+    _blocked(
+        _doc(*_OPEN, "    [timeout]    5s", _CLICK, _READ, _CLOSE),
+        _doc(*_OPEN, "    [documentation]    5s", _CLICK, _READ, _CLOSE),
+        R_TIMEOUT, case_id="a lower-case [timeout] setting in the test",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD.replace("Library    BuiltIn\n", "Library    BuiltIn\nTest Timeout    5s\n")),
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD.replace("Library    BuiltIn\n", "Library    BuiltIn\nDocumentation    5s\n")),
+        R_TIMEOUT, case_id="a Test Timeout line in the Settings section",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD.replace("Library    BuiltIn\n", "Library    BuiltIn\nTEST_TIMEOUT    5s\n")),
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD.replace("Library    BuiltIn\n", "Library    BuiltIn\nDocumentation    5s\n")),
+        R_TIMEOUT, case_id="TEST_TIMEOUT in the Settings section",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD.replace("Library    BuiltIn\n", "Library    BuiltIn\nTask Timeout    5s\n"),
+             section="*** Tasks ***"),
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD.replace("Library    BuiltIn\n", "Library    BuiltIn\nDocumentation    5s\n"),
+             section="*** Tasks ***"),
+        R_TIMEOUT, case_id="a Task Timeout line in the Settings section",
+    ),
+    # F6: one definition of "our pair"; a name the assembler already assigned is never reused or silent
+    _blocked(
+        _doc(
+            *_OPEN, "    ${total_before}=    Get Text    ${total}", _CLICK, "    ${total_after}=    Get Text    ${total}",
+            "    Should Not Be Equal    ${total_before}    ${total_after}", _CLOSE, head=_OWN_HEAD,
+        ),
+        _doc(
+            *_OPEN, "    ${total_old}=    Get Text    ${total}", _CLICK, "    ${total_after}=    Get Text    ${total}",
+            "    Should Not Be Equal    ${total_old}    ${total_after}", _CLOSE, head=_OWN_HEAD,
+        ),
+        R_TAKEN, case_id="the assembler's own variable has the name the before-read would take",
+    ),
+    _blocked(
+        _BASE_INSERTED.replace("30s    250ms", "10s    250ms"), _BASE, R_HALF,
+        case_id="a framework before-read whose wait a repair edited",
     ),
     _blocked(_PIPE, _PIPE_CONTROL, R_PARSE, case_id="a pipe-separated file"),
     _blocked("*** Test Cases ***\n\x00", _BASE, R_ACTION, case_id="garbage"),
@@ -660,7 +719,7 @@ class TestInsertLeavesTheFileAlone:
         assert out.count("${total_locator_before}=") == 1
         warnings = _warnings(caplog)
         assert len(warnings) == 1
-        assert "already uses its variable" in warnings[0].getMessage()
+        assert R_TAKEN in warnings[0].getMessage()
         # control: each wait alone is placed
         assert insert_change_waits(original, [both[1]]) != original
 
@@ -672,6 +731,138 @@ class TestInsertLeavesTheFileAlone:
         warnings = _warnings(caplog)
         assert len(warnings) == 1
         assert R_READ in warnings[0].getMessage()
+
+
+def _signals(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "signal:" in r.getMessage()]
+
+
+class TestSignalOnlyForPairsWritten:
+    def test_a_half_pair_for_a_later_wait_logs_no_signal(self, caplog):
+        original = _doc(
+            *_OPEN, _CLICK, "    ${total_locator_before}=    Run Keyword And Ignore Error    Get Text    ${total_locator}",
+            "    ${a}=    Get Text    css=#price", _READ, _CLOSE,
+        )
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(original, [_w("css=#price"), _w("css=#total")])
+        assert out == original
+        assert _signals(caplog) == []
+        assert len(_warnings(caplog)) == 1
+        # control: the price wait alone is written, and signalled
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, [_w("css=#price")]) != original
+        assert len(_signals(caplog)) == 1
+
+    def test_a_bad_wait_after_a_good_one_logs_no_signal(self, caplog):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(_BASE, [_W, {"read_locator": "css=#total"}])
+        assert out == _BASE
+        assert _signals(caplog) == []
+        assert len(_warnings(caplog)) == 1
+
+    def test_exactly_one_signal_per_pair_written(self, caplog):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(_BASE, [_W]) == _BASE_INSERTED
+        assert len(_signals(caplog)) == 1
+
+
+# ---------------------------------------------------------------------------
+# The comparison key: browser-service's spelling vs what the file holds
+# ---------------------------------------------------------------------------
+
+def _inline(action_cell: str, read_cell: str) -> str:
+    return _doc(*_OPEN, f"    Click    {action_cell}", f"    ${{t}}=    Get Text    {read_cell}", _CLOSE)
+
+
+_KEY_CASES = [
+    # (bs read locator, read cell in the file, bs action locator, action cell in the file, pair placed)
+    ("#total", "css=#total", "id=go", "id=go", True),
+    ("#total", "id=total", "id=go", "id=go", True),
+    ("CSS=#total", "css=#total", "id=go", "id=go", True),
+    (".title", "css=.title", "id=go", "id=go", True),
+    ("#a.b", "css=#a.b", "id=go", "id=go", True),
+    ("id=a.b", "id=a.b", "id=go", "id=go", True),
+    ("#a.b", "id=a.b", "id=go", "id=go", False),
+    ("css=#a.b", "id=a.b", "id=go", "id=go", False),
+    ("css=#total", "css=#total", "#go", "css=#go", True),
+    ("css=#total", "css=#total", "#go", "css=.go", False),
+]
+
+
+class TestComparisonKey:
+    @pytest.mark.parametrize(("read_bs", "read_cell", "action_bs", "action_cell", "placed"), _KEY_CASES)
+    def test_bare_and_prefixed_spellings_of_one_element(self, read_bs, read_cell, action_bs, action_cell, placed,
+                                                        caplog):
+        text = _inline(action_cell, read_cell)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(text, [_w(read_bs, action_bs)])
+        if placed:
+            assert out.count("Wait Until Keyword Succeeds") == 1
+            assert _warnings(caplog) == []
+        else:
+            assert out == text
+            assert len(_warnings(caplog)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Two waits for one element are one wait
+# ---------------------------------------------------------------------------
+
+class TestDuplicateWaits:
+    def test_inline_form_writes_one_pair(self, caplog):
+        text = _inline("id=go", "css=#total")
+        one = insert_change_waits(text, [_w("css=#total", "id=go")])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            two = insert_change_waits(text, [_w("css=#total", "id=go"), _w("id=total", "css=#go")])
+        assert two == one
+        assert two.count("Wait Until Keyword Succeeds") == 1
+        assert two.count("${read_before_1}=") == 1
+        assert _warnings(caplog) == []
+        assert len(_signals(caplog)) == 1
+
+    def test_variable_form_writes_one_pair(self):
+        assert insert_change_waits(_BASE, [_W, _w("id=total")]) == _BASE_INSERTED
+
+    def test_a_different_action_is_not_a_duplicate(self):
+        # control: same read, another action element -> a second wait, which the shared name then refuses
+        original = _doc(*_OPEN, _CLICK, _CLICK_Y, _READ, _CLOSE)
+        out = insert_change_waits(original, [_W, _w("css=#total", "id=stop")])
+        assert out.count("Wait Until Keyword Succeeds") == 1  # the shared name refused it, it was not deduplicated away
+        assert insert_change_waits(original, [_w("css=#total", "id=stop")]) != original
+
+
+# ---------------------------------------------------------------------------
+# F6: our pair is recognised by its forms, whatever the variable is called
+# ---------------------------------------------------------------------------
+
+class TestOurPairIsRecognisedByForm:
+    _RENAMED = _doc(
+        *_OPEN,
+        "    ${old_text}=    Run Keyword And Ignore Error    Get Text    ${total_locator}",
+        _CLICK,
+        "    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text    "
+        "${total_locator}    !=    ${old_text}[1]",
+        _READ, _LOG, _CLOSE,
+    )
+
+    def test_a_pair_a_repair_renamed_is_present(self, caplog):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(self._RENAMED, [_W]) == self._RENAMED
+        assert caplog.records == []
+        # control: the same file without the pair gets one
+        assert insert_change_waits(_BASE, [_W]) != _BASE
+
+    def test_the_renamed_pair_is_removed_too(self):
+        assert remove_change_waits(self._RENAMED) == _BASE
+
+    def test_a_wait_form_whose_variable_has_no_before_read_is_half_a_pair(self, caplog):
+        text = self._RENAMED.replace("${old_text}=", "${other_text}=")
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(text, [_W]) == text
+        warnings = _warnings(caplog)
+        assert len(warnings) == 1
+        assert R_HALF in warnings[0].getMessage()
 
 
 # ---------------------------------------------------------------------------

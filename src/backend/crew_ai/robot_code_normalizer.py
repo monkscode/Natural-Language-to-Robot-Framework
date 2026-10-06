@@ -1399,14 +1399,17 @@ _WAIT_VALUE_RE = re.compile(r"\$\{([^{}]+)\}\[1\]")
 
 
 def _change_wait_key(value: str | None) -> str | None:
-    """A locator in the form two locators of one element compare equal in: `_canon_locator`,
-    then a leading `css=` (any letter case) removed. None for None or an empty locator."""
-    canon = _canon_locator(value)
-    if canon is None:
+    """A locator in the form two spellings of one element compare equal in: stripped, a leading
+    `css=` (any letter case) removed and the rest stripped again, then a plain-identifier `#x`
+    (what `_ID_LOCATOR_RE` calls an id) becomes `id=x`. `#a.b` stays `#a.b`: it is id `a` with class
+    `b`, never `id=a.b`. None for None or an empty locator."""
+    if value is None:
         return None
-    if canon[:4].lower() == "css=":
-        canon = canon[4:].strip()
-    return canon or None
+    text = value.strip()
+    if text[:4].lower() == "css=":
+        text = text[4:].strip()
+    match = _ID_LOCATOR_RE.fullmatch(text) or _ID_LOCATOR_RE.fullmatch(f"css={text}")
+    return f"id={match.group(1)}" if match else (text or None)
 
 
 def _change_wait_before_line(indent: str, name: str, cell: str) -> str:
@@ -1448,7 +1451,26 @@ def _change_wait_file_problem(suite: _Suite) -> str | None:
             "its test cannot be followed line by line (a control structure, a template or a line "
             "this reader cannot read as a step)"
         )
+    if _sets_a_robot_timeout(suite):
+        return (
+            "it sets a Robot timeout (Test Timeout, Task Timeout or [Timeout]), which Robot does not "
+            "catch inside Run Keyword And Ignore Error or Wait Until Keyword Succeeds"
+        )
     return None
+
+
+def _sets_a_robot_timeout(suite: _Suite) -> bool:
+    """True when the one test holds a `[Timeout]` setting or the Settings section holds a `Test
+    Timeout` / `Task Timeout` line (case, spaces and underscores ignored, the way Robot compares)."""
+    if any(
+        step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[timeout]" for step in suite.tests[0].steps
+    ):
+        return True
+    return any(
+        re.sub(_SPACE_UNDERSCORE, "", _CELL_SPLIT_RE.split(suite.lines[line_no].strip())[0].lower())
+        in ("testtimeout", "tasktimeout")
+        for line_no in suite.settings_line_nos
+    )
 
 
 def _change_wait_suite(robot_code: str) -> _Suite | None:
@@ -1464,18 +1486,28 @@ def _change_wait_suite(robot_code: str) -> _Suite | None:
     return suite
 
 
-def _change_wait_targets(steps: list[_Step], keys: list[str | None], wait, number: int) -> tuple[_Step, _Step] | None:
-    """The first action line and the read of one wait, or None after one WARNING when the test has no such pair."""
-    actions = _change_wait_matches(steps, keys, _CHANGE_WAIT_ACTIONS, _change_wait_key(wait["action_locator"]))
+def _change_wait_targets(steps: list[_Step], keys: list[str | None], read_key: str | None,
+                         action_key: str | None, number: int) -> tuple[_Step, _Step] | None:
+    """The first action line and the read of one wait, or None after one WARNING when the test has no
+    such pair, or when the read's variable is assigned between the two (the before-read, placed above the
+    first action line, would read another element than the wait)."""
+    actions = _change_wait_matches(steps, keys, _CHANGE_WAIT_ACTIONS, action_key)
     if not actions:
         logger.warning(f"Change-wait inserter: skipped wait {number} — no action line on its element in the test")
         return None
-    reads = _change_wait_matches(
-        steps, keys, _GET_TEXT_KEYWORDS, _change_wait_key(wait["read_locator"]), actions[-1] + 1
-    )
+    reads = _change_wait_matches(steps, keys, _GET_TEXT_KEYWORDS, read_key, actions[-1] + 1)
     if not reads:
         logger.warning(
             f"Change-wait inserter: skipped wait {number} — no Get Text of its element after the last action line"
+        )
+        return None
+    scalar = _SCALAR_CELL_RE.fullmatch(steps[reads[0]].args[0])
+    if scalar and any(
+        _canon_variable(scalar.group(1)) in step.assigns for step in steps[actions[0]:reads[0]]
+    ):
+        logger.warning(
+            f"Change-wait inserter: skipped wait {number} — its read variable is assigned between the first "
+            "action line and the read"
         )
         return None
     return steps[actions[0]], steps[reads[0]]
@@ -1489,48 +1521,68 @@ def _change_wait_name(read_cell: str, number: int) -> str:
     return f"read_before_{number}"
 
 
-def _plan_change_waits(suite: _Suite, waits: list) -> dict[int, list[str]] | None:
-    """line number -> the lines to put directly above it, or None when the whole file must stay as it is."""
+def _change_wait_decision(forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]], cell: str,
+                          name: str, assigned: set[str], number: int) -> str:
+    """What to do with one wait: `present` (the framework's own two lines for this read cell are
+    there, whatever the variable is called), `half` (only one of them is: the whole file stays, one
+    WARNING), `taken` (the name this wait would assign is already assigned: skip, one WARNING) or
+    `insert`. `forms` holds, per step, the remover's recognition of its line (before-read, wait)."""
+    befores = [(i, f[0][0]) for i, f in enumerate(forms) if f[0] is not None and f[0][1] == cell]
+    waits = [(i, f[1][0]) for i, f in enumerate(forms) if f[1] is not None and f[1][1] == cell]
+    if any(variable == wait_variable and j > i for i, variable in befores for j, wait_variable in waits):
+        return "present"
+    if befores or waits:
+        logger.warning(
+            f"Change-wait inserter: left the file unchanged — wait {number} has only one of its two lines"
+        )
+        return "half"
+    if _canon_variable(name) in assigned:
+        logger.warning(
+            f"Change-wait inserter: skipped wait {number} — the variable name it would assign is already "
+            "assigned in the test"
+        )
+        return "taken"
+    return "insert"
+
+
+def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]], list[str]] | None:
+    """(line number -> the lines to put directly above it, one INFO text per pair), or None when the whole
+    file must stay as it is. Nothing is logged at INFO here: the caller does it once the text is final."""
     test = suite.tests[0]
     steps = test.steps
     keys = [_change_wait_key(args[0]) if args else None for args in _follow(test, suite.variables)]
     assigned = {name for step in steps for name in step.assigns}
-    placed: set[str] = set()
+    forms = [
+        (_change_wait_before_key(cells), _change_wait_wait_key(cells))
+        for cells in ((_change_wait_cells(suite.lines[step.line_no]) or []) for step in steps)
+    ]
+    seen: set[tuple[str | None, str | None]] = set()
     inserts: dict[int, list[str]] = {}
+    notes: list[str] = []
     for number, wait in enumerate(waits, start=1):
-        targets = _change_wait_targets(steps, keys, wait, number)
+        element = (_change_wait_key(wait["read_locator"]), _change_wait_key(wait["action_locator"]))
+        if element in seen:
+            continue  # the same read after the same action: one wait
+        seen.add(element)
+        targets = _change_wait_targets(steps, keys, element[0], element[1], number)
         if targets is None:
             continue
         first_action, read = targets
         cell = read.args[0]
         name = _change_wait_name(cell, number)
-        canon = _canon_variable(name)
-        if canon in placed:
-            logger.warning(
-                f"Change-wait inserter: skipped wait {number} — an earlier wait of this call already "
-                "uses its variable"
-            )
-            continue
-        before_present = canon in assigned
-        wait_present = any(
-            canon not in step.assigns and _mentions_variable(_line_content(suite.lines[step.line_no]), canon)
-            for step in steps
-        )
-        if before_present and wait_present:
-            continue  # this wait is already there
-        if before_present or wait_present:
-            logger.warning(
-                f"Change-wait inserter: left the file unchanged — wait {number} has only one of its two lines"
-            )
+        decision = _change_wait_decision(forms, cell, name, assigned, number)
+        if decision == "half":
             return None
-        placed.add(canon)
+        if decision != "insert":
+            continue
+        assigned.add(_canon_variable(name))
         inserts.setdefault(first_action.line_no, []).append(_change_wait_before_line(first_action.parts[1], name, cell))
         inserts.setdefault(read.line_no, []).append(_change_wait_wait_line(read.parts[1], name, cell))
-        logger.info(
+        notes.append(
             f"Change-wait inserter: wait {number} — read above line {first_action.line_no + 1}, wait above "
             f"line {read.line_no + 1} (signal: change-wait-inserted)"
         )
-    return inserts
+    return inserts, notes
 
 
 def _insert_change_waits(robot_code: str, change_waits) -> str:
@@ -1538,9 +1590,10 @@ def _insert_change_waits(robot_code: str, change_waits) -> str:
     if not robot_code or not waits:
         return robot_code
     suite = _change_wait_suite(robot_code)
-    inserts = _plan_change_waits(suite, waits) if suite is not None else None
-    if not inserts:
+    planned = _plan_change_waits(suite, waits) if suite is not None else None
+    if planned is None or not planned[0]:
         return robot_code
+    inserts, notes = planned
     out = []
     for line_no, line in enumerate(suite.lines):
         if line_no in inserts:
@@ -1548,6 +1601,8 @@ def _insert_change_waits(robot_code: str, change_waits) -> str:
             eol = "\r" if suite.lines[line_no - 1].endswith("\r") else ""
             out.extend(text + eol for text in inserts[line_no])
         out.append(line)
+    for note in notes:
+        logger.info(note)
     return "\n".join(out)
 
 
@@ -1564,17 +1619,24 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     Type Text, Select Options By, Check/Uncheck Checkbox, Press Keys, Fill/Type Secret — several are
     fine: browser-service folds `Fill Text` and `Press Keys` into one element), the second directly
     above the first Get Text of the read's element after the LAST of those. An element is its
-    locator as it stands when the step runs (`_follow`): `id=x` and `css=#x` are one element, a
-    leading `css=` is ignored. `<read cell>` is the read step's own first argument as written;
-    `<name>` is the variable when that cell is exactly one plain `${var}`, otherwise `read` and the
-    wait's 1-based position (`${read_before_2}`). Neither line can fail a test: the keyword that
-    cannot run is ignored and the wait gives up after 30s.
+    locator as it stands when the step runs (`_follow`): a leading `css=` (any case) is ignored,
+    and `id=x`, `css=#x` and a bare `#x` are one element (`#a.b` is not `id=a.b`). Two waits for
+    one element (same read, same action) are one wait. `<read cell>` is the read step's own first
+    argument as written; `<name>` is the variable when that cell is exactly one plain `${var}`,
+    otherwise `read` and the wait's 1-based position (`${read_before_2}`). Neither line can fail a
+    test — the keyword that cannot run is ignored and the wait gives up after 30s — EXCEPT under a
+    Robot timeout, which Robot does not catch inside either keyword: such a file is refused.
 
     The file is left byte-identical, with one WARNING, when the reader refuses it, it has a section
     that could define keywords, it holds other than one test, its test cannot be followed (a control
-    structure such as FOR or GROUP, a template, a line the reader cannot read as a step), or exactly
-    one line of a wait's pair is already there. A wait with no action line or no read after it is
-    skipped with one WARNING; the others are still placed. A pair already there is left as it is.
+    structure such as FOR or GROUP, a template, a line the reader cannot read as a step), it sets a
+    Robot timeout (`[Timeout]` in the test, `Test Timeout` / `Task Timeout` in Settings), or the
+    framework's own before-read or wait for a read is there without the other. A wait is skipped
+    with one WARNING when it has no action line or no read after it, when its read variable is
+    assigned between the first action line and the read, or when the variable name it would assign is
+    already assigned; the others are still placed. A pair already there (its two own line forms for
+    that read cell, whatever the variable is called) is left as it is, with no log. The INFO line
+    `signal: change-wait-inserted` is logged once per pair, only for a file returned changed.
     Pure, idempotent, never raises; `remove_change_waits` undoes it exactly.
     """
     try:
