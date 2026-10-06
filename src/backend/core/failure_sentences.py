@@ -18,19 +18,26 @@ None. A wrong diagnosis is worse than the raw message the caller already has.
 first_failure_message reads the text those sentences classify out of a run's
 output.xml. It is Part B's own reader, deliberately NOT OutputXmlParser: that
 parser is the learning path's input, and it reads the first <test> only,
-stores a caught failure as the error, and returns parser error text as a
-message — none of which may reach a stored reason.
+keeps RF's own failure headers, and returns parser error text as a message —
+none of which may reach a stored reason. (Both readers now skip a caught
+failure with one shared rule, which lives in failure_analyzer.py.)
 
 Referenced by: services/workflow_service.py (_failure_reason),
 api/tests_endpoints.py (test_detail, Task 7).
-Depends on: crew_ai/optimization/failure_analyzer.py (FailureClassifier),
-xml.etree.ElementTree.
+Depends on: crew_ai/optimization/failure_analyzer.py (FailureClassifier and
+the caught-failure helpers _status, _is_caught_try_branch,
+_first_uncaught_failure), xml.etree.ElementTree.
 """
 import logging
 from collections.abc import Iterator
 from xml.etree import ElementTree
 
-from src.backend.crew_ai.optimization.failure_analyzer import FailureClassifier
+from src.backend.crew_ai.optimization.failure_analyzer import (
+    FailureClassifier,
+    _first_uncaught_failure,
+    _is_caught_try_branch,  # noqa: F401 -- the rule now lives in failure_analyzer; kept importable here
+    _status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -224,10 +231,10 @@ def failure_category(error_message: str | None) -> str | None:
     already stores (feedback_loop.py:1006-1008), so a Tests-page result and a
     learning row share one CODE SPACE, not one code for the same failure: the
     learning path classifies OutputXmlParser's text (which keeps RF's own
-    "Parent suite setup failed:" header and can store a caught failure),
-    while this reads first_failure_message's text (header-stripped, first
-    uncaught failure), so the same run can get different codes from the two
-    paths (the suite-setup fixture: learning D1, this module C1).
+    "Parent suite setup failed:" header), while this reads
+    first_failure_message's text (header-stripped, first uncaught failure),
+    so the same run can get different codes from the two paths (the
+    suite-setup fixture: learning D1, this module C1).
 
     None for None, "", or whitespace-only text: there is nothing to
     classify, and "unknown" would misrepresent an absent message as one the
@@ -266,11 +273,6 @@ def _strip_rf_header(text: str) -> str:
 _TEARDOWN_TAIL = "\n\nAlso teardown failed:"
 
 
-def _status(element: ElementTree.Element) -> str | None:
-    status = element.find("status")
-    return status.get("status") if status is not None else None
-
-
 def _status_text(element: ElementTree.Element) -> str:
     status = element.find("status")
     return (status.text or "").strip() if status is not None else ""
@@ -283,33 +285,6 @@ def _own_fail_message(element: ElementTree.Element) -> str:
     if fail_msg is not None and fail_msg.text and fail_msg.text.strip():
         return fail_msg.text.strip()
     return ""
-
-
-def _is_caught_try_branch(branch: ElementTree.Element, parent: ElementTree.Element) -> bool:
-    """A failed TRY branch is CAUGHT when an EXCEPT beside it ran (Ruling R2a).
-
-    When that handler — or a FINALLY — fails too, RF marks the <try> AND the
-    TRY branch FAIL, so the branch's own status cannot tell. An EXCEPT that did
-    not match is NOT RUN; one that ran is PASS or FAIL.
-    """
-    if branch.tag != "branch" or branch.get("type") != "TRY":
-        return False
-    return any(sibling.get("type") == "EXCEPT" and _status(sibling) != "NOT RUN"
-               for sibling in parent.findall("branch"))
-
-
-def _first_uncaught_failure(parent: ElementTree.Element) -> ElementTree.Element | None:
-    """The first child of `parent`, in document order, that FAILED uncaught.
-
-    Only FAIL children count, so anything under a PASS element — Run Keyword
-    And Ignore Error / Return Status / Expect Error, a Wait Until Keyword
-    Succeeds that got there in the end, a TRY an EXCEPT handled — is never
-    reached (Ruling R2), and a caught TRY branch is skipped (Ruling R2a).
-    """
-    for child in parent:
-        if _status(child) == "FAIL" and not _is_caught_try_branch(child, parent):
-            return child
-    return None
 
 
 def _failure_text(element: ElementTree.Element) -> str:
