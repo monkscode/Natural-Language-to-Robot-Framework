@@ -12,6 +12,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
+from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits
 from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
@@ -716,11 +717,15 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # element stage).
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
-            (_crew_output, crew_with_results, optimization_metrics, hint_metadata,
-             llm_monitor, crew_stage_metrics, shared_llm,
-             crew_guardrail_attempts) = run_crew(
+            run_result = run_crew(
                 natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
+            (_crew_output, crew_with_results, optimization_metrics, hint_metadata,
+             llm_monitor, crew_stage_metrics, shared_llm,
+             crew_guardrail_attempts) = tuple(run_result)[:8]
+            # F1: browser-service's change marks, kept beside the steps (never in the
+            # assembler's prompt); an eight-member result has none.
+            change_waits = getattr(run_result, "change_waits", ()) or ()
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -729,7 +734,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Extract robot code from tasks[-1] (Code Assembler — the terminal task of
         # the assembler crew) and apply the shared normalization pipeline (also used
         # by the dryrun repair path) so both normalize identically.
-        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[-1].output)
+        robot_code = insert_change_waits(
+            extract_and_normalize_robot_code(crew_with_results.tasks[-1].output), change_waits)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -738,7 +744,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # not the asyncio loop) and AFTER create_workflow_span has closed (R5).
         gate = validate_and_repair(
             workflow_id, robot_code, model_provider, model_name,
-            progress_queue=progress_queue,
+            progress_queue=progress_queue, change_waits=change_waits,
         )
         robot_code = gate["code"]
 
@@ -1583,8 +1589,11 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # still worth having for API callers that poll rather than gate on the
         # stream — every step this write sits behind is a step it can lose a
         # race by, for those callers.
+        # The two change-wait lines are the framework's, not the assembler's: learning must
+        # not score them or show them back to the LLM. The test that ran keeps them.
+        learning_code = remove_change_waits(robot_code)
         learning_ctx = await asyncio.to_thread(
-            _process_learning_record, run_id, user_query, robot_code, result)
+            _process_learning_record, run_id, user_query, learning_code, result)
 
         # Inline screenshots BEFORE persist_run so the durable copy (local serve
         # or S3 upload) is self-contained for the CSP-sandboxed report route.
@@ -1607,7 +1616,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # credit against.
         if learning_ctx is not None:
             await asyncio.to_thread(
-                _process_learning_attribution, run_id, user_query, robot_code,
+                _process_learning_attribution, run_id, user_query, learning_code,
                 result, *learning_ctx)
 
     except Exception as e:

@@ -46,6 +46,7 @@ from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
+    insert_change_waits,
     normalize_robot_code,
     rewrite_select_text_reads,
     rewrite_typed_value_reads,
@@ -548,8 +549,13 @@ def _push_progress(progress_queue, message: str, progress: int | None = None) ->
         logger.warning("🔬 DRYRUN: progress push failed (non-blocking): %s", e)
 
 
-def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue) -> dict:
+def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue,
+                        change_waits=None) -> dict:
     """Soft dryrun gate + bounded Assembler repair loop (generation path only).
+
+    `change_waits` (browser-service's marks, as `RunCrewResult.change_waits`) is applied to every
+    repaired test before it is re-checked, so the repair cannot drop the two inserted lines;
+    None / empty leaves the repaired code exactly as extracted.
 
     Returns a dict ALWAYS (never raises — a gate exception must never reach the
     outer workflow handler, which would convert a deliverable result into a hard
@@ -654,6 +660,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     for _name, _count in (attempt_guardrails or {}).items():
                         guardrail_attempts[_name] = guardrail_attempts.get(_name, 0) + _count
                     new_code = extract_and_normalize_robot_code(task_output)
+                    new_code = insert_change_waits(new_code, change_waits)
                 except Exception as e:
                     # §8.3 — repair fault isolation: degrade with current code,
                     # never propagate to the outer handler.

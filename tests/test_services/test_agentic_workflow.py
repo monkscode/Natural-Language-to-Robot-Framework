@@ -899,6 +899,81 @@ class TestTotalLlmCallsUsesActualCalls:
             assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"
 
 
+class TestChangeWaitsReachTheGate:
+    """F1: the marks run_crew returns become the two inserted lines, and reach the gate."""
+
+    CODE = (
+        "*** Settings ***\n"
+        "Library    Browser    timeout=30s\n"
+        "Library    BuiltIn\n"
+        "\n"
+        "*** Variables ***\n"
+        "${url}    https://example.com\n"
+        "${btn_locator}    id=go\n"
+        "${total_locator}    css=#total\n"
+        "\n"
+        "*** Test Cases ***\n"
+        "Generated Test\n"
+        "    New Browser    chromium    headless=True\n"
+        "    New Page    ${url}\n"
+        "    Click    ${btn_locator}\n"
+        "    ${total}=    Get Text    ${total_locator}\n"
+        "    Log    ${total}\n"
+        "    Close Browser\n"
+    )
+    WAITS = ({"read_locator": "css=#total", "action_locator": "id=go"},)
+    BEFORE = ("    ${total_locator_before}=    Run Keyword And Ignore Error    "
+              "Get Text    ${total_locator}\n")
+    WAIT = ("    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms"
+            "    Get Text    ${total_locator}    !=    ${total_locator_before}[1]\n")
+
+    def _run(self, crew_result):
+        seen = {}
+
+        def gate(workflow_id, code, *a, **k):
+            seen["code"] = code
+            seen["kwargs"] = k
+            return {"code": code, "dryrun_status": "passed", "repair_usage": {}}
+
+        events = _run_workflow(crew_result=crew_result, gate=gate)
+        return seen, events
+
+    def _normalized(self, crew_result):
+        from src.backend.services.dryrun_service import extract_and_normalize_robot_code
+        return extract_and_normalize_robot_code(crew_result.crew.tasks[-1].output)
+
+    def test_a_result_carrying_a_wait_puts_the_pair_into_the_code_and_forwards_the_wait(self):
+        crew_result = _make_run_crew_result(raw_code=self.CODE)._replace(change_waits=self.WAITS)
+        bare = self._normalized(crew_result)
+        seen, events = self._run(crew_result)
+
+        assert seen["code"] != bare  # control: the pair is placed in this file
+        assert seen["code"].count(self.BEFORE) == 1
+        assert seen["code"].count(self.WAIT) == 1
+        assert seen["code"].replace(self.BEFORE, "").replace(self.WAIT, "") == bare
+        assert seen["kwargs"]["change_waits"] == self.WAITS
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["robot_code"] == seen["code"]
+
+    def test_an_eight_member_result_still_works_and_changes_nothing(self):
+        crew_result = tuple(_make_run_crew_result(raw_code=self.CODE))[:8]
+        assert len(crew_result) == 8
+        seen, events = self._run(crew_result)
+
+        assert seen["code"] == self._normalized(_make_run_crew_result(raw_code=self.CODE))
+        assert seen["kwargs"]["change_waits"] == ()
+        assert "error" not in _event_statuses(events)
+
+    def test_a_result_built_without_the_field_reads_as_no_waits(self):
+        crew_result = _make_run_crew_result(raw_code=self.CODE)
+        assert crew_result.change_waits == ()
+        seen, _events = self._run(crew_result)
+
+        assert seen["code"] == self._normalized(crew_result)
+        assert self.BEFORE not in seen["code"]
+        assert seen["kwargs"]["change_waits"] == ()
+
+
 class TestProviderDidNotAnswerReachesTheStream:
     def test_final_timeout_becomes_a_plain_sentence(self):
         import litellm
