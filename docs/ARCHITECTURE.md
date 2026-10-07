@@ -465,6 +465,11 @@ Stage 2 — Element identification (deterministic Python, NOT an agent):
     locator pipeline classifies/generates/scores/validates locators
   → polls GET /query/{task_id} until complete
   → merges returned locator_mapping into the steps
+  → change_waits_from(): browser-service marks a read whose value the action
+    before it changed (it keeps the page before every action it performs and
+    evaluates the read's own locator there); the marks travel BESIDE the steps
+    and never reach the assembler. Any read flagged "came back" or uncheckable
+    drops every mark of the test
 
 Stage 3 — Code Assembler (LLM agent, own single-task crew):
   Input:  Steps with validated locators
@@ -477,8 +482,16 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 
 #### Phase 4: Dryrun Gate, Code Saving & Docker Execution
 ```
-12. workflow_service.py: robot --dryrun validate-and-repair loop
-    (dryrun_service.validate_and_repair — deterministic; unrepairable → loud fail)
+12. workflow_service.py: insert_change_waits() (robot_code_normalizer.py, deterministic)
+    adds two lines per marked read, neither of which can fail the test: a before-read
+    above the action and, above the read, a wait until Get Text differs from it (both
+    wrapped in Run Keyword And Ignore Error). Anything not proven safe (a later step
+    browser-service never performs, a repeated action, a test timeout, a loop) leaves
+    the file unchanged + one WARNING.
+    Then the robot --dryrun validate-and-repair loop
+    (dryrun_service.validate_and_repair — deterministic; unrepairable → loud fail);
+    the repair LLM is handed the test WITHOUT the two lines, and the insert runs again
+    on every repaired file
 13. Generates run_id: uuid.uuid4()
 14. Saves: robot_tests/{run_id}/test.robot
 15. docker_service.py: get_docker_client()
@@ -506,7 +519,9 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
     record right after the result event (so a feedback POST finds the row),
     then _process_learning_attribution() runs after persist_run, because its
     hint-attribution LLM call takes 5-30s and must not delay a durable
-    report. Both write via the LearningWriteQueue — never blocks the pipeline
+    report. Both write via the LearningWriteQueue — never blocks the pipeline.
+    Both halves receive the test WITHOUT the inserted change-wait lines
+    (remove_change_waits); History, the runner and test_runs keep them
 ```
 
 ### Key Architectural Decisions
