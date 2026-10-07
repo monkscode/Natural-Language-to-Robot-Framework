@@ -419,3 +419,70 @@ class TestStateVerificationHandling:
                              "parentClassName": "form-group has-error"},
         }})
         assert merged[0]["parent_classes"] == "form-group has-error"
+
+
+NAMED_TEXT_CHECK_BLOCK = """
+--- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
+"Is displayed / visible / shown / present", "appears" and "can be seen" are
+TEXT checks when the user names the words the element shows. An element can
+be visible and still show other words, so visibility alone does not verify it.
+Examples: "verify the Products heading is displayed", "check the message
+'Saved' is visible", "make sure the Logout link appears".
+*   Use keyword `Get Text` on that element and put the user's words in
+    'value' (e.g. value = "Products").
+Keep a visibility check (no 'value') when:
+*   the user names no words the element shows: "verify the logo is
+    displayed", "verify the search results are visible", "verify an error
+    message appears";
+*   the element shows no text: images, icons, empty fields — even when the
+    user names them ("verify the Backpack image is displayed");
+*   the user asks that it is NOT displayed, hidden or gone.
+Counts ("verify 6 products are displayed") and element states (selected,
+checked, enabled, disabled, shows an error) keep their own rules.
+"""
+
+
+class TestPlanningNamedTextCheckBlock:
+
+    def test_block_text_is_exact(self):
+        assert PromptComponents.PLANNING_NAMED_TEXT_CHECK == NAMED_TEXT_CHECK_BLOCK
+
+
+class TestAssemblerComparesIgnoreCase:
+    """Every shown-as-correct Should Contain carries ignore_case=True."""
+
+    def test_validation_rules_correct_line_and_rule(self):
+        rules = PromptComponents.VALIDATION_RULES
+        correct = [ln for ln in rules.splitlines() if "✅ CORRECT" in ln]
+        assert len(correct) == 1
+        assert "`Should Contain    ${row_text}    Cierra    ignore_case=True`" in correct[0]
+        rule = [ln for ln in rules.splitlines() if ln.startswith("**Rule:**")]
+        assert len(rule) == 1
+        assert "ignore_case=True" in rule[0]
+        wrong = [ln for ln in rules.splitlines() if "❌ WRONG" in ln]
+        assert len(wrong) == 1
+        assert "ignore_case" not in wrong[0]
+
+    def test_loop_handling_examples_and_rule(self):
+        lines = PromptComponents.LOOP_HANDLING.splitlines()
+        example = [ln for ln in lines if ln.strip().startswith("Should Contain")]
+        assert example == ["        Should Contain    ${text}    expected_text    ignore_case=True"]
+        correct = [ln for ln in lines if "✅ CORRECT" in ln and "Should Contain" in ln]
+        assert correct == [
+            "- ✅ CORRECT: `Should Contain    ${text}    expected_text    ignore_case=True`"
+        ]
+        item3 = [ln for ln in lines if ln.startswith("3. ")]
+        assert len(item3) == 1
+        assert "ignore_case=True" in item3[0]
+        wrong = [ln for ln in lines if "❌ WRONG" in ln]
+        assert len(wrong) == 2
+        assert all("ignore_case" not in ln for ln in wrong)
+
+    def test_exactly_five_places(self):
+        """Three code examples (four spaces before the argument) and two
+        prose rules; nothing else mentions ignore_case."""
+        lines = (PromptComponents.VALIDATION_RULES
+                 + PromptComponents.LOOP_HANDLING).splitlines()
+        mentions = [ln for ln in lines if "ignore_case=True" in ln]
+        assert len(mentions) == 5
+        assert sum("    ignore_case=True" in ln for ln in mentions) == 3
