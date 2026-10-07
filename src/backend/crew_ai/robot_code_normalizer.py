@@ -1523,7 +1523,8 @@ def _is_proven_after_first_action(steps: list[_Step], index: int,
                                   forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]],
                                   keys: list[str | None]) -> bool:
     """True when the step at `index` is a kind that cannot change what a wait waits for (R17): one of
-    the actions browser-service performs (`Press Keys` excepted), a read or check (`get …`, `should …`),
+    the actions browser-service performs (`Press Keys` excepted), `Get Text` (R17c: no other `Get …`,
+    browser-service compares text and cannot see an attribute or a count come back), `should …`,
     `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own
     pair lines, a setting such as `[Teardown]` (never a step of the body), `Keyboard Key    press
     Enter` written directly after a typing line, or (R17b) `Press Keys    X    Enter` — exactly one key
@@ -1535,7 +1536,8 @@ def _is_proven_after_first_action(steps: list[_Step], index: int,
     if step.setting or forms[index][0] is not None or forms[index][1] is not None:
         return True
     keyword = step.keyword
-    if keyword in _PROVEN_ACTIONS or keyword.startswith(("get ", "should ")) or keyword in _PROVEN_OUTSIDE:
+    if keyword in _PROVEN_ACTIONS or keyword in _GET_TEXT_KEYWORDS or keyword.startswith("should ") \
+            or keyword in _PROVEN_OUTSIDE:
         return True
     if keyword == "keyboard key":
         return (
@@ -1548,11 +1550,12 @@ def _is_proven_after_first_action(steps: list[_Step], index: int,
 
 
 def _is_skipped_between(step: _Step, form: tuple[tuple[str, str] | None, tuple[str, str] | None]) -> bool:
-    """A step that is not an action for the Enter rule: a read or check, `Log`, BuiltIn `Evaluate`, or one
-    of the framework's own pair lines."""
+    """A step that is not an action for the Enter rule: `Get Text`, a `Should …` check, `Log`, BuiltIn
+    `Evaluate`, or one of the framework's own pair lines (another `Get …` is not skipped: it refuses the file)."""
     return (
         form[0] is not None or form[1] is not None
-        or step.keyword.startswith(("get ", "should ")) or step.keyword in ("log", "evaluate")
+        or step.keyword in _GET_TEXT_KEYWORDS or step.keyword.startswith("should ")
+        or step.keyword in ("log", "evaluate")
     )
 
 
@@ -1752,13 +1755,15 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     ANY wait is acted on by several lines other than one Fill/Type line followed by Press Keys Enter
     (the whole file, never the other waits alone), or, at or after the first action line of ANY wait it
     would place, the test holds a step browser-service does not perform. Allowed there: the actions
-    above except `Press Keys`, `Get …`, `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
+    above except `Press Keys`, `Get Text` (R17c: any other `Get …` — Get Attribute, Get Classes, Get
+    Property, Get Selected Options, Get Element Count, Get Url, … — refuses the file: browser-service
+    compares text, so it cannot see those values come back), `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
     `Evaluate JavaScript`), the framework's own pair lines, a setting such as `[Teardown]`,
     `Keyboard Key    press    Enter` written directly after a Fill/Type Text or Fill/Type Secret line, and
     `Press Keys    X    Enter` (exactly the one key cell `Enter`, not continued on a `...` line) whose
     most recent ACTION step before it is a Fill/Type Text or Fill/Type Secret line on the SAME element X
     (two variables holding one locator are one element) or another such `Press Keys    X    Enter`;
-    reads, `Should …`, `Log`, BuiltIn `Evaluate` and the framework's pair lines between are skipped.
+    `Get Text` reads, `Should …`, `Log`, BuiltIn `Evaluate` and the framework's pair lines between are skipped.
     NLRF maps `Press Keys` to a click for browser-service, so any other `Press Keys` at or after that
     line (another key, Enter after a Click, Enter on another element, several keys) is never pressed
     while it discovers the page. A

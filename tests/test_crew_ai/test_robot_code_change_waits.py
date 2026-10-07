@@ -424,10 +424,10 @@ for _kw, _fill in (
 for _between in (
     "    Log    clicked",
     "    Should Be Equal    ${total_locator}    css=#total",
-    "    ${u}=    Get Url",
     "    ${n}=    Evaluate    1 + 1",
     "    ${n}=    BuiltIn.Evaluate    1 + 1",
     "    Get Text    ${other_locator}",
+    "    ${o}=    Browser.Get Text    ${other_locator}",
 ):
     _case(
         f"proven step between the action and the read: {_between.strip()}",
@@ -1156,6 +1156,83 @@ class TestStepsBrowserServiceDoesNotPerform:
         two = insert_change_waits(
             placed.replace(_READ, _READ + "\n" + _PRICE_READ), [_W, _w("css=#price", "id=go")])
         assert two.count("Wait Until Keyword Succeeds") == 2
+
+
+_ATTR = "    ${pressed}=    Get Attribute    ${btn_locator}    aria-pressed"
+_OTHER_GETS = (
+    ("Get Attribute", _ATTR),
+    ("Get Classes", "    ${c}=    Get Classes    ${btn_locator}"),
+    ("Get Selected Options", "    ${s}=    Get Selected Options    ${btn_locator}    label"),
+    ("Get Element Count", "    ${n}=    Get Element Count    ${btn_locator}"),
+    ("Get Url", "    ${u}=    Get Url"),
+    ("Get Property", "    ${p}=    Get Property    ${btn_locator}    value"),
+    ("Get Element States", "    Get Element States    ${btn_locator}    contains    visible"),
+    ("Get Title", "    ${t}=    Get Title"),
+    ("Get Checkbox State", "    ${k}=    Get Checkbox State    ${btn_locator}"),
+)
+
+
+class TestOnlyGetTextIsProvenAfterTheFirstAction:
+    """R17c: browser-service compares TEXT and NLRF sends every `Get …` keyword to it as a text read, so
+    at or after the first action line only `Get Text` is a proven kind (dc13: a Get Attribute after the
+    waited read passes today and failed 3/3 with the pair)."""
+
+    @pytest.mark.parametrize(("keyword", "line"), _OTHER_GETS, ids=[k for k, _ in _OTHER_GETS])
+    def test_another_get_after_the_first_action_refuses_the_whole_file(self, keyword, line, caplog):
+        original = _doc(*_OPEN, _CLICK, line, _READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, [_W]) == original
+        assert [r.getMessage() for r in _warnings(caplog)] == [_NOT_PERFORMED_MESSAGE.format(keyword=keyword)]
+        assert _signals(caplog) == [_warnings(caplog)[0]]
+        # control: the same file with Get Text in that place is placed
+        control = _doc(*_OPEN, _CLICK, "    ${x}=    Get Text    ${other_locator}", _READ, _CLOSE)
+        assert insert_change_waits(control, [_W]).count("Wait Until Keyword Succeeds") == 1
+
+    def test_the_get_after_the_waited_read_refuses_too(self, caplog):
+        original = _doc(*_OPEN, _CLICK, _READ, _ATTR, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, [_W]) == original
+        assert len(_warnings(caplog)) == 1 and "Get Attribute" in _warnings(caplog)[0].getMessage()
+
+    def test_get_attribute_before_the_first_action_line_stays_unchecked(self):
+        original = _doc(*_OPEN, _ATTR, _CLICK, _READ, _CLOSE)
+        assert insert_change_waits(original, [_W]) == _doc(
+            *_OPEN, _ATTR, _BEFORE_TOTAL, _CLICK, _WAIT_TOTAL, _READ, _CLOSE
+        )
+
+    def test_get_text_reads_between_the_action_and_the_waited_read_are_placed(self):
+        other = "    ${o}=    Get Text    ${other_locator}"
+        original = _doc(*_OPEN, _CLICK, other, "    Browser.Get Text    ${other_locator}", _READ, _CLOSE)
+        out = insert_change_waits(original, [_W])
+        assert out == _doc(
+            *_OPEN, _BEFORE_TOTAL, _CLICK, other, "    Browser.Get Text    ${other_locator}", _WAIT_TOTAL, _READ, _CLOSE
+        )
+
+    def test_the_dc13_shape_toggle_on_off_then_laptops_then_an_attribute_read_is_refused(self, caplog):
+        # click on, click off (the toggle), click Laptops, read the first product, read the toggle's aria-pressed
+        original = _doc(*_OPEN, _CLICK, _CLICK, _CLICK_Y, _READ, _ATTR, _CLOSE)
+        waits = [_w("css=#total", "id=stop")]
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, waits) == original
+        assert [r.getMessage() for r in _warnings(caplog)] == [_NOT_PERFORMED_MESSAGE.format(keyword="Get Attribute")]
+        # control: without the attribute read the wait for the first product is placed
+        control = insert_change_waits(_doc(*_OPEN, _CLICK, _CLICK, _CLICK_Y, _READ, _CLOSE), waits)
+        assert control.count("Wait Until Keyword Succeeds") == 1
+
+    def test_a_crlf_file_is_refused_byte_identical_and_the_control_is_placed_in_crlf(self):
+        original = _crlf(_doc(*_OPEN, _CLICK, _ATTR, _READ, _CLOSE))
+        assert insert_change_waits(original, [_W]) == original
+        control = insert_change_waits(original.replace("Get Attribute    ${btn_locator}    aria-pressed", "Get Text    ${other_locator}"), [_W])
+        assert control.count("Wait Until Keyword Succeeds") == 1
+        assert control.count("\r\n") == control.count("\n")
+
+    def test_the_look_back_of_the_enter_rule_no_longer_skips_another_get(self):
+        # Fill, a Get Attribute, Press Keys Enter: the Get Attribute refuses the file (it is not skipped,
+        # not proven); with Get Text in its place the Enter is still the Enter after typing and is placed.
+        refused = _doc(*_OPEN, _CLICK, _FILL, _ATTR, _ENTER, _READ, _CLOSE)
+        assert insert_change_waits(refused, [_W]) == refused
+        placed = _doc(*_OPEN, _CLICK, _FILL, "    ${g}=    Get Text    ${other_locator}", _ENTER, _READ, _CLOSE)
+        assert insert_change_waits(placed, [_W]).count("Wait Until Keyword Succeeds") == 1
 
 
 class TestVariablesSectionNameIsTaken:

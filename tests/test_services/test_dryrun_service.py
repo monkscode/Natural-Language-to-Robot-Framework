@@ -920,7 +920,9 @@ class TestChangeWaitsSurviveTheCleanup:
 
     def test_the_other_rewrites_still_fire_beside_the_pair(self):
         banner = "    Get Element States    ${banner}    contains    visible\n"
-        base = _CW_HEAD + banner + "    Close Browser\n"
+        # the banner check sits BEFORE the first action line: after it, a Get other than Get Text refuses the file
+        click = "    Click    ${btn_locator}\n"
+        base = _CW_HEAD.replace(click, banner + click) + "    Close Browser\n"
         with_pair = _cw_inserted(base)
         assert with_pair != base  # control: the pair is placed in this file too
         out_with = ds.extract_and_normalize_robot_code(self._task_output(with_pair))
