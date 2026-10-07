@@ -1604,6 +1604,31 @@ def test_a_get_text_between_two_reads_of_one_element_does_not_refuse(caplog):
     assert _refusals(caplog) == []
 
 
+def test_a_came_back_entry_with_nothing_marked_returns_nothing_and_logs_nothing(caplog):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"}]
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", came_back=True)}          # no changed_by_action anywhere
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, {0: "elem_1", 1: "elem_2"}, mapping) == []
+    assert _refusals(caplog) == []
+
+
+def test_a_read_again_shape_with_nothing_marked_returns_nothing_and_logs_nothing(caplog):
+    steps, mapping = _laptops_then_phones()
+    for entry in mapping.values():
+        entry.pop("changed_by_action", None)
+    ids = {0: "elem_1", 1: "elem_2", 2: "elem_3", 3: "elem_2"}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == []
+    assert _refusals(caplog) == []
+    # control: with the mark back, the same plan is refused with its one WARNING
+    mapping["elem_2"]["changed_by_action"] = "elem_1"
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == []
+    assert _refusals(caplog) == [_READ_AGAIN_MESSAGE.format(id="elem_2")]
+
+
 def test_both_refusal_reasons_at_once_log_one_warning(caplog):
     steps, mapping = _laptops_then_phones()
     mapping["elem_2"]["came_back"] = True

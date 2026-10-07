@@ -750,8 +750,12 @@ def change_waits_from(
     The WHOLE test gets no waits, with one WARNING, when a wait could stop on an in-between value of a
     test that undoes itself: bs flagged a found element of this plan `came_back` (its value came back to
     an earlier value), or one element is read again after an action bs performed after locating it
-    (`_read_again_element`).
+    (`_read_again_element`). The WARNING is logged only when this drops at least one wait: a test with
+    nothing marked returns `[]` silently, as it always did.
     """
+    waits = _marked_waits(steps, step_element_ids, locator_mapping)
+    if not waits:
+        return []
     came_back = _came_back_element(step_element_ids, locator_mapping)
     if came_back is not None:
         logger.warning(
@@ -764,6 +768,15 @@ def change_waits_from(
             "Change-wait: no waits for this test — %s is read again after an action browser-service "
             "performed after locating it (signal: change-wait-refused)", read_again)
         return []
+    return waits
+
+
+def _marked_waits(
+    steps: list[Any],
+    step_element_ids: dict[int, str],
+    locator_mapping: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """The deduplicated (read locator, action locator) pairs of the marked Get Text steps, in plan order."""
     waits: list[dict[str, str]] = []
     for index, raw in enumerate(steps):
         step = _as_dict(raw)

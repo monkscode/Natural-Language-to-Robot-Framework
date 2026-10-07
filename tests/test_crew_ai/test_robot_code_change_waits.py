@@ -91,7 +91,7 @@ def _crlf(text: str) -> str:
 
 
 def _warnings(caplog) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.levelno == logging.WARNING]
+    return [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.WARNING]
 
 
 # ---------------------------------------------------------------------------
@@ -863,7 +863,7 @@ class TestSeveralActionLinesOnlyAsTypeThenEnter:
 
 
 def _signals(caplog) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if "signal:" in r.getMessage()]
+    return [r for r in caplog.records if r.name == LOGGER and "signal:" in r.getMessage()]
 
 
 class TestSignalOnlyForPairsWritten:
@@ -941,8 +941,9 @@ class TestComparisonKey:
 class TestDuplicateWaits:
     def test_inline_form_writes_one_pair(self, caplog):
         text = _inline("id=go", "css=#total")
-        one = insert_change_waits(text, [_w("css=#total", "id=go")])
         with caplog.at_level(logging.INFO, logger=LOGGER):
+            one = insert_change_waits(text, [_w("css=#total", "id=go")])
+            caplog.clear()  # the first insert's own signal is not what is counted below
             two = insert_change_waits(text, [_w("css=#total", "id=go"), _w("id=total", "css=#go")])
         assert two == one
         assert two.count("Wait Until Keyword Succeeds") == 1
