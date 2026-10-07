@@ -785,8 +785,10 @@ Keep a visibility check (no 'value') when:
 *   the element shows no text: images, icons, empty fields — even when the
     user names them ("verify the Backpack image is displayed");
 *   the user asks that it is NOT displayed, hidden or gone.
-Counts ("verify 6 products are displayed") and element states (selected,
-checked, enabled, disabled, shows an error) keep their own rules.
+This rule covers ONLY the visibility words above. Every other check keeps
+the shape the other rules give it: "contains", "only has", "says", counts
+("verify 6 products are displayed") and element states (selected, checked,
+enabled, disabled, shows an error).
 """
 
     PLANNING_LOOP_HANDLING = """
