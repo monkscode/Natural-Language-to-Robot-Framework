@@ -423,24 +423,25 @@ class TestStateVerificationHandling:
 
 NAMED_TEXT_CHECK_BLOCK = """
 --- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
-"Is displayed / visible / shown / present", "appears" and "can be seen" are
-TEXT checks when the user names the words the element shows. An element can
-be visible and still show other words, so visibility alone does not verify it.
+This rule is ONLY for the visibility words "is displayed / visible / shown /
+present", "appears" and "can be seen". With those words, a check is a TEXT
+check when the user names the words the element shows. An element can be
+visible and still show other words, so visibility alone does not verify it.
 Examples: "verify the Products heading is displayed", "check the message
 'Saved' is visible", "make sure the Logout link appears".
 *   Use keyword `Get Text` on that element and put the user's words in
     'value' (e.g. value = "Products").
-Keep a visibility check (no 'value') when:
+Keep the visibility check, with no words in 'value', when:
 *   the user names no words the element shows: "verify the logo is
     displayed", "verify the search results are visible", "verify an error
     message appears";
 *   the element shows no text: images, icons, empty fields — even when the
-    user names them ("verify the Backpack image is displayed");
-*   the user asks that it is NOT displayed, hidden or gone.
-This rule covers ONLY the visibility words above. Every other check keeps
-the shape the other rules give it: "contains", "only has", "says", counts
-("verify 6 products are displayed") and element states (selected, checked,
-enabled, disabled, shows an error).
+    user names them ("verify the Backpack image is displayed").
+When the user asks that something is NOT displayed, hidden or gone, keep
+the hidden check (value = "hidden").
+Every other check keeps the shape the other rules give it: "contains",
+"only has", "says", "is selected", counts ("verify 6 products are
+displayed") and element states (checked, enabled, disabled, shows an error).
 """
 
 
