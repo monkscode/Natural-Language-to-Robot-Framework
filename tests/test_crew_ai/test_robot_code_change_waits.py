@@ -321,12 +321,6 @@ _case(
     _doc(*_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
 )
 _case(
-    "Fill Text + Press Keys Enter twice + read",
-    _doc(*_OPEN, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
-    [_w("css=#total", _Q)],
-    _doc(*_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
-)
-_case(
     "Type Text + Press Keys Enter + read",
     _doc(*_OPEN, "    Type Text    ${search_locator}    shoes", _ENTER, _READ, _CLOSE),
     [_w("css=#total", _Q)],
@@ -346,13 +340,36 @@ _case(
     _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _CLICK_Y, _WAIT_TOTAL, _READ, _CLOSE),
 )
 _case(
-    "type, read, Enter, read of the same locator",
-    _doc(*_OPEN, _FILL, _READ, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
+    "type, Enter, read, read of the same locator",
+    _doc(*_OPEN, _FILL, _ENTER, _READ, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
     [_w("css=#total", _Q)],
     _doc(
-        *_OPEN, _BEFORE_TOTAL, _FILL, _READ, _ENTER, _WAIT_TOTAL, "    ${after}=    Get Text    ${total_locator}",
+        *_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _WAIT_TOTAL, _READ, "    ${after}=    Get Text    ${total_locator}",
         _CLOSE,
     ),
+)
+
+# R17b: a Press Keys after the first action line is proven only as Enter directly after the typing line on the
+# SAME element (two variables holding one locator are one element)
+_Q2_HEAD = _HEAD + "${q2_locator}    id=q\n"
+_ENTER_Q2 = "    Press Keys    ${q2_locator}    Enter"
+_case(
+    "Press Keys Enter directly after Fill on an element that is not the marked one",
+    _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
+    [_W],
+    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _FILL, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
+    "the same with two variables holding one locator",
+    _doc(*_OPEN, _CLICK, _FILL, _ENTER_Q2, _READ, _CLOSE, head=_Q2_HEAD),
+    [_W],
+    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _FILL, _ENTER_Q2, _WAIT_TOTAL, _READ, _CLOSE, head=_Q2_HEAD),
+)
+_case(
+    "Press Keys Escape BEFORE the first action line stays unchecked",
+    _doc(*_OPEN, "    Press Keys    ${search_locator}    Escape", _CLICK, _READ, _CLOSE),
+    [_W],
+    _doc(*_OPEN, "    Press Keys    ${search_locator}    Escape", _BEFORE_TOTAL, _CLICK, _WAIT_TOTAL, _READ, _CLOSE),
 )
 
 # 9. R17: steps after the first action line that browser-service does not perform are fine only when proven
@@ -828,6 +845,49 @@ _BLOCKED_CASES = [
         _doc(*_OPEN, _CLICK, _READ, _CLOSE),
         R_NOT_PERFORMED, case_id="an outside keyword AFTER the read still counts (at or after the first action)",
     ),
+    # R17b: NLRF maps `Press Keys` to a click for browser-service, which never presses the key
+    _blocked(
+        _doc(*_OPEN, _FILL, _CLICK, "    Press Keys    ${search_locator}    Escape", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _CLICK, "    Log    escape", _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="E3: Fill, Click, Press Keys Escape, read",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _FILL, "    Press Keys    ${pw_locator}    Enter", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Press Keys Enter on another element after Fill",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, "    Click    ${search_locator}", _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Press Keys Enter after a Click, not after typing",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _FILL, "    Log    typed", _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="a Log between the Fill and the Press Keys Enter",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _FILL, "    Press Keys    ${search_locator}    Enter    Tab", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Press Keys Enter Tab (several keys) after Fill on another element",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, "    ...    Tab", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Press Keys Enter continued with ... Tab after Fill on another element",
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Fill + Press Keys Enter twice (the second Enter is not directly after the Fill)",
+        waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, _READ, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
+        R_NOT_PERFORMED, case_id="type, read, Enter, read (the Enter is not directly after the Fill)",
+        waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
+    ),
     _blocked(_PIPE, _PIPE_CONTROL, R_PARSE, case_id="a pipe-separated file"),
     _blocked("*** Test Cases ***\n\x00", _BASE, R_ACTION, case_id="garbage"),
 ]
@@ -961,12 +1021,29 @@ class TestSeveralActionLinesOnlyAsTypeThenEnter:
         assert out.count("\r\n") == out.count("\n")
 
     def test_the_pair_goes_above_the_fill_and_above_the_first_read_after_the_last_enter(self):
-        original = _doc(*_OPEN, _FILL, _READ, _ENTER, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE)
+        original = _doc(*_OPEN, _FILL, _ENTER, _READ, "    ${after}=    Get Text    ${total_locator}", _CLOSE)
         out = insert_change_waits(original, [_w("css=#total", _Q)])
         assert out == _doc(
-            *_OPEN, _BEFORE_TOTAL, _FILL, _READ, _ENTER, _ENTER, _WAIT_TOTAL,
+            *_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _WAIT_TOTAL, _READ,
             "    ${after}=    Get Text    ${total_locator}", _CLOSE,
         )
+
+    def test_crlf_variants_of_the_press_keys_rule(self):
+        e3 = _crlf(_doc(*_OPEN, _FILL, _CLICK, "    Press Keys    ${search_locator}    Escape", _READ, _CLOSE))
+        assert insert_change_waits(e3, [_W]) == e3                                   # refused: byte-identical
+        placed_in = _crlf(_doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE))
+        placed_out = insert_change_waits(placed_in, [_W])
+        assert placed_out == _crlf(_doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _FILL, _ENTER, _WAIT_TOTAL, _READ, _CLOSE))
+        assert placed_out.count("\r\n") == placed_out.count("\n")
+
+    def test_the_e3_shape_logs_one_warning_naming_press_keys(self, caplog):
+        e3 = _doc(*_OPEN, _FILL, _CLICK, "    Press Keys    ${search_locator}    Escape", _READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(e3, [_W]) == e3
+        assert [r.getMessage() for r in _warnings(caplog)] == [
+            "Change-wait inserter: left the file unchanged — a step after the first action is one "
+            "browser-service does not perform (Press Keys) (signal: change-wait-refused)"
+        ]
 
 
 _NOT_PERFORMED_MESSAGE = (

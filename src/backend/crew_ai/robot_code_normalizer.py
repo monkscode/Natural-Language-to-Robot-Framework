@@ -1395,6 +1395,9 @@ _CHANGE_WAIT_ACTIONS = frozenset({
 _TYPING_ACTIONS = frozenset({"fill text", "type text", "fill secret", "type secret"})
 # Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for.
 _PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate"})
+# The actions browser-service really performs while it discovers the page: NLRF maps `Press Keys` to a click, so
+# it is NOT among them (a `Press Keys` after the first action line is judged by its own rule).
+_PROVEN_ACTIONS = _CHANGE_WAIT_ACTIONS - {"press keys"}
 _GET_TEXT_KEYWORDS = frozenset({"get text"})
 _IGNORE_ERROR = "Run Keyword And Ignore Error"
 _WAIT_KEYWORD = "Wait Until Keyword Succeeds"
@@ -1517,22 +1520,31 @@ def _is_type_then_enter(steps: list[_Step], actions: list[int]) -> bool:
 
 
 def _is_proven_after_first_action(steps: list[_Step], index: int,
-                                  forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]]) -> bool:
+                                  forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]],
+                                  keys: list[str | None]) -> bool:
     """True when the step at `index` is a kind that cannot change what a wait waits for (R17): one of
-    the actions browser-service performs, a read or check (`get …`, `should …`), `Log`, `Close Browser`,
-    BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own pair lines, a setting such
-    as `[Teardown]` (never a step of the body), or `Keyboard Key    press    Enter` written directly
-    after a typing line (browser-service folds that Enter into the typing element)."""
+    the actions browser-service performs (`Press Keys` excepted), a read or check (`get …`, `should …`),
+    `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own
+    pair lines, a setting such as `[Teardown]` (never a step of the body), `Keyboard Key    press
+    Enter` written directly after a typing line, or (R17b) `Press Keys    X    Enter` — exactly one key
+    cell `Enter`, not continued — written directly after a typing line on the SAME element (browser-
+    service folds that Enter into the typing element; any other `Press Keys` is mapped to a click, so
+    the key is never pressed while it is discovering the page). `keys` is each step's element key."""
     step = steps[index]
     if step.setting or forms[index][0] is not None or forms[index][1] is not None:
         return True
     keyword = step.keyword
-    if keyword in _CHANGE_WAIT_ACTIONS or keyword.startswith(("get ", "should ")) or keyword in _PROVEN_OUTSIDE:
+    if keyword in _PROVEN_ACTIONS or keyword.startswith(("get ", "should ")) or keyword in _PROVEN_OUTSIDE:
         return True
-    return (
-        keyword == "keyboard key" and step.args == ["press", "Enter"] and not step.continued
-        and index > 0 and steps[index - 1].keyword in _TYPING_ACTIONS
-    )
+    after_typing = index > 0 and steps[index - 1].keyword in _TYPING_ACTIONS
+    if keyword == "keyboard key":
+        return step.args == ["press", "Enter"] and not step.continued and after_typing
+    if keyword == "press keys":
+        return (
+            step.args[1:] == ["Enter"] and not step.continued and after_typing
+            and keys[index] is not None and keys[index] == keys[index - 1]
+        )
+    return False
 
 
 def _change_wait_targets(steps: list[_Step], keys: list[str | None], read_key: str | None,
@@ -1647,7 +1659,7 @@ def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]]
     if first_lines:
         boundary = min(first_lines)
         for index, step in enumerate(steps):
-            if step.line_no >= boundary and not _is_proven_after_first_action(steps, index, forms):
+            if step.line_no >= boundary and not _is_proven_after_first_action(steps, index, forms, keys):
                 logger.warning(
                     "Change-wait inserter: left the file unchanged — a step after the first action is one "
                     f"browser-service does not perform ({step.parts[step.keyword_idx].strip()}) "
@@ -1712,11 +1724,16 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     ANY wait is acted on by several lines other than one Fill/Type line followed by Press Keys Enter
     (the whole file, never the other waits alone), or, at or after the first action line of ANY wait it
     would place, the test holds a step browser-service does not perform. Allowed there: the actions
-    above, `Get …`, `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`),
-    the framework's own pair lines, a setting such as `[Teardown]`, and `Keyboard Key    press    Enter`
-    written directly after a Fill/Type Text or Fill/Type Secret line and not continued on a `...` line.
-    Anything else (`Keyboard Key    press    Escape`, `Go Back`, `Reload`, `Hover`, `Evaluate JavaScript`, a
-    `Sleep`, …) can change the page where the wait would stop on an in-between value, so the whole file
+    above except `Press Keys`, `Get …`, `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
+    `Evaluate JavaScript`), the framework's own pair lines, a setting such as `[Teardown]`,
+    `Keyboard Key    press    Enter` written directly after a Fill/Type Text or Fill/Type Secret line, and
+    `Press Keys    X    Enter` (exactly the one key cell `Enter`) written directly after a Fill/Type
+    Text or Fill/Type Secret line on the SAME element (two variables holding one locator are one
+    element), neither continued on a `...` line. NLRF maps `Press Keys` to a click for browser-service, so
+    any other `Press Keys` at or after that line (another key, Enter after a Click, Enter on another
+    element, Enter with a step between, several keys) is never pressed while it discovers the page. A
+    `Press Keys` before the first action line is not checked. Anything else (`Keyboard Key    press
+    Escape`, `Go Back`, `Reload`, `Hover`, `Evaluate JavaScript`, a `Sleep`, …) can change the page where the wait would stop on an in-between value, so the whole file
     stays. Both whole-file refusals log `(signal: change-wait-refused)`. A `...`-continued line counts as
     its full argument list (`Press Keys    ${q}    Enter` then `...    Tab` is `Enter    Tab`). A wait is skipped
     with one WARNING when it has no action line or no read after it, when its read variable is
