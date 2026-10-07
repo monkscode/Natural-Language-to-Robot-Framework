@@ -340,6 +340,42 @@ _case(
     _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _CLICK_Y, _WAIT_TOTAL, _READ, _CLOSE),
 )
 _case(
+    "Fill Text + Press Keys Enter twice + read",
+    _doc(*_OPEN, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
+    [_w("css=#total", _Q)],
+    _doc(*_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
+    "type, read, Enter, read of the same locator",
+    _doc(*_OPEN, _FILL, _READ, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
+    [_w("css=#total", _Q)],
+    _doc(
+        *_OPEN, _BEFORE_TOTAL, _FILL, _READ, _ENTER, _WAIT_TOTAL, "    ${after}=    Get Text    ${total_locator}",
+        _CLOSE,
+    ),
+)
+_case(
+    "Fill, Log, Press Keys Enter, read",
+    _doc(*_OPEN, _CLICK, _FILL, "    Log    typed", _ENTER, _READ, _CLOSE),
+    [_W],
+    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _FILL, "    Log    typed", _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
+    "Fill, Should, BuiltIn Evaluate, Press Keys Enter, read (other proven kinds are skipped)",
+    _doc(*_OPEN, _CLICK, _FILL, "    ${n}=    Evaluate    1", "    Should Be Equal    ${n}    ${1}", _ENTER, _READ, _CLOSE),
+    [_W],
+    _doc(
+        *_OPEN, _BEFORE_TOTAL, _CLICK, _FILL, "    ${n}=    Evaluate    1", "    Should Be Equal    ${n}    ${1}", _ENTER,
+        _WAIT_TOTAL, _READ, _CLOSE,
+    ),
+)
+_case(
+    "Fill, Enter, Enter on an element that is not the marked one",
+    _doc(*_OPEN, _CLICK, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
+    [_W],
+    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _FILL, _ENTER, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
     "type, Enter, read, read of the same locator",
     _doc(*_OPEN, _FILL, _ENTER, _READ, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
     [_w("css=#total", _Q)],
@@ -862,9 +898,19 @@ _BLOCKED_CASES = [
         R_NOT_PERFORMED, case_id="Press Keys Enter after a Click, not after typing",
     ),
     _blocked(
-        _doc(*_OPEN, _CLICK, _FILL, "    Log    typed", _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _CLICK, _ENTER, _READ, _CLOSE),
         _doc(*_OPEN, _CLICK, _FILL, _ENTER, _READ, _CLOSE),
-        R_NOT_PERFORMED, case_id="a Log between the Fill and the Press Keys Enter",
+        R_NOT_PERFORMED, case_id="Fill q, Click menu, Press Keys q Enter (the most recent action is the Click)",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _FILL, "    Click    ${search_locator}", "    Log    x", _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, "    Log    x", _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Fill, Click on the same element, Log, Press Keys Enter",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _FILL, "    Keyboard Key    press    Enter", _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, "    Log    x", _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Fill, Keyboard Key Enter, Press Keys Enter (the Keyboard Key is an unproven action between)",
     ),
     _blocked(
         _doc(*_OPEN, _CLICK, _FILL, "    Press Keys    ${search_locator}    Enter    Tab", _READ, _CLOSE),
@@ -877,15 +923,14 @@ _BLOCKED_CASES = [
         R_NOT_PERFORMED, case_id="Press Keys Enter continued with ... Tab after Fill on another element",
     ),
     _blocked(
-        _doc(*_OPEN, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
-        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
-        R_NOT_PERFORMED, case_id="Fill + Press Keys Enter twice (the second Enter is not directly after the Fill)",
-        waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, "    Press Keys    ${search_locator}    Escape", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Fill, Enter, Escape (another key after a proven Enter)",
     ),
     _blocked(
-        _doc(*_OPEN, _FILL, _READ, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
-        _doc(*_OPEN, _FILL, _ENTER, _READ, "    ${after}=    Get Text    ${total_locator}", _CLOSE),
-        R_NOT_PERFORMED, case_id="type, read, Enter, read (the Enter is not directly after the Fill)",
+        _doc(*_OPEN, _FILL, _ENTER, "    Press Keys    ${pw_locator}    Enter", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Fill q, Enter q, Enter on another element",
         waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
     ),
     _blocked(_PIPE, _PIPE_CONTROL, R_PARSE, case_id="a pipe-separated file"),
@@ -1021,10 +1066,10 @@ class TestSeveralActionLinesOnlyAsTypeThenEnter:
         assert out.count("\r\n") == out.count("\n")
 
     def test_the_pair_goes_above_the_fill_and_above_the_first_read_after_the_last_enter(self):
-        original = _doc(*_OPEN, _FILL, _ENTER, _READ, "    ${after}=    Get Text    ${total_locator}", _CLOSE)
+        original = _doc(*_OPEN, _FILL, _READ, _ENTER, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE)
         out = insert_change_waits(original, [_w("css=#total", _Q)])
         assert out == _doc(
-            *_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _WAIT_TOTAL, _READ,
+            *_OPEN, _BEFORE_TOTAL, _FILL, _READ, _ENTER, _ENTER, _WAIT_TOTAL,
             "    ${after}=    Get Text    ${total_locator}", _CLOSE,
         )
 

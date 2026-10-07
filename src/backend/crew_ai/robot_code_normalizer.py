@@ -1527,24 +1527,52 @@ def _is_proven_after_first_action(steps: list[_Step], index: int,
     `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own
     pair lines, a setting such as `[Teardown]` (never a step of the body), `Keyboard Key    press
     Enter` written directly after a typing line, or (R17b) `Press Keys    X    Enter` — exactly one key
-    cell `Enter`, not continued — written directly after a typing line on the SAME element (browser-
-    service folds that Enter into the typing element; any other `Press Keys` is mapped to a click, so
-    the key is never pressed while it is discovering the page). `keys` is each step's element key."""
+    cell `Enter`, not continued — whose most recent action is a typing line on the SAME element or
+    another such Enter (`_is_enter_after_typing`; browser-service folds that Enter into the typing
+    element; any other `Press Keys` is mapped to a click, so the key is never pressed while it is
+    discovering the page). `keys` is each step's element key."""
     step = steps[index]
     if step.setting or forms[index][0] is not None or forms[index][1] is not None:
         return True
     keyword = step.keyword
     if keyword in _PROVEN_ACTIONS or keyword.startswith(("get ", "should ")) or keyword in _PROVEN_OUTSIDE:
         return True
-    after_typing = index > 0 and steps[index - 1].keyword in _TYPING_ACTIONS
     if keyword == "keyboard key":
-        return step.args == ["press", "Enter"] and not step.continued and after_typing
-    if keyword == "press keys":
         return (
-            step.args[1:] == ["Enter"] and not step.continued and after_typing
-            and keys[index] is not None and keys[index] == keys[index - 1]
+            step.args == ["press", "Enter"] and not step.continued
+            and index > 0 and steps[index - 1].keyword in _TYPING_ACTIONS
         )
+    if keyword == "press keys":
+        return _is_enter_after_typing(steps, index, forms, keys)
     return False
+
+
+def _is_skipped_between(step: _Step, form: tuple[tuple[str, str] | None, tuple[str, str] | None]) -> bool:
+    """A step that is not an action for the Enter rule: a read or check, `Log`, BuiltIn `Evaluate`, or one
+    of the framework's own pair lines."""
+    return (
+        form[0] is not None or form[1] is not None
+        or step.keyword.startswith(("get ", "should ")) or step.keyword in ("log", "evaluate")
+    )
+
+
+def _is_enter_after_typing(steps: list[_Step], index: int,
+                           forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]],
+                           keys: list[str | None]) -> bool:
+    """R17b: `Press Keys    X    Enter` (exactly one key cell, not continued) whose most recent ACTION step
+    before it — reads, checks, `Log`, `Evaluate` and the framework's pair lines are skipped — is a typing
+    line on the SAME element, or another such `Press Keys … Enter` on that element."""
+    step = steps[index]
+    if step.keyword != "press keys" or step.args[1:] != ["Enter"] or step.continued or keys[index] is None:
+        return False
+    previous = index - 1
+    while previous >= 0 and _is_skipped_between(steps[previous], forms[previous]):
+        previous -= 1
+    if previous < 0 or keys[previous] != keys[index]:
+        return False
+    if steps[previous].keyword in _TYPING_ACTIONS:
+        return True
+    return _is_enter_after_typing(steps, previous, forms, keys)
 
 
 def _change_wait_targets(steps: list[_Step], keys: list[str | None], read_key: str | None,
@@ -1727,11 +1755,13 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     above except `Press Keys`, `Get …`, `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
     `Evaluate JavaScript`), the framework's own pair lines, a setting such as `[Teardown]`,
     `Keyboard Key    press    Enter` written directly after a Fill/Type Text or Fill/Type Secret line, and
-    `Press Keys    X    Enter` (exactly the one key cell `Enter`) written directly after a Fill/Type
-    Text or Fill/Type Secret line on the SAME element (two variables holding one locator are one
-    element), neither continued on a `...` line. NLRF maps `Press Keys` to a click for browser-service, so
-    any other `Press Keys` at or after that line (another key, Enter after a Click, Enter on another
-    element, Enter with a step between, several keys) is never pressed while it discovers the page. A
+    `Press Keys    X    Enter` (exactly the one key cell `Enter`, not continued on a `...` line) whose
+    most recent ACTION step before it is a Fill/Type Text or Fill/Type Secret line on the SAME element X
+    (two variables holding one locator are one element) or another such `Press Keys    X    Enter`;
+    reads, `Should …`, `Log`, BuiltIn `Evaluate` and the framework's pair lines between are skipped.
+    NLRF maps `Press Keys` to a click for browser-service, so any other `Press Keys` at or after that
+    line (another key, Enter after a Click, Enter on another element, several keys) is never pressed
+    while it discovers the page. A
     `Press Keys` before the first action line is not checked. Anything else (`Keyboard Key    press
     Escape`, `Go Back`, `Reload`, `Hover`, `Evaluate JavaScript`, a `Sleep`, …) can change the page where the wait would stop on an in-between value, so the whole file
     stays. Both whole-file refusals log `(signal: change-wait-refused)`. A `...`-continued line counts as
