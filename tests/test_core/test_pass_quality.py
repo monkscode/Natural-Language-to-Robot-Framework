@@ -231,6 +231,17 @@ class TestSelectCheckCannotFail:
         assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
         assert found[0].detail == "id=dropdown"
 
+    def test_a_case_insensitive_check_is_still_flagged(self):
+        # Pin: the planner's `ignore_case=True` third cell changes nothing for the checker.
+        code = robot(self.SELECT_VARS,
+                     "    New Page    ${url}\n"
+                     "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                     "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                     "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
     def test_get_selected_options_is_not_flagged(self):  # mirrors 8e37b6e1-6450-4c80-888a-c7f56bbc4738
         code = robot("${dropdown_locator}    id=dropdown\n",
                      "    New Page    https://the-internet.herokuapp.com/dropdown\n"

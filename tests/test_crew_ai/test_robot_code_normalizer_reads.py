@@ -61,6 +61,8 @@ _CHECK = "Should Contain    ${selected_option}    Option 2"
 # A step allowed after the read (only the check, a Log of the bare value or a close may follow it): the controls'
 # neutral replacement for a later use of the value.
 _ALLOWED = "Log    ${selected_option}"
+# The planner now asks for this exact third cell on every text check.
+_IGNORE_CASE = "    ignore_case=True"
 _OTHER_TEST_WITH_TRY = (
     "\n\nOther Test\n    TRY\n        Click    id=x\n    EXCEPT\n        Log    no\n    END\n"
 )
@@ -103,6 +105,30 @@ class TestSelectReadRewritten:
         """Bench run 0ee28976-9924-4385-90ae-6a7259235cb2, byte for byte."""
         source = _suite(_SELECT, _READ, _CHECK)
         assert rewrite_select_text_reads(source) == _suite(_SELECT, _READ_NEW, _CHECK)
+
+    def test_a_case_insensitive_check_is_still_rewritten(self):
+        """The planner now asks for `ignore_case=True` on every text check; the rewrite must still fire."""
+        check = _CHECK + _IGNORE_CASE
+        assert rewrite_select_text_reads(_suite(_SELECT, _READ, check)) == _suite(_SELECT, _READ_NEW, check)
+
+    @pytest.mark.parametrize("attribute, value", [("label", "Option 2"), ("value", "2"), ("text", "Option 2"),
+                                                  ("LABEL", "Option 2")])
+    def test_the_select_attribute_is_carried_over_with_a_case_insensitive_check(self, attribute, value):
+        select = f"Select Options By    ${{dropdown_locator}}    {attribute}    {value}"
+        check = f"Should Contain    ${{selected_option}}    {value}{_IGNORE_CASE}"
+        expected = f"${{selected_option}}=    Get Selected Options    ${{get_text_locator}}    {attribute}"
+        assert rewrite_select_text_reads(_suite(select, _READ, check)) == _suite(select, expected, check)
+
+    def test_a_multi_select_with_case_insensitive_checks(self):
+        select = "Select Options By    id=multi    value    a    c"
+        read = "${chosen}=    Get Text    css=#multi"
+        checks = tuple(f"Should Contain    ${{chosen}}    {v}{_IGNORE_CASE}" for v in ("a", "c"))
+        expected = "${chosen}=    Get Selected Options    css=#multi    value"
+        assert rewrite_select_text_reads(_suite(select, read, *checks)) == _suite(select, expected, *checks)
+
+    def test_a_plain_and_a_case_insensitive_check_together(self):
+        body = (_SELECT, _READ, _CHECK, _CHECK + _IGNORE_CASE)
+        assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, *body[2:])
 
     @pytest.mark.parametrize("attribute, value", [("label", "Option 2"), ("value", "2"), ("text", "Option 2"),
                                                   ("LABEL", "Option 2")])
@@ -506,7 +532,7 @@ class TestSelectReadLeftAlone:
         ("an item use", (_SELECT, _READ, _CHECK, "Log    ${selected_option}[0]",
                          "Should Be Empty    ${selected_option}[0]")),
         ("Should Contain with an extra argument", (
-            _SELECT, _READ, "Should Contain    ${selected_option}    Option 2    ignore_case=True")),
+            _SELECT, _READ, "Should Contain    ${selected_option}    Option 2    chosen")),
         ("Log To Console is not Log", (_SELECT, _READ, _CHECK, "Log To Console    ${selected_option}")),
         ("presence query: V is not the selected value", (
             _SELECT, _READ, "Should Contain    ${selected_option}    Option 1")),
@@ -561,6 +587,25 @@ class TestSelectReadLeftAlone:
         # and would pass even if the rule followed continuations — proved by mutation in the planning dry run).
         source = _suite(*body)
         assert rewrite_select_text_reads(source) == source, label
+
+    @pytest.mark.parametrize("extra", [
+        "    ignore_case=False", "    ignore_case=${True}", "    ignore_case=true", "    ignore_case = True",
+        "    IGNORE_CASE=True", "    msg=chosen", "    values=False", "    ${flag}",
+        "    ignore_case=True    collapse_spaces=True", "    ignore_case=True    msg=chosen",
+        "    chosen    ignore_case=True",
+    ])
+    def test_any_other_extra_cell_on_the_check_leaves_it_alone(self, extra):
+        source = _suite(_SELECT, _READ, _CHECK + extra)
+        assert rewrite_select_text_reads(source) == source
+
+    def test_control_the_exact_ignore_case_cell_is_rewritten(self):
+        # The control for the cases above: the same file with exactly `ignore_case=True` IS rewritten.
+        source = _suite(_SELECT, _READ, _CHECK + _IGNORE_CASE)
+        assert rewrite_select_text_reads(source) == source.replace(_READ, _READ_NEW)
+
+    def test_one_odd_check_among_case_insensitive_ones_leaves_it_alone(self):
+        source = _suite(_SELECT, _READ, _CHECK + _IGNORE_CASE, _CHECK + "    ignore_case=False")
+        assert rewrite_select_text_reads(source) == source
 
     def test_a_read_in_another_test_is_left_alone(self):
         source = _suite(_SELECT, tail=f"\n\nSecond Test\n    {_READ}\n    {_CHECK}\n")
