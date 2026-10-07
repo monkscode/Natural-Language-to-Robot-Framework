@@ -18,6 +18,10 @@ Every job the old agent did is a mechanical rule, ported here as code:
     select_id, observed class/aria evidence, stability, all_locators, and
     the ASTPP flags (visibility_filtered / row_anchored /
     row_anchor_ambiguous, present only when True)
+  - F1 marks: bs's `changed_by_action` mark and `came_back` flag are
+    deliberately NOT stapled onto the steps or IdentifiedElement (the
+    Assembler must never see them); they travel BESIDE the steps as the
+    `change_waits` list that identify_elements returns (change_waits_from)
 
 Steps arriving from crew._extract_plan_steps are PlanOutput-validated
 (fail-fast, pre-browser); merge_locators additionally filters each step to

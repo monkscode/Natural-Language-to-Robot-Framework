@@ -355,6 +355,46 @@ _case(
     ),
 )
 
+# 9. R17: steps after the first action line that browser-service does not perform are fine only when proven
+_KEY_ENTER = "    Keyboard Key    press    Enter"
+for _kw, _fill in (
+    ("Fill Text", "    Fill Text    ${search_locator}    laptop"),
+    ("Type Text", "    Type Text    ${search_locator}    laptop"),
+    ("Fill Secret", "    Fill Secret    ${search_locator}    %{PW}"),
+):
+    _case(
+        f"{_kw} + Keyboard Key press Enter + read",
+        _doc(*_OPEN, _fill, _KEY_ENTER, _READ, _CLOSE),
+        [_w("css=#total", _Q)],
+        _doc(*_OPEN, _BEFORE_TOTAL, _fill, _KEY_ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+    )
+for _between in (
+    "    Log    clicked",
+    "    Should Be Equal    ${total_locator}    css=#total",
+    "    ${u}=    Get Url",
+    "    ${n}=    Evaluate    1 + 1",
+    "    ${n}=    BuiltIn.Evaluate    1 + 1",
+    "    Get Text    ${other_locator}",
+):
+    _case(
+        f"proven step between the action and the read: {_between.strip()}",
+        _doc(*_OPEN, _CLICK, _between, _READ, _CLOSE),
+        [_W],
+        _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _between, _WAIT_TOTAL, _READ, _CLOSE),
+    )
+_case(
+    "an outside keyword BEFORE the first action line",
+    _doc(*_OPEN, "    Keyboard Key    press    Escape", _CLICK, _READ, _CLOSE),
+    [_W],
+    _doc(*_OPEN, "    Keyboard Key    press    Escape", _BEFORE_TOTAL, _CLICK, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
+    "a [Teardown] setting is not a step of the body",
+    _doc(*_OPEN, _CLICK, _READ, "    [Teardown]    Close Browser"),
+    [_W],
+    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _WAIT_TOTAL, _READ, "    [Teardown]    Close Browser"),
+)
+
 _ORIGINAL_A = {case_id: original for case_id, original, _, _ in _CASES_A}
 
 
@@ -517,6 +557,7 @@ R_TIMEOUT = "Robot timeout"
 R_REPOINT = "assigned between the first action line and the read"
 R_TAKEN = "already assigned"
 R_REPEAT = "acted on by several lines other than one Fill/Type line followed by Press Keys Enter"
+R_NOT_PERFORMED = "a step after the first action is one browser-service does not perform"
 
 
 def _blocked(
@@ -722,6 +763,71 @@ _BLOCKED_CASES = [
         R_REPEAT, case_id="Press Keys Enter twice, no Fill", waits=[_w("css=#total", _Q)],
         control_waits=[_w("css=#total", _Q)],
     ),
+    # M2: a `...` continuation is the same keys as one line
+    _blocked(
+        _doc(*_OPEN, _FILL, _ENTER, "    ...    Tab", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPEAT, case_id="Press Keys Enter continued with ... Tab", waits=[_w("css=#total", _Q)],
+        control_waits=[_w("css=#total", _Q)],
+    ),
+    # M1: a name the *** Variables *** section defines is taken too
+    _blocked(
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD + "${total_locator_before}    0 items\n"),
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE, head=_HEAD + "${total_locator_after}    0 items\n"),
+        R_TAKEN, case_id="a Variables-section name the before-read would take",
+    ),
+    # R17: after the first action line only proven kinds of step may run before the read
+    _blocked(
+        _doc(*_OPEN, _CLICK, "    Keyboard Key    press    Escape", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, "    Log    escape", _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Keyboard Key press Escape after the Click",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, "    Go Back", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, "    Log    back", _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Go Back after the Click",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, "    Reload", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, "    Log    reload", _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Reload after the Click",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, "    Hover    ${other_locator}", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, "    Log    hover", _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Hover after the Click",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, "    Evaluate JavaScript    ${other_locator}    (e) => e.remove()", _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, "    Evaluate    1 + 1", _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Evaluate JavaScript after the Click (BuiltIn Evaluate is the control)",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _KEY_ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", _KEY_ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Keyboard Key press Enter after a Click, not after typing",
+    ),
+    _blocked(
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", "    Log    typed", _KEY_ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", _KEY_ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Keyboard Key press Enter after typing but with a step between",
+    ),
+    _blocked(
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", "    Keyboard Key    press    Enter", "    ...    Tab",
+             _READ, _CLOSE),
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", _KEY_ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Keyboard Key press Enter continued with ... Tab",
+    ),
+    _blocked(
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", "    Keyboard Key    press    Tab", _READ, _CLOSE),
+        _doc(*_OPEN, "    Fill Text    ${btn_locator}    x", _KEY_ENTER, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="Keyboard Key press Tab after typing",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _READ, "    Keyboard Key    press    Escape", _CLOSE),
+        _doc(*_OPEN, _CLICK, _READ, _CLOSE),
+        R_NOT_PERFORMED, case_id="an outside keyword AFTER the read still counts (at or after the first action)",
+    ),
     _blocked(_PIPE, _PIPE_CONTROL, R_PARSE, case_id="a pipe-separated file"),
     _blocked("*** Test Cases ***\n\x00", _BASE, R_ACTION, case_id="garbage"),
 ]
@@ -805,7 +911,7 @@ _PRICE_READ = "    ${price}=    Get Text    ${price_locator}"
 _CLICK_Y_TWICE = _doc(*_OPEN, _CLICK, _CLICK_Y, _CLICK_Y, _READ, _PRICE_READ, _CLOSE)
 _REPEAT_MESSAGE = (
     "Change-wait inserter: left the file unchanged — the element of wait {n} is acted on by several lines "
-    "other than one Fill/Type line followed by Press Keys Enter"
+    "other than one Fill/Type line followed by Press Keys Enter (signal: change-wait-refused)"
 )
 
 
@@ -817,7 +923,8 @@ class TestSeveralActionLinesOnlyAsTypeThenEnter:
             out = insert_change_waits(_CLICK_Y_TWICE, [ok, refused])
         assert out == _CLICK_Y_TWICE
         assert [r.getMessage() for r in _warnings(caplog)] == [_REPEAT_MESSAGE.format(n=2)]
-        assert _signals(caplog) == []
+        # the only signal is the refusal itself (no change-wait-inserted for the OK wait)
+        assert [r.getMessage() for r in _signals(caplog)] == [_REPEAT_MESSAGE.format(n=2)]
         # control: the OK wait alone is placed
         assert insert_change_waits(_CLICK_Y_TWICE, [ok]) != _CLICK_Y_TWICE
 
@@ -860,6 +967,87 @@ class TestSeveralActionLinesOnlyAsTypeThenEnter:
             *_OPEN, _BEFORE_TOTAL, _FILL, _READ, _ENTER, _ENTER, _WAIT_TOTAL,
             "    ${after}=    Get Text    ${total_locator}", _CLOSE,
         )
+
+
+_NOT_PERFORMED_MESSAGE = (
+    "Change-wait inserter: left the file unchanged — a step after the first action is one browser-service "
+    "does not perform ({keyword}) (signal: change-wait-refused)"
+)
+
+
+class TestStepsBrowserServiceDoesNotPerform:
+    def test_the_exact_warning_names_the_keyword_as_written(self, caplog):
+        original = _doc(*_OPEN, _CLICK, "    keyboard_key    PRESS    Escape", _READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(original, [_W])
+        assert out == original
+        assert [r.getMessage() for r in _warnings(caplog)] == [_NOT_PERFORMED_MESSAGE.format(keyword="keyboard_key")]
+        assert _signals(caplog) == [_warnings(caplog)[0]]
+        # control: the proven step in its place is placed
+        control = insert_change_waits(_doc(*_OPEN, _CLICK, "    Log    x", _READ, _CLOSE), [_W])
+        assert control.count("Wait Until Keyword Succeeds") == 1
+
+    def test_one_warning_even_when_several_steps_are_outside(self, caplog):
+        original = _doc(*_OPEN, _CLICK, "    Go Back", "    Reload", _READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, [_W]) == original
+        assert [r.getMessage() for r in _warnings(caplog)] == [_NOT_PERFORMED_MESSAGE.format(keyword="Go Back")]
+
+    def test_one_wait_with_an_outside_step_refuses_the_whole_file(self, caplog):
+        # the price wait's action (stop) is after Go Back; the total wait's action (go) is before it
+        original = _doc(*_OPEN, _CLICK, "    Go Back", _CLICK_Y, _READ, _PRICE_READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(original, [_w("css=#total", "id=go"), _w("css=#price", "id=stop")])
+        assert out == original
+        assert len(_warnings(caplog)) == 1
+        # control: nothing outside, both placed
+        ok = _doc(*_OPEN, _CLICK, "    Log    x", _CLICK_Y, _READ, _PRICE_READ, _CLOSE)
+        assert insert_change_waits(ok, [_w("css=#total", "id=go"), _w("css=#price", "id=stop")]).count(
+            "Wait Until Keyword Succeeds") == 2
+
+    def test_only_the_waits_asked_for_set_the_boundary(self):
+        # Go Back is after the go-Click but BEFORE the stop-Click: only the stop wait is asked for, so it is placed
+        original = _doc(*_OPEN, _CLICK, "    Go Back", _CLICK_Y, _PRICE_READ, _CLOSE)
+        out = insert_change_waits(original, [_w("css=#price", "id=stop")])
+        assert out != original
+        assert out.count("Wait Until Keyword Succeeds") == 1
+
+    def test_a_refused_crlf_file_is_byte_identical(self):
+        crlf = _crlf(_doc(*_OPEN, _CLICK, "    Go Back", _READ, _CLOSE))
+        assert insert_change_waits(crlf, [_W]) == crlf
+        # control: the same CRLF file with a proven step is placed
+        assert insert_change_waits(crlf.replace("Go Back", "Log    x"), [_W]).count("Wait Until Keyword Succeeds") == 1
+
+    def test_a_placed_crlf_file_keeps_crlf(self):
+        original = _crlf(_doc(*_OPEN, "    Fill Text    ${search_locator}    laptop", _KEY_ENTER, _READ, _CLOSE))
+        expected = _crlf(_doc(
+            *_OPEN, _BEFORE_TOTAL, "    Fill Text    ${search_locator}    laptop", _KEY_ENTER, _WAIT_TOTAL, _READ, _CLOSE,
+        ))
+        out = insert_change_waits(original, [_w("css=#total", _Q)])
+        assert out == expected
+        assert out.count("\r\n") == out.count("\n")
+
+    def test_the_frameworks_own_pair_lines_are_not_outside_steps(self):
+        placed = insert_change_waits(_doc(*_OPEN, _CLICK, _READ, _CLOSE), [_W])
+        assert placed.count("Wait Until Keyword Succeeds") == 1
+        # a second wait is added next to the first pair without being refused for it
+        two = insert_change_waits(
+            placed.replace(_READ, _READ + "\n" + _PRICE_READ), [_W, _w("css=#price", "id=go")])
+        assert two.count("Wait Until Keyword Succeeds") == 2
+
+
+class TestVariablesSectionNameIsTaken:
+    def test_the_taken_wait_is_skipped_and_the_others_are_placed(self, caplog):
+        head = _HEAD + "${total_locator_before}    0 items\n"
+        original = _doc(*_OPEN, _CLICK, _READ, _PRICE_READ, _CLOSE, head=head)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(original, [_w("css=#total"), _w("css=#price")])
+        assert out == _doc(
+            *_OPEN, _before("price_locator_before", "${price_locator}"), _CLICK, _READ,
+            _wait("price_locator_before", "${price_locator}"), _PRICE_READ, _CLOSE, head=head,
+        )
+        warnings = [r.getMessage() for r in _warnings(caplog)]
+        assert len(warnings) == 1 and R_TAKEN in warnings[0]
 
 
 def _signals(caplog) -> list[logging.LogRecord]:

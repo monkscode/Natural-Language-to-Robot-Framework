@@ -27,7 +27,8 @@ fed ONLY by the real run (never by dryrun).
 Referenced by: src/backend/services/workflow_service.py (run_agentic_workflow gate)
 Depends on: src/backend/services/docker_service (container plumbing + mount resolution),
             src/backend/crew_ai/agents.RobotAgents + tasks.RobotTasks (repair crew),
-            src/backend/crew_ai/robot_code_normalizer.normalize_robot_code,
+            src/backend/crew_ai/robot_code_normalizer.normalize_robot_code
+            (and insert_change_waits / remove_change_waits for the F1 change-wait lines),
             src/backend/core/workflow_metrics.calculate_crewai_cost (repair cost shape),
             src/backend/core/config.settings (DRYRUN_ENABLED / MAX_DRYRUN_FIXES / DRYRUN_TIMEOUT)
 """

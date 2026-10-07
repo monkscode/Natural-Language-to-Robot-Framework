@@ -25,8 +25,8 @@ failure with one shared rule, which lives in failure_analyzer.py.)
 Referenced by: services/workflow_service.py (_failure_reason),
 api/tests_endpoints.py (test_detail, Task 7).
 Depends on: crew_ai/optimization/failure_analyzer.py (FailureClassifier and
-the caught-failure helpers _status, _is_caught_try_branch,
-_first_uncaught_failure), xml.etree.ElementTree.
+the caught-failure helpers _status, _first_uncaught_failure),
+xml.etree.ElementTree.
 """
 import logging
 from collections.abc import Iterator
@@ -35,7 +35,6 @@ from xml.etree import ElementTree
 from src.backend.crew_ai.optimization.failure_analyzer import (
     FailureClassifier,
     _first_uncaught_failure,
-    _is_caught_try_branch,  # noqa: F401 -- the rule now lives in failure_analyzer; kept importable here
     _status,
 )
 

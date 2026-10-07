@@ -847,7 +847,7 @@ class TestRepairLlmIsHandedTheTestWithoutThePair:
     def test_the_repair_gets_the_code_without_the_pair_and_the_dryrun_got_it_with(self):
         inserted = _cw_inserted(_CW_BASE)
         assert inserted != _CW_BASE  # control: there is a pair to hide
-        repaired = _CW_BASE.replace("Log", "Log To Console")
+        repaired = _CW_BASE.replace("Log    ${total}", "Log    total=${total}")  # a proven step, edited
         out, mock_rc, mock_repair = self._gate(
             inserted, repaired, [self._FAIL, self._PASS], change_waits=_CW_WAITS)
         assert mock_rc.dryrun.call_args_list[0].args[1] == inserted
@@ -879,18 +879,19 @@ class TestRepairLlmIsHandedTheTestWithoutThePair:
 
     def test_code_without_a_pair_is_handed_over_unchanged(self):
         _, _, mock_repair = self._gate(
-            _CW_BASE, _CW_BASE.replace("Log", "Log To Console"), [self._FAIL, self._PASS], change_waits=_CW_WAITS)
+            _CW_BASE, _CW_BASE.replace("Log    ${total}", "Log    total=${total}"), [self._FAIL, self._PASS],
+            change_waits=_CW_WAITS)
         assert mock_repair.call_args.args[1] == _CW_BASE
 
     def test_every_repair_round_hides_the_pair_again(self):
         inserted = _cw_inserted(_CW_BASE)
-        first = _CW_BASE.replace("Log", "Log To Console")
+        first = _CW_BASE.replace("Log    ${total}", "Log    total=${total}")
         with patch.object(ds, "settings", self._settings(3)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
                           return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=[first, first.replace("Log To Console", "Log Many")]):
+                          side_effect=[first, first.replace("total=", "value=")]):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.side_effect = [self._FAIL, self._FAIL, self._PASS]
             out = ds.validate_and_repair("rid", inserted, "gemini", "m", None, change_waits=_CW_WAITS)

@@ -40,11 +40,18 @@ here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
 Two further public functions are not part of that cleanup step:
 `insert_change_waits` puts a before-read and a never-failing wait around a read
 browser-service marked as changed by an earlier action, and
-`remove_change_waits` is its exact inverse (their callers, in the generation
-pipeline, are added next).
+`remove_change_waits` is its exact inverse. `insert_change_waits` runs after
+generation and after every dryrun repair; `remove_change_waits` hands the repair
+LLM and the learning system the test without the pair.
 
 Referenced by:
     src.backend.services.dryrun_service.extract_and_normalize_robot_code
+    src.backend.services.dryrun_service.validate_and_repair
+        (insert_change_waits after every repair, remove_change_waits before it)
+    src.backend.services.workflow_service.run_agentic_workflow
+        (insert_change_waits after generation)
+    src.backend.services.workflow_service._stream_docker_execution
+        (remove_change_waits for the learning hand-off)
 """
 
 import logging
@@ -1386,6 +1393,8 @@ _CHANGE_WAIT_ACTIONS = frozenset({
 })
 # The only action line an element may have first when it has several (then only `Press Keys … Enter` follows).
 _TYPING_ACTIONS = frozenset({"fill text", "type text", "fill secret", "type secret"})
+# Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for.
+_PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate"})
 _GET_TEXT_KEYWORDS = frozenset({"get text"})
 _IGNORE_ERROR = "Run Keyword And Ignore Error"
 _WAIT_KEYWORD = "Wait Until Keyword Succeeds"
@@ -1495,12 +1504,35 @@ class _SeveralActionLines(Exception):
 def _is_type_then_enter(steps: list[_Step], actions: list[int]) -> bool:
     """True when the action lines are exactly one typing line (`Fill Text`, `Type Text`, `Fill Secret`,
     `Type Secret`) first, then only `Press Keys <locator> Enter` lines whose keys are the one cell `Enter`.
+    A line continued on a `...` line is never one of those (`Enter` then `...    Tab` presses Tab too).
     A single action line of any kind is not a repeat and is always fine."""
     if len(actions) == 1:
         return True
-    if steps[actions[0]].keyword not in _TYPING_ACTIONS:
+    if steps[actions[0]].keyword not in _TYPING_ACTIONS or steps[actions[0]].continued:
         return False
-    return all(steps[i].keyword == "press keys" and steps[i].args[1:] == ["Enter"] for i in actions[1:])
+    return all(
+        steps[i].keyword == "press keys" and steps[i].args[1:] == ["Enter"] and not steps[i].continued
+        for i in actions[1:]
+    )
+
+
+def _is_proven_after_first_action(steps: list[_Step], index: int,
+                                  forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]]) -> bool:
+    """True when the step at `index` is a kind that cannot change what a wait waits for (R17): one of
+    the actions browser-service performs, a read or check (`get …`, `should …`), `Log`, `Close Browser`,
+    BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own pair lines, a setting such
+    as `[Teardown]` (never a step of the body), or `Keyboard Key    press    Enter` written directly
+    after a typing line (browser-service folds that Enter into the typing element)."""
+    step = steps[index]
+    if step.setting or forms[index][0] is not None or forms[index][1] is not None:
+        return True
+    keyword = step.keyword
+    if keyword in _CHANGE_WAIT_ACTIONS or keyword.startswith(("get ", "should ")) or keyword in _PROVEN_OUTSIDE:
+        return True
+    return (
+        keyword == "keyboard key" and step.args == ["press", "Enter"] and not step.continued
+        and index > 0 and steps[index - 1].keyword in _TYPING_ACTIONS
+    )
 
 
 def _change_wait_targets(steps: list[_Step], keys: list[str | None], read_key: str | None,
@@ -1559,7 +1591,7 @@ def _change_wait_decision(forms: list[tuple[tuple[str, str] | None, tuple[str, s
     if _canon_variable(name) in assigned:
         logger.warning(
             f"Change-wait inserter: skipped wait {number} — the variable name it would assign is already "
-            "assigned in the test"
+            "assigned in the test or defined in the Variables section"
         )
         return "taken"
     return "insert"
@@ -1571,7 +1603,8 @@ def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]]
     test = suite.tests[0]
     steps = test.steps
     keys = [_change_wait_key(args[0]) if args else None for args in _follow(test, suite.variables)]
-    assigned = {name for step in steps for name in step.assigns}
+    # A name the *** Variables *** section defines is taken as well: the before-read would overwrite it.
+    assigned = {name for step in steps for name in step.assigns} | set(suite.variables)
     forms = [
         (_change_wait_before_key(cells), _change_wait_wait_key(cells))
         for cells in ((_change_wait_cells(suite.lines[step.line_no]) or []) for step in steps)
@@ -1579,6 +1612,7 @@ def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]]
     seen: set[tuple[str | None, str | None]] = set()
     inserts: dict[int, list[str]] = {}
     notes: list[str] = []
+    first_lines: list[int] = []  # the line each placed wait's before-read goes above
     for number, wait in enumerate(waits, start=1):
         element = (_change_wait_key(wait["read_locator"]), _change_wait_key(wait["action_locator"]))
         if element in seen:
@@ -1589,7 +1623,7 @@ def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]]
         except _SeveralActionLines:
             logger.warning(
                 f"Change-wait inserter: left the file unchanged — the element of wait {number} is acted on by "
-                "several lines other than one Fill/Type line followed by Press Keys Enter"
+                "several lines other than one Fill/Type line followed by Press Keys Enter (signal: change-wait-refused)"
             )
             return None
         if targets is None:
@@ -1603,12 +1637,23 @@ def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]]
         if decision != "insert":
             continue
         assigned.add(_canon_variable(name))
+        first_lines.append(first_action.line_no)
         inserts.setdefault(first_action.line_no, []).append(_change_wait_before_line(first_action.parts[1], name, cell))
         inserts.setdefault(read.line_no, []).append(_change_wait_wait_line(read.parts[1], name, cell))
         notes.append(
             f"Change-wait inserter: wait {number} — read above line {first_action.line_no + 1}, wait above "
             f"line {read.line_no + 1} (signal: change-wait-inserted)"
         )
+    if first_lines:
+        boundary = min(first_lines)
+        for index, step in enumerate(steps):
+            if step.line_no >= boundary and not _is_proven_after_first_action(steps, index, forms):
+                logger.warning(
+                    "Change-wait inserter: left the file unchanged — a step after the first action is one "
+                    f"browser-service does not perform ({step.parts[step.keyword_idx].strip()}) "
+                    "(signal: change-wait-refused)"
+                )
+                return None
     return inserts, notes
 
 
@@ -1665,10 +1710,18 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     Robot timeout (`[Timeout]` in the test, `Test Timeout` / `Task Timeout` in Settings), the
     framework's own before-read or wait for a read is there without the other, or the action element of
     ANY wait is acted on by several lines other than one Fill/Type line followed by Press Keys Enter
-    (the whole file, never the other waits alone). A wait is skipped
+    (the whole file, never the other waits alone), or, at or after the first action line of ANY wait it
+    would place, the test holds a step browser-service does not perform. Allowed there: the actions
+    above, `Get …`, `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`),
+    the framework's own pair lines, a setting such as `[Teardown]`, and `Keyboard Key    press    Enter`
+    written directly after a Fill/Type Text or Fill/Type Secret line and not continued on a `...` line.
+    Anything else (`Keyboard Key    press    Escape`, `Go Back`, `Reload`, `Hover`, `Evaluate JavaScript`, a
+    `Sleep`, …) can change the page where the wait would stop on an in-between value, so the whole file
+    stays. Both whole-file refusals log `(signal: change-wait-refused)`. A `...`-continued line counts as
+    its full argument list (`Press Keys    ${q}    Enter` then `...    Tab` is `Enter    Tab`). A wait is skipped
     with one WARNING when it has no action line or no read after it, when its read variable is
     assigned between the first action line and the read, or when the variable name it would assign is
-    already assigned; the others are still placed. A pair already there (its two own line forms for
+    already assigned in the test or defined in `*** Variables ***`; the others are still placed. A pair already there (its two own line forms for
     that read cell, whatever the variable is called) is left as it is, with no log. The INFO line
     `signal: change-wait-inserted` is logged once per pair, only for a file returned changed.
     Pure, idempotent, never raises; `remove_change_waits` undoes it exactly.
