@@ -714,6 +714,231 @@ class TestExtractAndNormalize:
 
 
 # ---------------------------------------------------------------------------
+# F1 change-wait — the two never-failing lines on every repair round, and
+# surviving the shared cleanup pipeline
+# ---------------------------------------------------------------------------
+
+_CW_HEAD = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "Library    BuiltIn\n"
+    "\n"
+    "*** Variables ***\n"
+    "${url}    https://example.com\n"
+    "${btn_locator}    id=go\n"
+    "${total_locator}    css=#total\n"
+    "${banner}    id=banner\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Generated Test\n"
+    "    New Browser    chromium    headless=True\n"
+    "    New Page    ${url}\n"
+    "    Click    ${btn_locator}\n"
+    "    ${total}=    Get Text    ${total_locator}\n"
+)
+_CW_BASE = _CW_HEAD + "    Log    ${total}\n    Close Browser\n"
+_CW_WAITS = ({"read_locator": "css=#total", "action_locator": "id=go"},)
+_CW_BEFORE = ("    ${total_locator_before}=    Run Keyword And Ignore Error    "
+              "Get Text    ${total_locator}")
+_CW_WAIT = ("    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms"
+            "    Get Text    ${total_locator}    !=    ${total_locator_before}[1]")
+
+
+def _cw_inserted(code: str) -> str:
+    from src.backend.crew_ai.robot_code_normalizer import insert_change_waits
+    return insert_change_waits(code, _CW_WAITS)
+
+
+class TestChangeWaitsOnRepair:
+    """validate_and_repair puts the pair into every repaired test it re-checks and returns."""
+
+    def _settings(self, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = True
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _gate(self, robot_code, repaired, **kwargs):
+        """One failed dryrun, one repair that extracts to `repaired`, then a pass."""
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})), \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=repaired):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [
+                {"passed": False, "errors": "bad kw", "exit_code": 1},
+                {"passed": True, "errors": "", "exit_code": 0},
+            ]
+            out = ds.validate_and_repair("rid", robot_code, "gemini", "m", None, **kwargs)
+        return out, mock_rc
+
+    def test_a_repair_without_the_pair_gets_it_before_the_gate_re_checks_it(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: the pair really is placed in this file
+        out, mock_rc = self._gate(inserted.replace("Click", "Cilck"), _CW_BASE,
+                                  change_waits=_CW_WAITS)
+        assert out["dryrun_status"] == "passed"
+        assert out["code"] == inserted
+        assert out["code"].count(_CW_BEFORE) == 1
+        assert out["code"].count(_CW_WAIT) == 1
+        # the dryrun re-ran on the text WITH the pair, not on the bare repair
+        assert mock_rc.dryrun.call_args_list[1].args[1] == inserted
+
+    def test_a_repair_that_already_holds_the_pair_still_has_it_exactly_once(self):
+        inserted = _cw_inserted(_CW_BASE)
+        out, mock_rc = self._gate(inserted.replace("Click", "Cilck"), inserted,
+                                  change_waits=_CW_WAITS)
+        assert out["code"] == inserted
+        assert out["code"].count(_CW_BEFORE) == 1
+        assert out["code"].count(_CW_WAIT) == 1
+        assert mock_rc.dryrun.call_args_list[1].args[1] == inserted
+
+    def test_no_change_waits_leaves_the_repaired_code_exactly_as_extracted(self):
+        for kwargs in ({}, {"change_waits": None}, {"change_waits": ()}):
+            out, mock_rc = self._gate(_CW_BASE.replace("Click", "Cilck"), _CW_BASE, **kwargs)
+            assert out["code"] == _CW_BASE, kwargs
+            assert mock_rc.dryrun.call_args_list[1].args[1] == _CW_BASE, kwargs
+
+    def test_a_repair_that_only_lacks_the_pair_is_no_progress(self):
+        """The no-change check compares what the gate would re-check, so a repair
+        that differs from the current code only by the missing pair stops the loop
+        instead of burning a container run on identical text."""
+        inserted = _cw_inserted(_CW_BASE)
+        with patch.object(ds, "settings", self._settings(max_fixes=3)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})), \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=_CW_BASE):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", inserted, "gemini", "m", None,
+                                         change_waits=_CW_WAITS)
+        assert out["dryrun_status"] == "failed"
+        assert mock_rc.dryrun.call_count == 1
+        assert out["code"] == inserted
+
+
+class TestRepairLlmIsHandedTheTestWithoutThePair:
+    """The repair LLM never sees the two inserted lines; the gate still checks the code WITH them."""
+
+    def _settings(self, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = True
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _gate(self, robot_code, repaired, dryruns, max_fixes=2, **kwargs):
+        with patch.object(ds, "settings", self._settings(max_fixes)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=repaired):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = dryruns
+            out = ds.validate_and_repair("rid", robot_code, "gemini", "m", None, **kwargs)
+        return out, mock_rc, mock_repair
+
+    _FAIL = {"passed": False, "errors": "bad kw", "exit_code": 1}
+    _PASS = {"passed": True, "errors": "", "exit_code": 0}
+
+    def test_the_repair_gets_the_code_without_the_pair_and_the_dryrun_got_it_with(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: there is a pair to hide
+        repaired = _CW_BASE.replace("Log    ${total}", "Log    total=${total}")  # a proven step, edited
+        out, mock_rc, mock_repair = self._gate(
+            inserted, repaired, [self._FAIL, self._PASS], change_waits=_CW_WAITS)
+        assert mock_rc.dryrun.call_args_list[0].args[1] == inserted
+        assert mock_repair.call_args.args[1] == _CW_BASE
+        assert _CW_BEFORE not in mock_repair.call_args.args[1]
+        assert _CW_WAIT not in mock_repair.call_args.args[1]
+        # the repaired code comes back with the pair, and that is what the gate re-checked and returned
+        assert out["code"] == _cw_inserted(repaired)
+        assert out["code"].count(_CW_BEFORE) == 1 and out["code"].count(_CW_WAIT) == 1
+        assert mock_rc.dryrun.call_args_list[1].args[1] == out["code"]
+        assert out["dryrun_status"] == "passed"
+
+    def test_a_repair_that_returns_exactly_the_hidden_text_is_no_progress(self):
+        inserted = _cw_inserted(_CW_BASE)
+        out, mock_rc, mock_repair = self._gate(
+            inserted, _CW_BASE, [self._FAIL, self._FAIL, self._FAIL], max_fixes=3, change_waits=_CW_WAITS)
+        assert mock_repair.call_args.args[1] == _CW_BASE
+        assert mock_repair.call_count == 1
+        assert mock_rc.dryrun.call_count == 1          # re-inserted, equal to `code`: stopped before a re-check
+        assert out["dryrun_status"] == "failed"
+        assert out["code"] == inserted
+
+    def test_without_change_waits_the_repair_is_handed_the_code_exactly_as_it_is(self):
+        # No marks means no pair of ours: whatever lines the code holds are not ours to hide.
+        inserted = _cw_inserted(_CW_BASE)
+        for kwargs in ({}, {"change_waits": None}, {"change_waits": ()}):
+            _, _, mock_repair = self._gate(inserted, _CW_BASE, [self._FAIL, self._PASS], **kwargs)
+            assert mock_repair.call_args.args[1] == inserted, kwargs
+
+    def test_code_without_a_pair_is_handed_over_unchanged(self):
+        _, _, mock_repair = self._gate(
+            _CW_BASE, _CW_BASE.replace("Log    ${total}", "Log    total=${total}"), [self._FAIL, self._PASS],
+            change_waits=_CW_WAITS)
+        assert mock_repair.call_args.args[1] == _CW_BASE
+
+    def test_every_repair_round_hides_the_pair_again(self):
+        inserted = _cw_inserted(_CW_BASE)
+        first = _CW_BASE.replace("Log    ${total}", "Log    total=${total}")
+        with patch.object(ds, "settings", self._settings(3)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=[first, first.replace("total=", "value=")]):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [self._FAIL, self._FAIL, self._PASS]
+            out = ds.validate_and_repair("rid", inserted, "gemini", "m", None, change_waits=_CW_WAITS)
+        assert [c.args[1] for c in mock_repair.call_args_list] == [_CW_BASE, first]
+        assert all(c.args[1].count("Wait Until Keyword Succeeds") == 0 for c in mock_repair.call_args_list)
+        assert out["code"].count(_CW_WAIT) == 1
+
+
+class TestChangeWaitsSurviveTheCleanup:
+    """A repair round normalizes code that already holds the pair."""
+
+    def _task_output(self, raw):
+        out = MagicMock()
+        out.pydantic = None
+        out.json_dict = None
+        out.raw = raw
+        return out
+
+    def test_the_pair_comes_through_extract_and_normalize_byte_identical(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: there is a pair to survive
+        out = ds.extract_and_normalize_robot_code(self._task_output(inserted))
+        assert out == inserted.rstrip("\n")  # the pipeline's own end-of-file trim, nothing else
+        assert out.count(_CW_BEFORE + "\n") == 1
+        assert out.count(_CW_WAIT + "\n") == 1
+
+    def test_the_other_rewrites_still_fire_beside_the_pair(self):
+        banner = "    Get Element States    ${banner}    contains    visible\n"
+        # the banner check sits BEFORE the first action line: after it, a Get other than Get Text refuses the file
+        click = "    Click    ${btn_locator}\n"
+        base = _CW_HEAD.replace(click, banner + click) + "    Close Browser\n"
+        with_pair = _cw_inserted(base)
+        assert with_pair != base  # control: the pair is placed in this file too
+        out_with = ds.extract_and_normalize_robot_code(self._task_output(with_pair))
+        out_without = ds.extract_and_normalize_robot_code(self._task_output(base))
+        wait_banner = "    Wait For Elements State    ${banner}    visible\n"
+        # control: the visibility rewrite fires in BOTH files
+        assert wait_banner in out_without and "Get Element States" not in out_without
+        assert wait_banner in out_with and "Get Element States" not in out_with
+        # the pair is there once, and the same file without it differs by exactly those two lines
+        assert out_with.count(_CW_BEFORE + "\n") == 1
+        assert out_with.count(_CW_WAIT + "\n") == 1
+        assert (out_with.replace(_CW_BEFORE + "\n", "").replace(_CW_WAIT + "\n", "")
+                == out_without)
+
+
+# ---------------------------------------------------------------------------
 # run_dryrun_in_container — security hardening (Phase 4)
 # ---------------------------------------------------------------------------
 

@@ -162,3 +162,82 @@ class TestPhaseHandoff:
 
         mock_fl.execution_memory.get.assert_not_called()
         mock_fire.assert_called_once()
+
+
+class TestLearningGetsTheTestWithoutTheChangeWaits:
+    """F1: the two change-wait lines are the framework's, not the assembler's.
+
+    The executed test (test.robot) keeps them; both learning halves receive the
+    test as it was before `insert_change_waits` wrote them.
+    """
+
+    BARE = (
+        "*** Settings ***\n"
+        "Library    Browser    timeout=30s\n"
+        "Library    BuiltIn\n"
+        "\n"
+        "*** Variables ***\n"
+        "${url}    https://example.com\n"
+        "${btn_locator}    id=go\n"
+        "${total_locator}    css=#total\n"
+        "\n"
+        "*** Test Cases ***\n"
+        "Generated Test\n"
+        "    New Browser    chromium    headless=True\n"
+        "    New Page    ${url}\n"
+        "    Click    ${btn_locator}\n"
+        "    ${total}=    Get Text    ${total_locator}\n"
+        "    Log    ${total}\n"
+        "    Close Browser\n"
+    )
+    WAITS = ({"read_locator": "css=#total", "action_locator": "id=go"},)
+
+    @staticmethod
+    def _drive(tmp_path, robot_code):
+        """Run _stream_docker_execution on `robot_code`; return what each learning half
+        received and the text written to test.robot (the executed test)."""
+        seen = {}
+        store = MagicMock()
+        store.run_dir.return_value = tmp_path
+
+        def fake_record(run_id, user_query, code, result):
+            seen["record"] = code
+            return ("PRE", "[1]")
+
+        def fake_attribution(run_id, user_query, code, result,
+                             pre_run_record, injected_hint_ids_json):
+            seen["attribution"] = code
+
+        with patch.object(ws.runner_exec_client, "ensure_image", return_value=None), \
+             patch.object(ws.runner_exec_client, "execute",
+                          lambda run_id, test_filename: {"test_status": "passed", "logs": ""}), \
+             patch.object(ws, "_set_run_status", return_value=None), \
+             patch.object(ws, "_safe_evict_hint_metadata", return_value=None), \
+             patch.object(ws, "get_artifact_store", return_value=store), \
+             patch.object(ws, "inline_report_screenshots", lambda run_dir: 0), \
+             patch.object(ws, "_process_learning_record", fake_record), \
+             patch.object(ws, "_process_learning_attribution", fake_attribution):
+            _drain(ws._stream_docker_execution(
+                "run-1", robot_code, "click go and get the total", lambda: None))
+
+        seen["executed"] = (tmp_path / "test.robot").read_text(encoding="utf-8")
+        return seen
+
+    def test_both_learning_halves_get_the_test_as_it_was_before_the_insert(self, tmp_path):
+        from src.backend.crew_ai.robot_code_normalizer import insert_change_waits
+
+        with_pair = insert_change_waits(self.BARE, self.WAITS)
+        assert with_pair != self.BARE  # control: the pair is really in this test
+
+        seen = self._drive(tmp_path, with_pair)
+
+        assert seen["record"] == self.BARE
+        assert seen["attribution"] == self.BARE
+        assert seen["executed"] == with_pair
+
+    def test_a_test_without_the_pair_reaches_both_halves_unchanged(self, tmp_path):
+        seen = self._drive(tmp_path, self.BARE)
+
+        assert seen["record"] == self.BARE
+        assert seen["attribution"] == self.BARE
+        assert seen["executed"] == self.BARE

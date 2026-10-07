@@ -27,7 +27,8 @@ fed ONLY by the real run (never by dryrun).
 Referenced by: src/backend/services/workflow_service.py (run_agentic_workflow gate)
 Depends on: src/backend/services/docker_service (container plumbing + mount resolution),
             src/backend/crew_ai/agents.RobotAgents + tasks.RobotTasks (repair crew),
-            src/backend/crew_ai/robot_code_normalizer.normalize_robot_code,
+            src/backend/crew_ai/robot_code_normalizer.normalize_robot_code
+            (and insert_change_waits / remove_change_waits for the F1 change-wait lines),
             src/backend/core/workflow_metrics.calculate_crewai_cost (repair cost shape),
             src/backend/core/config.settings (DRYRUN_ENABLED / MAX_DRYRUN_FIXES / DRYRUN_TIMEOUT)
 """
@@ -46,7 +47,9 @@ from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
+    insert_change_waits,
     normalize_robot_code,
+    remove_change_waits,
     rewrite_select_text_reads,
     rewrite_typed_value_reads,
     rewrite_visibility_checks_to_wait,
@@ -548,8 +551,15 @@ def _push_progress(progress_queue, message: str, progress: int | None = None) ->
         logger.warning("🔬 DRYRUN: progress push failed (non-blocking): %s", e)
 
 
-def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue) -> dict:
+def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue,
+                        change_waits=None) -> dict:
     """Soft dryrun gate + bounded Assembler repair loop (generation path only).
+
+    `change_waits` (browser-service's marks, as `RunCrewResult.change_waits`) is applied to every
+    repaired test before it is re-checked, so the repair cannot drop the two inserted lines;
+    None / empty leaves the repaired code exactly as extracted. The dryrun gate checks the code WITH
+    the two lines, but the repair LLM is handed it WITHOUT them (`remove_change_waits`), so it can
+    neither edit nor copy them; when no marks exist the code is handed over exactly as it is.
 
     Returns a dict ALWAYS (never raises — a gate exception must never reach the
     outer workflow handler, which would convert a deliverable result into a hard
@@ -644,9 +654,12 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                 counters["dryrun_repairs"] += 1
                 _repair_t0 = time.monotonic()
                 try:
+                    # The repair LLM is handed the test WITHOUT the two change-wait
+                    # lines (it would edit, copy or "fix" them); the pair goes back
+                    # below. Only when marks exist: no marks, no pair of ours.
                     task_output, attempt_usage, attempt_guardrails = repair_robot_code(
-                        run_id, code, last_result["errors"],
-                        model_provider, model_name,
+                        run_id, remove_change_waits(code) if change_waits else code,
+                        last_result["errors"], model_provider, model_name,
                     )
                     # Count the repair cost as soon as it is known, before
                     # extraction, so it is not lost if extraction later fails.
@@ -654,6 +667,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     for _name, _count in (attempt_guardrails or {}).items():
                         guardrail_attempts[_name] = guardrail_attempts.get(_name, 0) + _count
                     new_code = extract_and_normalize_robot_code(task_output)
+                    new_code = insert_change_waits(new_code, change_waits)
                 except Exception as e:
                     # §8.3 — repair fault isolation: degrade with current code,
                     # never propagate to the outer handler.

@@ -493,6 +493,16 @@ class BatchBrowserUseTool(BaseTool):
                             "row_anchored": elem_result.get("row_anchored", False),
                             "row_anchor_ambiguous": elem_result.get("row_anchor_ambiguous", False),
                         }
+                        # F1: bs marks a read whose text changed because of an
+                        # earlier action with that action's element id. Carried
+                        # only when set; NLRF keeps it beside the steps.
+                        if elem_result.get("changed_by_action"):
+                            locator_mapping[element_id]["changed_by_action"] = elem_result["changed_by_action"]
+                        # F1: bs flags a read whose value came back to an earlier
+                        # value. Carried only when set; like the mark, it never
+                        # reaches the assembler.
+                        if elem_result.get("came_back"):
+                            locator_mapping[element_id]["came_back"] = True
                     else:
                         locator_mapping[element_id] = {
                             "found": False,

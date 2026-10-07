@@ -37,8 +37,21 @@ here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
 `rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads` and
 `rewrite_typed_value_reads`.
 
+Two further public functions are not part of that cleanup step:
+`insert_change_waits` puts a before-read and a never-failing wait around a read
+browser-service marked as changed by an earlier action, and
+`remove_change_waits` is its exact inverse. `insert_change_waits` runs after
+generation and after every dryrun repair; `remove_change_waits` hands the repair
+LLM and the learning system the test without the pair.
+
 Referenced by:
     src.backend.services.dryrun_service.extract_and_normalize_robot_code
+    src.backend.services.dryrun_service.validate_and_repair
+        (insert_change_waits after every repair, remove_change_waits before it)
+    src.backend.services.workflow_service.run_agentic_workflow
+        (insert_change_waits after generation)
+    src.backend.services.workflow_service._stream_docker_execution
+        (remove_change_waits for the learning hand-off)
 """
 
 import logging
@@ -1364,6 +1377,479 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
         robot_code, suite, _typed_value_rewrites(suite), _TYPED_READ_GUARD,
         "Typed value normalizer", "Get Attribute … value line(s)", _GET_PROPERTY,
     )
+
+
+# ---------------------------------------------------------------------------
+# Change waits: a READ whose text browser-service saw change because of an
+# earlier action. insert_change_waits puts two never-failing lines around it,
+# remove_change_waits is its exact inverse (learning is shown the test without
+# them). Both run on the shared suite reader above.
+# ---------------------------------------------------------------------------
+
+# The Browser keywords browser-service performs on an element, as _canon_keyword spells them.
+_CHANGE_WAIT_ACTIONS = frozenset({
+    "click", "fill text", "type text", "select options by", "check checkbox", "uncheck checkbox",
+    "press keys", "fill secret", "type secret",
+})
+# The only action line an element may have first when it has several (then only `Press Keys … Enter` follows).
+_TYPING_ACTIONS = frozenset({"fill text", "type text", "fill secret", "type secret"})
+# Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for.
+_PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate"})
+# The actions browser-service really performs while it discovers the page: NLRF maps `Press Keys` to a click, so
+# it is NOT among them (a `Press Keys` after the first action line is judged by its own rule).
+_PROVEN_ACTIONS = _CHANGE_WAIT_ACTIONS - {"press keys"}
+_GET_TEXT_KEYWORDS = frozenset({"get text"})
+_IGNORE_ERROR = "Run Keyword And Ignore Error"
+_WAIT_KEYWORD = "Wait Until Keyword Succeeds"
+_WAIT_TIMEOUT = "30s"
+_WAIT_INTERVAL = "250ms"
+# The cells of the wait line that come before the read cell.
+_WAIT_HEAD_CELLS = [_IGNORE_ERROR, _WAIT_KEYWORD, _WAIT_TIMEOUT, _WAIT_INTERVAL, "Get Text"]
+# A variable name that is safe to extend with `_before`: `${x.attr}`, `${x: str}` and the like are not.
+_PLAIN_NAME_RE = re.compile(r"\w+")
+# The before-read's target cell (`${x}=`) and the wait's last cell (`${x}[1]`).
+_BEFORE_TARGET_RE = re.compile(r"\$\{([^{}]+)\}=")
+_WAIT_VALUE_RE = re.compile(r"\$\{([^{}]+)\}\[1\]")
+
+
+def _change_wait_key(value: str | None) -> str | None:
+    """A locator in the form two spellings of one element compare equal in: stripped, a leading
+    `css=` (any letter case) removed and the rest stripped again, then a plain-identifier `#x`
+    (what `_ID_LOCATOR_RE` calls an id) becomes `id=x`. `#a.b` stays `#a.b`: it is id `a` with class
+    `b`, never `id=a.b`. None for None or an empty locator."""
+    if value is None:
+        return None
+    text = value.strip()
+    if text[:4].lower() == "css=":
+        text = text[4:].strip()
+    match = _ID_LOCATOR_RE.fullmatch(text) or _ID_LOCATOR_RE.fullmatch(f"css={text}")
+    return f"id={match.group(1)}" if match else (text or None)
+
+
+def _change_wait_before_line(indent: str, name: str, cell: str) -> str:
+    return f"{indent}${{{name}}}=    {_IGNORE_ERROR}    Get Text    {cell}"
+
+
+def _change_wait_wait_line(indent: str, name: str, cell: str) -> str:
+    return (
+        f"{indent}{_IGNORE_ERROR}    {_WAIT_KEYWORD}    {_WAIT_TIMEOUT}    {_WAIT_INTERVAL}"
+        f"    Get Text    {cell}    !=    ${{{name}}}[1]"
+    )
+
+
+def _change_wait_matches(steps: list[_Step], keys: list[str | None], names: frozenset[str],
+                         wanted: str | None, start: int = 0) -> list[int]:
+    """Indices (from `start`) of the Browser steps named in `names` whose first argument, as it
+    stands when the step runs, is the element `wanted`. A step that resolves to None never matches.
+    A `[Teardown]` or other setting never matches: its `keyword` is its bracketed name."""
+    if wanted is None:
+        return []
+    return [
+        i for i in range(start, len(steps))
+        if steps[i].keyword in names
+        and steps[i].prefix in _BROWSER_PREFIXES and keys[i] == wanted
+    ]
+
+
+def _change_wait_file_problem(suite: _Suite) -> str | None:
+    """Why the whole file is left alone, or None when this insert can read it."""
+    if any(
+        (header := _section_header_name(line.rstrip("\r"))) is not None and header not in _NON_KEYWORD_SECTIONS
+        for line in suite.lines
+    ):
+        return "it has a section that could define keywords"
+    if len(suite.tests) != 1:
+        return f"it holds {len(suite.tests)} tests, not one"
+    if not suite.tests[0].followable:
+        return (
+            "its test cannot be followed line by line (a control structure, a template or a line "
+            "this reader cannot read as a step)"
+        )
+    if _sets_a_robot_timeout(suite):
+        return (
+            "it sets a Robot timeout (Test Timeout, Task Timeout or [Timeout]), which Robot does not "
+            "catch inside Run Keyword And Ignore Error or Wait Until Keyword Succeeds"
+        )
+    return None
+
+
+def _sets_a_robot_timeout(suite: _Suite) -> bool:
+    """True when the one test holds a `[Timeout]` setting or the Settings section holds a `Test
+    Timeout` / `Task Timeout` line (case, spaces and underscores ignored, the way Robot compares)."""
+    if any(
+        step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[timeout]" for step in suite.tests[0].steps
+    ):
+        return True
+    return any(
+        re.sub(_SPACE_UNDERSCORE, "", _CELL_SPLIT_RE.split(suite.lines[line_no].strip())[0].lower())
+        in ("testtimeout", "tasktimeout")
+        for line_no in suite.settings_line_nos
+    )
+
+
+def _change_wait_suite(robot_code: str) -> _Suite | None:
+    """The suite when this insert can read the file, else None after one WARNING naming why."""
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        logger.warning("Change-wait inserter: left the file unchanged — it could not be read as one suite")
+        return None
+    problem = _change_wait_file_problem(suite)
+    if problem:
+        logger.warning(f"Change-wait inserter: left the file unchanged — {problem}")
+        return None
+    return suite
+
+
+class _SeveralActionLines(Exception):
+    """One wait's action element is acted on by several lines this insert cannot place a pair around."""
+
+
+def _is_type_then_enter(steps: list[_Step], actions: list[int]) -> bool:
+    """True when the action lines are exactly one typing line (`Fill Text`, `Type Text`, `Fill Secret`,
+    `Type Secret`) first, then only `Press Keys <locator> Enter` lines whose keys are the one cell `Enter`.
+    A line continued on a `...` line is never one of those (`Enter` then `...    Tab` presses Tab too).
+    A single action line of any kind is not a repeat and is always fine."""
+    if len(actions) == 1:
+        return True
+    if steps[actions[0]].keyword not in _TYPING_ACTIONS or steps[actions[0]].continued:
+        return False
+    return all(
+        steps[i].keyword == "press keys" and steps[i].args[1:] == ["Enter"] and not steps[i].continued
+        for i in actions[1:]
+    )
+
+
+def _is_proven_after_first_action(steps: list[_Step], index: int,
+                                  forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]],
+                                  keys: list[str | None]) -> bool:
+    """True when the step at `index` is a kind that cannot change what a wait waits for (R17): one of
+    the actions browser-service performs (`Press Keys` excepted), `Get Text` (R17c: no other `Get …`,
+    browser-service compares text and cannot see an attribute or a count come back), `should …`,
+    `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own
+    pair lines, a setting such as `[Teardown]` (never a step of the body), `Keyboard Key    press
+    Enter` written directly after a typing line, or (R17b) `Press Keys    X    Enter` — exactly one key
+    cell `Enter`, not continued — whose most recent action is a typing line on the SAME element or
+    another such Enter (`_is_enter_after_typing`; browser-service folds that Enter into the typing
+    element; any other `Press Keys` is mapped to a click, so the key is never pressed while it is
+    discovering the page). `keys` is each step's element key."""
+    step = steps[index]
+    if step.setting or forms[index][0] is not None or forms[index][1] is not None:
+        return True
+    keyword = step.keyword
+    if keyword in _PROVEN_ACTIONS or keyword in _GET_TEXT_KEYWORDS or keyword.startswith("should ") \
+            or keyword in _PROVEN_OUTSIDE:
+        return True
+    if keyword == "keyboard key":
+        return (
+            step.args == ["press", "Enter"] and not step.continued
+            and index > 0 and steps[index - 1].keyword in _TYPING_ACTIONS
+        )
+    if keyword == "press keys":
+        return _is_enter_after_typing(steps, index, forms, keys)
+    return False
+
+
+def _is_skipped_between(step: _Step, form: tuple[tuple[str, str] | None, tuple[str, str] | None]) -> bool:
+    """A step that is not an action for the Enter rule: `Get Text`, a `Should …` check, `Log`, BuiltIn
+    `Evaluate`, or one of the framework's own pair lines (another `Get …` is not skipped: it refuses the file)."""
+    return (
+        form[0] is not None or form[1] is not None
+        or step.keyword in _GET_TEXT_KEYWORDS or step.keyword.startswith("should ")
+        or step.keyword in ("log", "evaluate")
+    )
+
+
+def _is_enter_after_typing(steps: list[_Step], index: int,
+                           forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]],
+                           keys: list[str | None]) -> bool:
+    """R17b: `Press Keys    X    Enter` (exactly one key cell, not continued) whose most recent ACTION step
+    before it — reads, checks, `Log`, `Evaluate` and the framework's pair lines are skipped — is a typing
+    line on the SAME element, or another such `Press Keys … Enter` on that element."""
+    step = steps[index]
+    if step.keyword != "press keys" or step.args[1:] != ["Enter"] or step.continued or keys[index] is None:
+        return False
+    previous = index - 1
+    while previous >= 0 and _is_skipped_between(steps[previous], forms[previous]):
+        previous -= 1
+    if previous < 0 or keys[previous] != keys[index]:
+        return False
+    if steps[previous].keyword in _TYPING_ACTIONS:
+        return True
+    return _is_enter_after_typing(steps, previous, forms, keys)
+
+
+def _change_wait_targets(steps: list[_Step], keys: list[str | None], read_key: str | None,
+                         action_key: str | None, number: int) -> tuple[_Step, _Step] | None:
+    """The first action line and the read of one wait, or None after one WARNING when the test has no
+    such pair, or when the read's variable is assigned between the two (the before-read, placed above the
+    first action line, would read another element than the wait). Raises `_SeveralActionLines` when the
+    element sits on several action lines other than one typing line followed by `Press Keys … Enter`."""
+    actions = _change_wait_matches(steps, keys, _CHANGE_WAIT_ACTIONS, action_key)
+    if not actions:
+        logger.warning(f"Change-wait inserter: skipped wait {number} — no action line on its element in the test")
+        return None
+    if not _is_type_then_enter(steps, actions):
+        raise _SeveralActionLines(number)
+    reads = _change_wait_matches(steps, keys, _GET_TEXT_KEYWORDS, read_key, actions[-1] + 1)
+    if not reads:
+        logger.warning(
+            f"Change-wait inserter: skipped wait {number} — no Get Text of its element after the last action line"
+        )
+        return None
+    scalar = _SCALAR_CELL_RE.fullmatch(steps[reads[0]].args[0])
+    if scalar and any(
+        _canon_variable(scalar.group(1)) in step.assigns for step in steps[actions[0]:reads[0]]
+    ):
+        logger.warning(
+            f"Change-wait inserter: skipped wait {number} — its read variable is assigned between the first "
+            "action line and the read"
+        )
+        return None
+    return steps[actions[0]], steps[reads[0]]
+
+
+def _change_wait_name(read_cell: str, number: int) -> str:
+    """`<var>_before` for a read cell that is exactly one plain `${var}`, else `read_before_<number>`."""
+    scalar = _SCALAR_CELL_RE.fullmatch(read_cell)
+    if scalar and _PLAIN_NAME_RE.fullmatch(scalar.group(1)):
+        return f"{scalar.group(1)}_before"
+    return f"read_before_{number}"
+
+
+def _change_wait_decision(forms: list[tuple[tuple[str, str] | None, tuple[str, str] | None]], cell: str,
+                          name: str, assigned: set[str], number: int) -> str:
+    """What to do with one wait: `present` (the framework's own two lines for this read cell are
+    there, whatever the variable is called), `half` (only one of them is: the whole file stays, one
+    WARNING), `taken` (the name this wait would assign is already assigned: skip, one WARNING) or
+    `insert`. `forms` holds, per step, the remover's recognition of its line (before-read, wait)."""
+    befores = [(i, f[0][0]) for i, f in enumerate(forms) if f[0] is not None and f[0][1] == cell]
+    waits = [(i, f[1][0]) for i, f in enumerate(forms) if f[1] is not None and f[1][1] == cell]
+    if any(variable == wait_variable and j > i for i, variable in befores for j, wait_variable in waits):
+        return "present"
+    if befores or waits:
+        logger.warning(
+            f"Change-wait inserter: left the file unchanged — wait {number} has only one of its two lines"
+        )
+        return "half"
+    if _canon_variable(name) in assigned:
+        logger.warning(
+            f"Change-wait inserter: skipped wait {number} — the variable name it would assign is already "
+            "assigned in the test or defined in the Variables section"
+        )
+        return "taken"
+    return "insert"
+
+
+def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]], list[str]] | None:
+    """(line number -> the lines to put directly above it, one INFO text per pair), or None when the whole
+    file must stay as it is. Nothing is logged at INFO here: the caller does it once the text is final."""
+    test = suite.tests[0]
+    steps = test.steps
+    keys = [_change_wait_key(args[0]) if args else None for args in _follow(test, suite.variables)]
+    # A name the *** Variables *** section defines is taken as well: the before-read would overwrite it.
+    assigned = {name for step in steps for name in step.assigns} | set(suite.variables)
+    forms = [
+        (_change_wait_before_key(cells), _change_wait_wait_key(cells))
+        for cells in ((_change_wait_cells(suite.lines[step.line_no]) or []) for step in steps)
+    ]
+    seen: set[tuple[str | None, str | None]] = set()
+    inserts: dict[int, list[str]] = {}
+    notes: list[str] = []
+    first_lines: list[int] = []  # the line each placed wait's before-read goes above
+    for number, wait in enumerate(waits, start=1):
+        element = (_change_wait_key(wait["read_locator"]), _change_wait_key(wait["action_locator"]))
+        if element in seen:
+            continue  # the same read after the same action: one wait
+        seen.add(element)
+        try:
+            targets = _change_wait_targets(steps, keys, element[0], element[1], number)
+        except _SeveralActionLines:
+            logger.warning(
+                f"Change-wait inserter: left the file unchanged — the element of wait {number} is acted on by "
+                "several lines other than one Fill/Type line followed by Press Keys Enter (signal: change-wait-refused)"
+            )
+            return None
+        if targets is None:
+            continue
+        first_action, read = targets
+        cell = read.args[0]
+        name = _change_wait_name(cell, number)
+        decision = _change_wait_decision(forms, cell, name, assigned, number)
+        if decision == "half":
+            return None
+        if decision != "insert":
+            continue
+        assigned.add(_canon_variable(name))
+        first_lines.append(first_action.line_no)
+        inserts.setdefault(first_action.line_no, []).append(_change_wait_before_line(first_action.parts[1], name, cell))
+        inserts.setdefault(read.line_no, []).append(_change_wait_wait_line(read.parts[1], name, cell))
+        notes.append(
+            f"Change-wait inserter: wait {number} — read above line {first_action.line_no + 1}, wait above "
+            f"line {read.line_no + 1} (signal: change-wait-inserted)"
+        )
+    if first_lines:
+        boundary = min(first_lines)
+        for index, step in enumerate(steps):
+            if step.line_no >= boundary and not _is_proven_after_first_action(steps, index, forms, keys):
+                logger.warning(
+                    "Change-wait inserter: left the file unchanged — a step after the first action is one "
+                    f"browser-service does not perform ({step.parts[step.keyword_idx].strip()}) "
+                    "(signal: change-wait-refused)"
+                )
+                return None
+    return inserts, notes
+
+
+def _insert_change_waits(robot_code: str, change_waits) -> str:
+    waits = list(change_waits) if change_waits else []
+    if not robot_code or not waits:
+        return robot_code
+    suite = _change_wait_suite(robot_code)
+    planned = _plan_change_waits(suite, waits) if suite is not None else None
+    if planned is None or not planned[0]:
+        return robot_code
+    inserts, notes = planned
+    out = []
+    for line_no, line in enumerate(suite.lines):
+        if line_no in inserts:
+            # An inserted line ends the way the line above it ends (the last line of a CRLF file has no "\r").
+            eol = "\r" if suite.lines[line_no - 1].endswith("\r") else ""
+            out.extend(text + eol for text in inserts[line_no])
+        out.append(line)
+    for note in notes:
+        logger.info(note)
+    return "\n".join(out)
+
+
+def insert_change_waits(robot_code: str, change_waits) -> str:
+    """Put a before-read and a change-wait around each read browser-service marked as changed.
+
+    `change_waits` is an iterable of `{"read_locator": ..., "action_locator": ...}` (browser-service
+    locators). For each one, in a test of one body this reader can follow, the two lines are:
+
+        ${<name>_before}=    Run Keyword And Ignore Error    Get Text    <read cell>
+        Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text    <read cell>    !=    ${<name>_before}[1]
+
+    The first goes directly above the FIRST step that acts on the action's element (Click, Fill Text,
+    Type Text, Select Options By, Check/Uncheck Checkbox, Press Keys, Fill/Type Secret), the second
+    directly above the first Get Text of the read's element after the LAST of those. An element may sit
+    on several action lines ONLY as exactly one `Fill Text` / `Type Text` / `Fill Secret` / `Type Secret`
+    line first, followed only by `Press Keys <locator> Enter` lines whose keys are the one cell `Enter`
+    (browser-service folds `Fill Text` and `Press Keys` into one element); any other repeat (Click and
+    Click, Check and Uncheck, Select and Select, Fill and Fill, a Press Keys first, `Enter    Tab`) is a
+    test that can undo itself, where a wait that stops at the first change can stop on an in-between
+    value and fail a test that passes today. An element is its
+    locator as it stands when the step runs (`_follow`): a leading `css=` (any case) is ignored,
+    and `id=x`, `css=#x` and a bare `#x` are one element (`#a.b` is not `id=a.b`). Two waits for
+    one element (same read, same action) are one wait. `<read cell>` is the read step's own first
+    argument as written; `<name>` is the variable when that cell is exactly one plain `${var}`,
+    otherwise `read` and the wait's 1-based position (`${read_before_2}`). Neither line can fail a
+    test — the keyword that cannot run is ignored and the wait gives up after 30s — EXCEPT under a
+    Robot timeout, which Robot does not catch inside either keyword: such a file is refused.
+
+    The file is left byte-identical, with one WARNING, when the reader refuses it, it has a section
+    that could define keywords, it holds other than one test, its test cannot be followed (a control
+    structure such as FOR or GROUP, a template, a line the reader cannot read as a step), it sets a
+    Robot timeout (`[Timeout]` in the test, `Test Timeout` / `Task Timeout` in Settings), the
+    framework's own before-read or wait for a read is there without the other, or the action element of
+    ANY wait is acted on by several lines other than one Fill/Type line followed by Press Keys Enter
+    (the whole file, never the other waits alone), or, at or after the first action line of ANY wait it
+    would place, the test holds a step browser-service does not perform. Allowed there: the actions
+    above except `Press Keys`, `Get Text` (R17c: any other `Get …` — Get Attribute, Get Classes, Get
+    Property, Get Selected Options, Get Element Count, Get Url, … — refuses the file: browser-service
+    compares text, so it cannot see those values come back), `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
+    `Evaluate JavaScript`), the framework's own pair lines, a setting such as `[Teardown]`,
+    `Keyboard Key    press    Enter` written directly after a Fill/Type Text or Fill/Type Secret line, and
+    `Press Keys    X    Enter` (exactly the one key cell `Enter`, not continued on a `...` line) whose
+    most recent ACTION step before it is a Fill/Type Text or Fill/Type Secret line on the SAME element X
+    (two variables holding one locator are one element) or another such `Press Keys    X    Enter`;
+    `Get Text` reads, `Should …`, `Log`, BuiltIn `Evaluate` and the framework's pair lines between are skipped.
+    NLRF maps `Press Keys` to a click for browser-service, so any other `Press Keys` at or after that
+    line (another key, Enter after a Click, Enter on another element, several keys) is never pressed
+    while it discovers the page. A
+    `Press Keys` before the first action line is not checked. Anything else (`Keyboard Key    press
+    Escape`, `Go Back`, `Reload`, `Hover`, `Evaluate JavaScript`, a `Sleep`, …) can change the page where the wait would stop on an in-between value, so the whole file
+    stays. Both whole-file refusals log `(signal: change-wait-refused)`. A `...`-continued line counts as
+    its full argument list (`Press Keys    ${q}    Enter` then `...    Tab` is `Enter    Tab`). A wait is skipped
+    with one WARNING when it has no action line or no read after it, when its read variable is
+    assigned between the first action line and the read, or when the variable name it would assign is
+    already assigned in the test or defined in `*** Variables ***`; the others are still placed. A pair already there (its two own line forms for
+    that read cell, whatever the variable is called) is left as it is, with no log. The INFO line
+    `signal: change-wait-inserted` is logged once per pair, only for a file returned changed.
+    Pure, idempotent, never raises; `remove_change_waits` undoes it exactly.
+    """
+    try:
+        return _insert_change_waits(robot_code, change_waits)
+    except Exception:
+        logger.warning("Change-wait inserter: left the file unchanged — it raised", exc_info=True)
+        return robot_code
+
+
+def _change_wait_cells(raw: str) -> list[str] | None:
+    """The stripped content cells of an indented line, or None for any other line or a line with a comment."""
+    parts = _CELL_SPLIT_RE.split(raw[:-1] if raw.endswith("\r") else raw)
+    if parts[0] or len(parts) < 2:
+        return None
+    content = _content_cells(parts)
+    if len(content) != sum(1 for part in parts if part and not _CELL_SPLIT_RE.fullmatch(part)):
+        return None
+    return [parts[i].strip() for i in content]
+
+
+def _change_wait_before_key(cells: list[str]) -> tuple[str, str] | None:
+    """(V, X) when the cells are exactly `${V}=  Run Keyword And Ignore Error  Get Text  X`."""
+    if len(cells) == 4 and cells[1:3] == [_IGNORE_ERROR, "Get Text"]:
+        target = _BEFORE_TARGET_RE.fullmatch(cells[0])
+        if target:
+            return target.group(1), cells[3]
+    return None
+
+
+def _change_wait_wait_key(cells: list[str]) -> tuple[str, str] | None:
+    """(V, X) when the cells are exactly the wait line over `Get Text  X  !=  ${V}[1]`."""
+    if len(cells) == 8 and cells[:5] == _WAIT_HEAD_CELLS and cells[6] == "!=":
+        value = _WAIT_VALUE_RE.fullmatch(cells[7])
+        if value:
+            return value.group(1), cells[5]
+    return None
+
+
+def _remove_change_waits(robot_code: str) -> str:
+    if not robot_code:
+        return robot_code
+    lines = robot_code.split("\n")
+    open_befores: dict[tuple[str, str], list[int]] = {}
+    drop: set[int] = set()
+    for line_no, raw in enumerate(lines):
+        cells = _change_wait_cells(raw) or []
+        before = _change_wait_before_key(cells)
+        if before is not None:
+            open_befores.setdefault(before, []).append(line_no)
+            continue
+        wait = _change_wait_wait_key(cells)
+        pending = open_befores.get(wait) if wait is not None else None
+        if pending:
+            drop.update((pending.pop(), line_no))
+    if not drop:
+        return robot_code
+    return "\n".join(line for line_no, line in enumerate(lines) if line_no not in drop)
+
+
+def remove_change_waits(robot_code: str) -> str:
+    """Drop exactly the pairs `insert_change_waits` writes; every other byte stays.
+
+    A pair is an indented `${V}=    Run Keyword And Ignore Error    Get Text    X` and a LATER
+    indented `Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text
+    X    !=    ${V}[1]` with the same V and the same cell X, compared cell by cell. Both lines go
+    with their own line ends. Half a pair, an edited timeout or interval, another X, a wait above its
+    before-read, a line with a comment and the assembler's own `Run Keyword And Ignore Error    Click`
+    all stay. Returns the input object when there is no pair. Pure, idempotent, never raises.
+    """
+    try:
+        return _remove_change_waits(robot_code)
+    except Exception:
+        logger.warning("Change-wait remover: left the file unchanged — it raised", exc_info=True)
+        return robot_code
 
 
 def normalize_robot_code(robot_code: str) -> str:

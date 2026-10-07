@@ -861,6 +861,101 @@ class TestLongRequests:
             " there are 20 books", " 5 items ", " the total is 7"]
 
 
+class TestTheChangeWaitPairDoesNotMoveTheAnswer:
+    """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
+    `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with
+    and without the pair. Pinned here on the demoblaze test the feature was built for (a Laptops
+    click, then the first laptop's name) so a future checker change cannot silently flip it."""
+
+    READ = "css=#tbodyid >> div.col-lg-4 >> nth=0 >> a.hrefch"
+    ACTION = "a:has-text('Laptops')"
+    WAITS = ({"read_locator": READ, "action_locator": ACTION},)
+    VERIFY_QUERY = ("Go to https://www.demoblaze.com, click on the Laptops category in the left menu "
+                    "and verify the first laptop name is shown")
+    GET_QUERY = ("Go to https://www.demoblaze.com, click on the Laptops category in the left menu "
+                 "and get the name of the first laptop shown")
+
+    @staticmethod
+    def demoblaze(extra: str = "", inline: bool = False) -> str:
+        """The generated test (bench/private/bs31_eval/probe_pr42/exec_check/p03_60a0b526-...robot),
+        optionally with extra body lines before Close Browser, optionally with inline locators."""
+        read = TestTheChangeWaitPairDoesNotMoveTheAnswer.READ
+        action = TestTheChangeWaitPairDoesNotMoveTheAnswer.ACTION
+        variables = ("${browser}    chromium\n${headless}    True\n${url}    https://www.demoblaze.com\n"
+                     f"${{laptops_category_locator}}    {action}\n"
+                     f"${{first_laptop_name_locator}}    {read}\n")
+        click = f"    Click    {action}\n" if inline else "    Click    ${laptops_category_locator}\n"
+        get = (f"    ${{first_laptop_name}}=    Get Text    {read}\n" if inline
+               else "    ${first_laptop_name}=    Get Text    ${first_laptop_name_locator}\n")
+        return ("*** Settings ***\nLibrary    Browser    timeout=30s\nLibrary    BuiltIn\n"
+                "Library    Collections\n\n*** Variables ***\n" + variables
+                + "\n*** Test Cases ***\nGenerated Test\n"
+                "    [Documentation]    Auto-generated test case\n"
+                "    New Browser    ${browser}    headless=${headless}\n"
+                "    New Context    viewport={'width': 1920, 'height': 1080}\n"
+                "    New Page    ${url}\n" + click + get
+                + "    Log    First Laptop Name: ${first_laptop_name}\n" + extra + "    Close Browser\n")
+
+    @classmethod
+    def with_pair(cls, code: str) -> str:
+        from src.backend.crew_ai.robot_code_normalizer import insert_change_waits
+        out = insert_change_waits(code, cls.WAITS)
+        # Control for every test below: the pair really went into this file.
+        assert out != code and "Run Keyword And Ignore Error    Wait Until Keyword Succeeds" in out
+        return out
+
+    def test_a_verify_request_without_an_assertion_is_flagged_with_and_without_the_pair(self):
+        bare = self.demoblaze()
+        paired = self.with_pair(bare)
+        assert shapes(bare, self.VERIFY_QUERY) == {VERIFY_WITHOUT_ASSERTION}
+        assert shapes(paired, self.VERIFY_QUERY) == {VERIFY_WITHOUT_ASSERTION}
+        assert check_pass_quality(paired, self.VERIFY_QUERY) == check_pass_quality(bare, self.VERIFY_QUERY)
+
+    def test_a_real_assertion_clears_the_shape_with_and_without_the_pair(self):
+        # The control for the test above: the shape is not always present.
+        code = self.demoblaze("    Get Text    ${first_laptop_name_locator}    ==    Sony vaio i5\n")
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(code, self.VERIFY_QUERY)
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(self.with_pair(code), self.VERIFY_QUERY)
+
+    def test_a_get_request_has_the_same_findings_with_and_without_the_pair(self):
+        bare = self.demoblaze()
+        assert (check_pass_quality(self.with_pair(bare), self.GET_QUERY)
+                == check_pass_quality(bare, self.GET_QUERY))
+
+    def test_the_inline_form_gives_the_same_answer_with_and_without_the_pair(self):
+        bare = self.demoblaze(inline=True)
+        paired = self.with_pair(bare)
+        assert "${read_before_1}" in paired
+        for query in (self.VERIFY_QUERY, self.GET_QUERY):
+            assert check_pass_quality(paired, query) == check_pass_quality(bare, query), query
+        assert shapes(paired, self.VERIFY_QUERY) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_hand_written_wait_without_a_before_read_does_not_move_the_answer(self):
+        wait = ("    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    10s    1s"
+                "    Get Text    css=#x    !=    old\n")
+        bare = self.demoblaze()
+        # Placed above Close Browser: the line is in the file, and the answer is the same without it.
+        code = bare.replace("    Close Browser\n", wait + "    Close Browser\n")
+        assert code != bare
+        for query in (self.VERIFY_QUERY, self.GET_QUERY):
+            assert check_pass_quality(code, query) == check_pass_quality(bare, query), query
+
+    def test_the_old_plain_pair_would_have_changed_the_answer(self):
+        # The reason the never-failing form matters to the checker: a plain wait compares the read
+        # with the value read before the click (`!=`), which the checker counts as an assertion, so
+        # the verify request stops being flagged although nothing was verified.
+        bare = self.demoblaze()
+        plain = bare.replace(
+            "    Click    ${laptops_category_locator}\n",
+            "    ${first_laptop_name_locator_before}=    Get Text    ${first_laptop_name_locator}\n"
+            "    Click    ${laptops_category_locator}\n"
+            "    Wait Until Keyword Succeeds    30s    250ms    Get Text    ${first_laptop_name_locator}"
+            "    !=    ${first_laptop_name_locator_before}\n")
+        assert plain != bare
+        assert VERIFY_WITHOUT_ASSERTION in shapes(bare, self.VERIFY_QUERY)
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(plain, self.VERIFY_QUERY)
+
+
 def test_importing_the_checker_loads_no_config_database_or_llm_client():
     probe = ("import sys; import src.backend.core.pass_quality; "
              "bad = [m for m in ('src.backend.core.config', 'psycopg', 'litellm', 'crewai', "

@@ -30,6 +30,11 @@ Failure taxonomy: the full taxonomy defines 28 codes (A1-A8, B1-B6, C1-C6,
                   scoped to Layers 2 and 3, both still placeholders above. Do
                   not add classifiers for them speculatively; failure-mode work
                   here is gated on measured failure data.
+Caught failures: OutputXmlParser reports the first FAIL keyword that is not
+                  caught (see _is_caught_try_branch); the helpers _status,
+                  _is_caught_try_branch and _first_uncaught_failure live here
+                  and core/failure_sentences.py imports them, so there is one
+                  copy of that rule.
 Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor.
 """
 
@@ -85,6 +90,42 @@ class FailureAnalysis:
 
 
 # ---------------------------------------------------------------------------
+# Caught-failure rule (shared with core/failure_sentences.py)
+# ---------------------------------------------------------------------------
+
+def _status(element: ElementTree.Element) -> str | None:
+    status = element.find("status")
+    return status.get("status") if status is not None else None
+
+
+def _is_caught_try_branch(branch: ElementTree.Element, parent: ElementTree.Element) -> bool:
+    """A failed TRY branch is CAUGHT when an EXCEPT beside it ran (Ruling R2a).
+
+    When that handler — or a FINALLY — fails too, RF marks the <try> AND the
+    TRY branch FAIL, so the branch's own status cannot tell. An EXCEPT that did
+    not match is NOT RUN; one that ran is PASS or FAIL.
+    """
+    if branch.tag != "branch" or branch.get("type") != "TRY":
+        return False
+    return any(sibling.get("type") == "EXCEPT" and _status(sibling) != "NOT RUN"
+               for sibling in parent.findall("branch"))
+
+
+def _first_uncaught_failure(parent: ElementTree.Element) -> ElementTree.Element | None:
+    """The first child of `parent`, in document order, that FAILED uncaught.
+
+    Only FAIL children count, so anything under a PASS element — Run Keyword
+    And Ignore Error / Return Status / Expect Error, a Wait Until Keyword
+    Succeeds that got there in the end, a TRY an EXCEPT handled — is never
+    reached (Ruling R2), and a caught TRY branch is skipped (Ruling R2a).
+    """
+    for child in parent:
+        if _status(child) == "FAIL" and not _is_caught_try_branch(child, parent):
+            return child
+    return None
+
+
+# ---------------------------------------------------------------------------
 # OutputXmlParser
 # ---------------------------------------------------------------------------
 
@@ -136,16 +177,15 @@ class OutputXmlParser:
             # Extract keyword chain (direct <kw> children + nested)
             keyword_chain = self._extract_keyword_chain(test)
 
-            # Identify the first failed keyword and its error
+            # Identify the first failed keyword that is NOT caught, and its error
             failed_kw = None
             error_message = None
             failed_keyword_args = None
-            for kw in keyword_chain:
-                if kw.status == "FAIL":
-                    failed_kw = kw
-                    error_message = kw.message
-                    failed_keyword_args = kw.arguments
-                    break
+            failed_element = self._first_uncaught_failed_kw(test)
+            if failed_element is not None:
+                failed_kw = self._keyword_result(failed_element)
+                error_message = failed_kw.message
+                failed_keyword_args = failed_kw.arguments
 
             # If no keyword-level error found, fall back to test-level status text
             if error_message is None and test_status == "failed" and status_elem is not None:
@@ -166,42 +206,70 @@ class OutputXmlParser:
 
     def _extract_keyword_chain(self, test_element) -> List[KeywordResult]:
         """Walk all ``<kw>`` elements under the test and build KeywordResult list."""
-        keyword_chain: List[KeywordResult] = []
+        return [self._keyword_result(kw) for kw in test_element.findall(".//kw")]
 
-        for kw in test_element.findall(".//kw"):
-            kw_status_elem = kw.find("status")
+    def _keyword_result(self, kw) -> KeywordResult:
+        """Build the KeywordResult for one ``<kw>`` element."""
+        kw_status_elem = kw.find("status")
 
-            # Status string
-            kw_status = "FAIL"
-            if kw_status_elem is not None:
-                kw_status = kw_status_elem.get("status", "FAIL")
+        # Status string
+        kw_status = "FAIL"
+        if kw_status_elem is not None:
+            kw_status = kw_status_elem.get("status", "FAIL")
 
-            # Error message: prefer <msg level="FAIL">, fall back to <status> text
-            kw_message = ""
-            fail_msg = kw.find("msg[@level='FAIL']")
-            if fail_msg is not None and fail_msg.text:
-                kw_message = fail_msg.text.strip()
-            elif kw_status_elem is not None and kw_status_elem.text:
-                kw_message = kw_status_elem.text.strip()
+        # Error message: prefer <msg level="FAIL">, fall back to <status> text
+        kw_message = ""
+        fail_msg = kw.find("msg[@level='FAIL']")
+        if fail_msg is not None and fail_msg.text:
+            kw_message = fail_msg.text.strip()
+        elif kw_status_elem is not None and kw_status_elem.text:
+            kw_message = kw_status_elem.text.strip()
 
-            # Elapsed time (seconds float → ms int)
-            elapsed_ms = self._parse_elapsed(kw_status_elem)
+        # Elapsed time (seconds float → ms int)
+        elapsed_ms = self._parse_elapsed(kw_status_elem)
 
-            # Arguments
-            arguments = [
-                arg.text for arg in kw.findall("arg") if arg.text
-            ]
+        # Arguments
+        arguments = [
+            arg.text for arg in kw.findall("arg") if arg.text
+        ]
 
-            keyword_chain.append(KeywordResult(
-                name=kw.get("name", "unknown"),
-                library=kw.get("owner", ""),   # XML uses "owner", we store as "library"
-                status=kw_status,
-                message=kw_message,
-                elapsed_ms=elapsed_ms,
-                arguments=arguments,
-            ))
+        return KeywordResult(
+            name=kw.get("name", "unknown"),
+            library=kw.get("owner", ""),   # XML uses "owner", we store as "library"
+            status=kw_status,
+            message=kw_message,
+            elapsed_ms=elapsed_ms,
+            arguments=arguments,
+        )
 
-        return keyword_chain
+    @staticmethod
+    def _first_uncaught_failed_kw(test_element):
+        """The first FAIL ``<kw>``, in document order, that was not caught.
+
+        Descends only through elements that are FAIL (or carry no status) and
+        are not a caught TRY branch, so a keyword under a PASS element — a
+        Wait Until Keyword Succeeds that retried and got there, Run Keyword And
+        Ignore Error, a TRY an EXCEPT handled — is never reached. A FAIL
+        element holding no keyword (a failed VAR) is passed over. None when
+        every failed keyword was caught.
+        """
+        stack = [iter(test_element)]
+        parents = [test_element]
+        while stack:
+            for child in stack[-1]:
+                if _status(child) not in (None, "FAIL"):
+                    continue
+                if _is_caught_try_branch(child, parents[-1]):
+                    continue
+                if child.tag == "kw":
+                    return child
+                stack.append(iter(child))
+                parents.append(child)
+                break
+            else:
+                stack.pop()
+                parents.pop()
+        return None
 
     @staticmethod
     def _parse_elapsed(status_elem) -> int:
