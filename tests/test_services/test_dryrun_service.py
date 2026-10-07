@@ -820,6 +820,85 @@ class TestChangeWaitsOnRepair:
         assert out["code"] == inserted
 
 
+class TestRepairLlmIsHandedTheTestWithoutThePair:
+    """The repair LLM never sees the two inserted lines; the gate still checks the code WITH them."""
+
+    def _settings(self, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = True
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _gate(self, robot_code, repaired, dryruns, max_fixes=2, **kwargs):
+        with patch.object(ds, "settings", self._settings(max_fixes)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=repaired):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = dryruns
+            out = ds.validate_and_repair("rid", robot_code, "gemini", "m", None, **kwargs)
+        return out, mock_rc, mock_repair
+
+    _FAIL = {"passed": False, "errors": "bad kw", "exit_code": 1}
+    _PASS = {"passed": True, "errors": "", "exit_code": 0}
+
+    def test_the_repair_gets_the_code_without_the_pair_and_the_dryrun_got_it_with(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: there is a pair to hide
+        repaired = _CW_BASE.replace("Log", "Log To Console")
+        out, mock_rc, mock_repair = self._gate(
+            inserted, repaired, [self._FAIL, self._PASS], change_waits=_CW_WAITS)
+        assert mock_rc.dryrun.call_args_list[0].args[1] == inserted
+        assert mock_repair.call_args.args[1] == _CW_BASE
+        assert _CW_BEFORE not in mock_repair.call_args.args[1]
+        assert _CW_WAIT not in mock_repair.call_args.args[1]
+        # the repaired code comes back with the pair, and that is what the gate re-checked and returned
+        assert out["code"] == _cw_inserted(repaired)
+        assert out["code"].count(_CW_BEFORE) == 1 and out["code"].count(_CW_WAIT) == 1
+        assert mock_rc.dryrun.call_args_list[1].args[1] == out["code"]
+        assert out["dryrun_status"] == "passed"
+
+    def test_a_repair_that_returns_exactly_the_hidden_text_is_no_progress(self):
+        inserted = _cw_inserted(_CW_BASE)
+        out, mock_rc, mock_repair = self._gate(
+            inserted, _CW_BASE, [self._FAIL, self._FAIL, self._FAIL], max_fixes=3, change_waits=_CW_WAITS)
+        assert mock_repair.call_args.args[1] == _CW_BASE
+        assert mock_repair.call_count == 1
+        assert mock_rc.dryrun.call_count == 1          # re-inserted, equal to `code`: stopped before a re-check
+        assert out["dryrun_status"] == "failed"
+        assert out["code"] == inserted
+
+    def test_without_change_waits_the_repair_is_handed_the_code_exactly_as_it_is(self):
+        # No marks means no pair of ours: whatever lines the code holds are not ours to hide.
+        inserted = _cw_inserted(_CW_BASE)
+        for kwargs in ({}, {"change_waits": None}, {"change_waits": ()}):
+            _, _, mock_repair = self._gate(inserted, _CW_BASE, [self._FAIL, self._PASS], **kwargs)
+            assert mock_repair.call_args.args[1] == inserted, kwargs
+
+    def test_code_without_a_pair_is_handed_over_unchanged(self):
+        _, _, mock_repair = self._gate(
+            _CW_BASE, _CW_BASE.replace("Log", "Log To Console"), [self._FAIL, self._PASS], change_waits=_CW_WAITS)
+        assert mock_repair.call_args.args[1] == _CW_BASE
+
+    def test_every_repair_round_hides_the_pair_again(self):
+        inserted = _cw_inserted(_CW_BASE)
+        first = _CW_BASE.replace("Log", "Log To Console")
+        with patch.object(ds, "settings", self._settings(3)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=[first, first.replace("Log To Console", "Log Many")]):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [self._FAIL, self._FAIL, self._PASS]
+            out = ds.validate_and_repair("rid", inserted, "gemini", "m", None, change_waits=_CW_WAITS)
+        assert [c.args[1] for c in mock_repair.call_args_list] == [_CW_BASE, first]
+        assert all(c.args[1].count("Wait Until Keyword Succeeds") == 0 for c in mock_repair.call_args_list)
+        assert out["code"].count(_CW_WAIT) == 1
+
+
 class TestChangeWaitsSurviveTheCleanup:
     """A repair round normalizes code that already holds the pair."""
 

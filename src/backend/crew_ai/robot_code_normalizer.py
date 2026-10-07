@@ -1384,6 +1384,8 @@ _CHANGE_WAIT_ACTIONS = frozenset({
     "click", "fill text", "type text", "select options by", "check checkbox", "uncheck checkbox",
     "press keys", "fill secret", "type secret",
 })
+# The only action line an element may have first when it has several (then only `Press Keys … Enter` follows).
+_TYPING_ACTIONS = frozenset({"fill text", "type text", "fill secret", "type secret"})
 _GET_TEXT_KEYWORDS = frozenset({"get text"})
 _IGNORE_ERROR = "Run Keyword And Ignore Error"
 _WAIT_KEYWORD = "Wait Until Keyword Succeeds"
@@ -1486,15 +1488,33 @@ def _change_wait_suite(robot_code: str) -> _Suite | None:
     return suite
 
 
+class _SeveralActionLines(Exception):
+    """One wait's action element is acted on by several lines this insert cannot place a pair around."""
+
+
+def _is_type_then_enter(steps: list[_Step], actions: list[int]) -> bool:
+    """True when the action lines are exactly one typing line (`Fill Text`, `Type Text`, `Fill Secret`,
+    `Type Secret`) first, then only `Press Keys <locator> Enter` lines whose keys are the one cell `Enter`.
+    A single action line of any kind is not a repeat and is always fine."""
+    if len(actions) == 1:
+        return True
+    if steps[actions[0]].keyword not in _TYPING_ACTIONS:
+        return False
+    return all(steps[i].keyword == "press keys" and steps[i].args[1:] == ["Enter"] for i in actions[1:])
+
+
 def _change_wait_targets(steps: list[_Step], keys: list[str | None], read_key: str | None,
                          action_key: str | None, number: int) -> tuple[_Step, _Step] | None:
     """The first action line and the read of one wait, or None after one WARNING when the test has no
     such pair, or when the read's variable is assigned between the two (the before-read, placed above the
-    first action line, would read another element than the wait)."""
+    first action line, would read another element than the wait). Raises `_SeveralActionLines` when the
+    element sits on several action lines other than one typing line followed by `Press Keys … Enter`."""
     actions = _change_wait_matches(steps, keys, _CHANGE_WAIT_ACTIONS, action_key)
     if not actions:
         logger.warning(f"Change-wait inserter: skipped wait {number} — no action line on its element in the test")
         return None
+    if not _is_type_then_enter(steps, actions):
+        raise _SeveralActionLines(number)
     reads = _change_wait_matches(steps, keys, _GET_TEXT_KEYWORDS, read_key, actions[-1] + 1)
     if not reads:
         logger.warning(
@@ -1564,7 +1584,14 @@ def _plan_change_waits(suite: _Suite, waits: list) -> tuple[dict[int, list[str]]
         if element in seen:
             continue  # the same read after the same action: one wait
         seen.add(element)
-        targets = _change_wait_targets(steps, keys, element[0], element[1], number)
+        try:
+            targets = _change_wait_targets(steps, keys, element[0], element[1], number)
+        except _SeveralActionLines:
+            logger.warning(
+                f"Change-wait inserter: left the file unchanged — the element of wait {number} is acted on by "
+                "several lines other than one Fill/Type line followed by Press Keys Enter"
+            )
+            return None
         if targets is None:
             continue
         first_action, read = targets
@@ -1616,9 +1643,14 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
         Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text    <read cell>    !=    ${<name>_before}[1]
 
     The first goes directly above the FIRST step that acts on the action's element (Click, Fill Text,
-    Type Text, Select Options By, Check/Uncheck Checkbox, Press Keys, Fill/Type Secret — several are
-    fine: browser-service folds `Fill Text` and `Press Keys` into one element), the second directly
-    above the first Get Text of the read's element after the LAST of those. An element is its
+    Type Text, Select Options By, Check/Uncheck Checkbox, Press Keys, Fill/Type Secret), the second
+    directly above the first Get Text of the read's element after the LAST of those. An element may sit
+    on several action lines ONLY as exactly one `Fill Text` / `Type Text` / `Fill Secret` / `Type Secret`
+    line first, followed only by `Press Keys <locator> Enter` lines whose keys are the one cell `Enter`
+    (browser-service folds `Fill Text` and `Press Keys` into one element); any other repeat (Click and
+    Click, Check and Uncheck, Select and Select, Fill and Fill, a Press Keys first, `Enter    Tab`) is a
+    test that can undo itself, where a wait that stops at the first change can stop on an in-between
+    value and fail a test that passes today. An element is its
     locator as it stands when the step runs (`_follow`): a leading `css=` (any case) is ignored,
     and `id=x`, `css=#x` and a bare `#x` are one element (`#a.b` is not `id=a.b`). Two waits for
     one element (same read, same action) are one wait. `<read cell>` is the read step's own first
@@ -1630,8 +1662,10 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     The file is left byte-identical, with one WARNING, when the reader refuses it, it has a section
     that could define keywords, it holds other than one test, its test cannot be followed (a control
     structure such as FOR or GROUP, a template, a line the reader cannot read as a step), it sets a
-    Robot timeout (`[Timeout]` in the test, `Test Timeout` / `Task Timeout` in Settings), or the
-    framework's own before-read or wait for a read is there without the other. A wait is skipped
+    Robot timeout (`[Timeout]` in the test, `Test Timeout` / `Task Timeout` in Settings), the
+    framework's own before-read or wait for a read is there without the other, or the action element of
+    ANY wait is acted on by several lines other than one Fill/Type line followed by Press Keys Enter
+    (the whole file, never the other waits alone). A wait is skipped
     with one WARNING when it has no action line or no read after it, when its read variable is
     assigned between the first action line and the read, or when the variable name it would assign is
     already assigned; the others are still placed. A pair already there (its two own line forms for

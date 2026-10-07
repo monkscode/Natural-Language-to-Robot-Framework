@@ -696,6 +696,47 @@ def _fetch_locator_mapping(
     return response.get("locator_mapping") or {}
 
 
+_ACTIONS_BS_PERFORMS = frozenset({"click", "input", "select"})
+
+
+def _came_back_element(step_element_ids: dict[int, str], locator_mapping: dict[str, dict[str, Any]]) -> str | None:
+    """The first element of this plan, in plan order, that bs found and flagged `came_back`, else None."""
+    for element_id in dict.fromkeys(step_element_ids.values()):
+        entry = locator_mapping.get(element_id)
+        if _entry_found(entry) and entry.get("came_back"):
+            return element_id
+    return None
+
+
+def _read_again_element(steps: list[Any], step_element_ids: dict[int, str]) -> str | None:
+    """The first element that has a Get Text step after a step bs performs only once it has located
+    that element, else None.
+
+    `build_elements` folds the steps that share one description into one element, which bs locates
+    ONCE, at the element's first step. A later `Get Text` of it, after a navigation or after an
+    action on another element first met after that first step, reads a page bs never saw.
+    """
+    first_step: dict[str, int] = {}
+    for index in sorted(step_element_ids):
+        first_step.setdefault(step_element_ids[index], index)
+    keywords = [_normalize_keyword(_as_dict(raw).get("keyword")) for raw in steps]
+    for index in sorted(step_element_ids):
+        element_id = step_element_ids[index]
+        first = first_step[element_id]
+        if index <= first or keywords[index] != "get text":
+            continue
+        for between in range(first + 1, index):
+            if keywords[between] in _NAVIGATION_KEYWORDS:
+                return element_id
+            other = step_element_ids.get(between)
+            if (
+                other is not None and first_step[other] > first
+                and action_for_keyword(keywords[between]) in _ACTIONS_BS_PERFORMS
+            ):
+                return element_id
+    return None
+
+
 def change_waits_from(
     steps: list[Any],
     step_element_ids: dict[int, str],
@@ -705,7 +746,24 @@ def change_waits_from(
 
     The marks travel BESIDE the merged steps: the assembler never sees them, so it can neither copy nor drop
     them. A mark whose action element was not found, or that names the read itself, gives no wait.
+
+    The WHOLE test gets no waits, with one WARNING, when a wait could stop on an in-between value of a
+    test that undoes itself: bs flagged a found element of this plan `came_back` (its value came back to
+    an earlier value), or one element is read again after an action bs performed after locating it
+    (`_read_again_element`).
     """
+    came_back = _came_back_element(step_element_ids, locator_mapping)
+    if came_back is not None:
+        logger.warning(
+            "Change-wait: no waits for this test — browser-service saw the value of %s come back to an "
+            "earlier value (signal: change-wait-refused)", came_back)
+        return []
+    read_again = _read_again_element(steps, step_element_ids)
+    if read_again is not None:
+        logger.warning(
+            "Change-wait: no waits for this test — %s is read again after an action browser-service "
+            "performed after locating it (signal: change-wait-refused)", read_again)
+        return []
     waits: list[dict[str, str]] = []
     for index, raw in enumerate(steps):
         step = _as_dict(raw)

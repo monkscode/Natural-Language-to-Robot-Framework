@@ -321,17 +321,29 @@ _case(
     _doc(*_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
 )
 _case(
-    "Click X twice + read",
-    _doc(*_OPEN, _CLICK, _CLICK, _READ, _CLOSE),
-    [_W],
-    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _CLICK, _WAIT_TOTAL, _READ, _CLOSE),
+    "Fill Text + Press Keys Enter twice + read",
+    _doc(*_OPEN, _FILL, _ENTER, _ENTER, _READ, _CLOSE),
+    [_w("css=#total", _Q)],
+    _doc(*_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
+    "Type Text + Press Keys Enter + read",
+    _doc(*_OPEN, "    Type Text    ${search_locator}    shoes", _ENTER, _READ, _CLOSE),
+    [_w("css=#total", _Q)],
+    _doc(*_OPEN, _BEFORE_TOTAL, "    Type Text    ${search_locator}    shoes", _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
+)
+_case(
+    "Fill Secret + Press Keys Enter + read",
+    _doc(*_OPEN, "    Fill Secret    ${search_locator}    %{PW}", _ENTER, _READ, _CLOSE),
+    [_w("css=#total", _Q)],
+    _doc(*_OPEN, _BEFORE_TOTAL, "    Fill Secret    ${search_locator}    %{PW}", _ENTER, _WAIT_TOTAL, _READ, _CLOSE),
 )
 _CLICK_Y = "    Click    ${other_btn_locator}"
 _case(
-    "Click X, Click Y, Click X, read",
-    _doc(*_OPEN, _CLICK, _CLICK_Y, _CLICK, _READ, _CLOSE),
+    "Click X, Click Y, read (two elements, one Click each)",
+    _doc(*_OPEN, _CLICK, _CLICK_Y, _READ, _CLOSE),
     [_W],
-    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _CLICK_Y, _CLICK, _WAIT_TOTAL, _READ, _CLOSE),
+    _doc(*_OPEN, _BEFORE_TOTAL, _CLICK, _CLICK_Y, _WAIT_TOTAL, _READ, _CLOSE),
 )
 _case(
     "type, read, Enter, read of the same locator",
@@ -504,6 +516,7 @@ R_HALF = "only one of its two lines"
 R_TIMEOUT = "Robot timeout"
 R_REPOINT = "assigned between the first action line and the read"
 R_TAKEN = "already assigned"
+R_REPEAT = "acted on by several lines other than one Fill/Type line followed by Press Keys Enter"
 
 
 def _blocked(
@@ -654,6 +667,61 @@ _BLOCKED_CASES = [
         _BASE_INSERTED.replace("30s    250ms", "10s    250ms"), _BASE, R_HALF,
         case_id="a framework before-read whose wait a repair edited",
     ),
+    # F1 (R15): several action lines on the marked element only as one Fill/Type line + Press Keys Enter
+    _blocked(
+        _doc(*_OPEN, _CLICK, _CLICK, _READ, _CLOSE), _BASE, R_REPEAT, case_id="Click X twice (a toggle that undoes itself)",
+    ),
+    _blocked(
+        _doc(*_OPEN, _CLICK, _CLICK_Y, _CLICK, _READ, _CLOSE),
+        _doc(*_OPEN, _CLICK, _CLICK_Y, _READ, _CLOSE),
+        R_REPEAT, case_id="Click X, Click Y, Click X",
+    ),
+    _blocked(
+        _doc(*_OPEN, "    Check Checkbox    ${btn_locator}", "    Uncheck Checkbox    ${btn_locator}", _READ, _CLOSE),
+        _doc(*_OPEN, "    Check Checkbox    ${btn_locator}", _READ, _CLOSE),
+        R_REPEAT, case_id="Check Checkbox then Uncheck Checkbox",
+    ),
+    _blocked(
+        _doc(
+            *_OPEN, "    Select Options By    ${btn_locator}    value    a",
+            "    Select Options By    ${btn_locator}    value    b", _READ, _CLOSE,
+        ),
+        _doc(*_OPEN, "    Select Options By    ${btn_locator}    value    a", _READ, _CLOSE),
+        R_REPEAT, case_id="Select Options By twice",
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, "    Fill Text    ${search_locator}    boots", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _READ, _CLOSE),
+        R_REPEAT, case_id="Fill Text twice", waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
+    ),
+    _blocked(
+        _doc(*_OPEN, _ENTER, _FILL, _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPEAT, case_id="Press Keys first, then Fill Text", waits=[_w("css=#total", _Q)],
+        control_waits=[_w("css=#total", _Q)],
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, _ENTER, "    Fill Text    ${search_locator}    boots", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPEAT, case_id="Fill Text, Press Keys Enter, Fill Text", waits=[_w("css=#total", _Q)],
+        control_waits=[_w("css=#total", _Q)],
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, "    Press Keys    ${search_locator}    Enter    Tab", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPEAT, case_id="Press Keys Enter Tab", waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
+    ),
+    _blocked(
+        _doc(*_OPEN, _FILL, "    Press Keys    ${search_locator}    Tab", _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPEAT, case_id="Press Keys Tab", waits=[_w("css=#total", _Q)], control_waits=[_w("css=#total", _Q)],
+    ),
+    _blocked(
+        _doc(*_OPEN, _ENTER, _ENTER, _READ, _CLOSE),
+        _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE),
+        R_REPEAT, case_id="Press Keys Enter twice, no Fill", waits=[_w("css=#total", _Q)],
+        control_waits=[_w("css=#total", _Q)],
+    ),
     _blocked(_PIPE, _PIPE_CONTROL, R_PARSE, case_id="a pipe-separated file"),
     _blocked("*** Test Cases ***\n\x00", _BASE, R_ACTION, case_id="garbage"),
 ]
@@ -731,6 +799,67 @@ class TestInsertLeavesTheFileAlone:
         warnings = _warnings(caplog)
         assert len(warnings) == 1
         assert R_READ in warnings[0].getMessage()
+
+
+_PRICE_READ = "    ${price}=    Get Text    ${price_locator}"
+_CLICK_Y_TWICE = _doc(*_OPEN, _CLICK, _CLICK_Y, _CLICK_Y, _READ, _PRICE_READ, _CLOSE)
+_REPEAT_MESSAGE = (
+    "Change-wait inserter: left the file unchanged — the element of wait {n} is acted on by several lines "
+    "other than one Fill/Type line followed by Press Keys Enter"
+)
+
+
+class TestSeveralActionLinesOnlyAsTypeThenEnter:
+    def test_one_refused_wait_leaves_the_whole_file_even_when_another_wait_is_fine(self, caplog):
+        ok = _w("css=#total", "id=go")             # one Click on ${btn_locator}: placed on its own
+        refused = _w("css=#price", "id=stop")      # two Clicks on ${other_btn_locator}
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(_CLICK_Y_TWICE, [ok, refused])
+        assert out == _CLICK_Y_TWICE
+        assert [r.getMessage() for r in _warnings(caplog)] == [_REPEAT_MESSAGE.format(n=2)]
+        assert _signals(caplog) == []
+        # control: the OK wait alone is placed
+        assert insert_change_waits(_CLICK_Y_TWICE, [ok]) != _CLICK_Y_TWICE
+
+    def test_the_refused_wait_first_gives_the_same_whole_file_answer(self, caplog):
+        ok = _w("css=#total", "id=go")
+        refused = _w("css=#price", "id=stop")
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(_CLICK_Y_TWICE, [refused, ok])
+        assert out == _CLICK_Y_TWICE
+        assert [r.getMessage() for r in _warnings(caplog)] == [_REPEAT_MESSAGE.format(n=1)]
+
+    def test_a_refusal_after_a_pair_is_already_there_is_still_a_refusal(self, caplog):
+        placed = insert_change_waits(_CLICK_Y_TWICE, [_w("css=#total", "id=go")])
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = insert_change_waits(placed, [_w("css=#total", "id=go"), _w("css=#price", "id=stop")])
+        assert out == placed
+        assert len(_warnings(caplog)) == 1
+
+    @pytest.mark.parametrize(("original", "waits"), [
+        pytest.param(_doc(*_OPEN, _CLICK, _CLICK, _READ, _CLOSE), [_W], id="Click twice"),
+        pytest.param(_CLICK_Y_TWICE, [_w("css=#price", "id=stop")], id="the second element clicked twice"),
+    ])
+    def test_a_refused_crlf_file_is_byte_identical(self, original, waits):
+        crlf = _crlf(original)
+        out = insert_change_waits(crlf, waits)
+        assert out == crlf
+        assert out.count("\r\n") == out.count("\n")
+
+    def test_a_placed_type_then_enter_crlf_file_keeps_crlf(self):
+        original = _crlf(_doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE))
+        expected = _crlf(_doc(*_OPEN, _BEFORE_TOTAL, _FILL, _ENTER, _WAIT_TOTAL, _READ, _CLOSE))
+        out = insert_change_waits(original, [_w("css=#total", _Q)])
+        assert out == expected
+        assert out.count("\r\n") == out.count("\n")
+
+    def test_the_pair_goes_above_the_fill_and_above_the_first_read_after_the_last_enter(self):
+        original = _doc(*_OPEN, _FILL, _READ, _ENTER, _ENTER, "    ${after}=    Get Text    ${total_locator}", _CLOSE)
+        out = insert_change_waits(original, [_w("css=#total", _Q)])
+        assert out == _doc(
+            *_OPEN, _BEFORE_TOTAL, _FILL, _READ, _ENTER, _ENTER, _WAIT_TOTAL,
+            "    ${after}=    Get Text    ${total_locator}", _CLOSE,
+        )
 
 
 def _signals(caplog) -> list[logging.LogRecord]:

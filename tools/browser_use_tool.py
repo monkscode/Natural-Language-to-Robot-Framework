@@ -498,6 +498,11 @@ class BatchBrowserUseTool(BaseTool):
                         # only when set; NLRF keeps it beside the steps.
                         if elem_result.get("changed_by_action"):
                             locator_mapping[element_id]["changed_by_action"] = elem_result["changed_by_action"]
+                        # F1: bs flags a read whose value came back to an earlier
+                        # value. Carried only when set; like the mark, it never
+                        # reaches the assembler.
+                        if elem_result.get("came_back"):
+                            locator_mapping[element_id]["came_back"] = True
                     else:
                         locator_mapping[element_id] = {
                             "found": False,

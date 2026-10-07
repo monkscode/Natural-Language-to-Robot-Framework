@@ -1458,3 +1458,156 @@ def test_change_waits_are_deduplicated_in_plan_order():
                "elem_3": {"found": True, "best_locator": "css=#t", "changed_by_action": "elem_1"}}
     assert change_waits_from(steps, {0: "elem_1", 1: "elem_2", 2: "elem_3"}, mapping) == [
         {"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"}]
+
+
+# ---------------------------------------------------------------------------
+# F1: the whole test gets no waits where an undo is possible
+# ---------------------------------------------------------------------------
+
+_EI_LOGGER = "src.backend.crew_ai.element_identification"
+_CAME_BACK_MESSAGE = (
+    "Change-wait: no waits for this test — browser-service saw the value of {id} come back to an "
+    "earlier value (signal: change-wait-refused)")
+_READ_AGAIN_MESSAGE = (
+    "Change-wait: no waits for this test — {id} is read again after an action browser-service "
+    "performed after locating it (signal: change-wait-refused)")
+
+
+def _refusals(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == _EI_LOGGER and r.levelname == "WARNING"]
+
+
+def _entry(locator, **extra):
+    return {"found": True, "best_locator": locator, **extra}
+
+
+def test_a_came_back_entry_refuses_the_whole_test(caplog):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"}]
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1", came_back=True)}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, {0: "elem_1", 1: "elem_2"}, mapping) == []
+    assert _refusals(caplog) == [_CAME_BACK_MESSAGE.format(id="elem_2")]
+
+
+def test_came_back_on_another_read_refuses_a_marked_read_too(caplog):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"},
+             {"keyword": "Get Text", "element_description": "page title"}]
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1"),
+               "elem_3": _entry("css=h1", came_back=True)}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, {0: "elem_1", 1: "elem_2", 2: "elem_3"}, mapping) == []
+    assert _refusals(caplog) == [_CAME_BACK_MESSAGE.format(id="elem_3")]
+
+
+def test_came_back_on_an_element_outside_the_plan_is_ignored(caplog):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"}]
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1"),
+               "elem_9": _entry("css=h1", came_back=True)}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, {0: "elem_1", 1: "elem_2"}, mapping) == [
+            {"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"}]
+    assert _refusals(caplog) == []
+
+
+def test_came_back_on_a_not_found_entry_is_ignored(caplog):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first laptop name"},
+             {"keyword": "Get Text", "element_description": "missing thing"}]
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1"),
+               "elem_3": {"found": False, "error": "x", "came_back": True}}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, {0: "elem_1", 1: "elem_2", 2: "elem_3"}, mapping) == [
+            {"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"}]
+    assert _refusals(caplog) == []
+
+
+def _laptops_then_phones(second_read_description="first product"):
+    """Click Laptops (elem_1), Get Text first product (elem_2), Click Phones (elem_3), Get Text again."""
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first product"},
+             {"keyword": "Click", "element_description": "Phones link"},
+             {"keyword": "Get Text", "element_description": second_read_description}]
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1"),
+               "elem_3": _entry("a:has-text('Phones')"),
+               "elem_4": _entry("css=#t2", changed_by_action="elem_3")}
+    return steps, mapping
+
+
+def test_a_read_again_after_an_action_first_met_after_it_refuses_the_whole_test(caplog):
+    steps, mapping = _laptops_then_phones()
+    ids = {0: "elem_1", 1: "elem_2", 2: "elem_3", 3: "elem_2"}   # the two reads fold into elem_2
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == []
+    assert _refusals(caplog) == [_READ_AGAIN_MESSAGE.format(id="elem_2")]
+
+
+def test_two_reads_with_different_descriptions_are_each_checked_by_browser_service(caplog):
+    steps, mapping = _laptops_then_phones("first phone")
+    ids = {0: "elem_1", 1: "elem_2", 2: "elem_3", 3: "elem_4"}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == [
+            {"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"},
+            {"read_locator": "css=#t2", "action_locator": "a:has-text('Phones')"}]
+    assert _refusals(caplog) == []
+
+
+def test_a_read_again_after_an_action_met_before_it_is_not_refused(caplog):
+    # Fill q (elem_1), Get Text (elem_2), Press Keys q Enter (elem_1), Get Text (elem_2):
+    # elem_1 was located before elem_2, so browser-service had already performed it.
+    steps = [{"keyword": "Fill Text", "element_description": "search box", "value": "q"},
+             {"keyword": "Get Text", "element_description": "first result"},
+             {"keyword": "Press Keys", "element_description": "search box"},
+             {"keyword": "Get Text", "element_description": "first result"}]
+    ids = {0: "elem_1", 1: "elem_2", 2: "elem_1", 3: "elem_2"}
+    mapping = {"elem_1": _entry("id=q"),
+               "elem_2": _entry("css=#r", changed_by_action="elem_1")}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == [
+            {"read_locator": "css=#r", "action_locator": "id=q"}]
+    assert _refusals(caplog) == []
+
+
+def test_a_navigation_between_two_reads_of_one_element_refuses_the_whole_test(caplog):
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first product"},
+             {"keyword": "Go To", "value": "https://x/other"},
+             {"keyword": "Get Text", "element_description": "first product"}]
+    ids = {0: "elem_1", 1: "elem_2", 3: "elem_2"}
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1")}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == []
+    assert _refusals(caplog) == [_READ_AGAIN_MESSAGE.format(id="elem_2")]
+
+
+def test_a_get_text_between_two_reads_of_one_element_does_not_refuse(caplog):
+    # A step between the reads that bs does not perform (another read) is no reason to refuse.
+    steps = [{"keyword": "Click", "element_description": "Laptops link"},
+             {"keyword": "Get Text", "element_description": "first product"},
+             {"keyword": "Get Text", "element_description": "page title"},
+             {"keyword": "Get Text", "element_description": "first product"}]
+    ids = {0: "elem_1", 1: "elem_2", 2: "elem_3", 3: "elem_2"}
+    mapping = {"elem_1": _entry("a:has-text('Laptops')"),
+               "elem_2": _entry("css=#t", changed_by_action="elem_1"),
+               "elem_3": _entry("css=h1")}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == [
+            {"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"}]
+    assert _refusals(caplog) == []
+
+
+def test_both_refusal_reasons_at_once_log_one_warning(caplog):
+    steps, mapping = _laptops_then_phones()
+    mapping["elem_2"]["came_back"] = True
+    ids = {0: "elem_1", 1: "elem_2", 2: "elem_3", 3: "elem_2"}
+    with caplog.at_level("WARNING", logger=_EI_LOGGER):
+        assert change_waits_from(steps, ids, mapping) == []
+    assert _refusals(caplog) == [_CAME_BACK_MESSAGE.format(id="elem_2")]
