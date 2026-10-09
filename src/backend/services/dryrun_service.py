@@ -51,6 +51,7 @@ from src.backend.crew_ai.robot_code_normalizer import (
     normalize_robot_code,
     remove_change_waits,
     rewrite_select_text_reads,
+    rewrite_text_checks_whole_word,
     rewrite_typed_value_reads,
     rewrite_visibility_checks_to_wait,
     strip_redundant_css_prefix,
@@ -92,7 +93,7 @@ def extract_and_normalize_robot_code(task_output) -> str:
       then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
             rewrite_visibility_checks_to_wait → rewrite_select_text_reads →
-            rewrite_typed_value_reads → ensure_browser_timeout.
+            rewrite_typed_value_reads → rewrite_text_checks_whole_word → ensure_browser_timeout.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -192,11 +193,15 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # robot_code_normalizer): `Get Text` on a <select> the test just set returns
     # every option, so its Should Contain cannot fail (q08); `Get Attribute …
     # value` after typing returns the initial value, not the typed one (N1).
+    # Then a text check on a Get Text read becomes a whole-word, any-letter-case
+    # Should Match Regexp — after the select rewrite, which must see the
+    # select's Should Contain first.
     # Same place as the visibility rewrite, for the same reason: every repair
-    # round passes through here too. Both are optional and skip-only, so one
+    # round passes through here too. All three are optional and skip-only, so one
     # that raises costs only its own rewrite, never the generation.
     for name, rewrite in (("rewrite_select_text_reads", rewrite_select_text_reads),
-                          ("rewrite_typed_value_reads", rewrite_typed_value_reads)):
+                          ("rewrite_typed_value_reads", rewrite_typed_value_reads),
+                          ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word)):
         try:
             robot_code = rewrite(robot_code)
         except Exception:

@@ -32,10 +32,10 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies five smaller deterministic rules defined
+The same cleanup step also applies six smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
-`rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads` and
-`rewrite_typed_value_reads`.
+`rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads`,
+`rewrite_typed_value_reads` and `rewrite_text_checks_whole_word`.
 
 Two further public functions are not part of that cleanup step:
 `insert_change_waits` puts a before-read and a never-failing wait around a read
@@ -1384,6 +1384,148 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     return _apply_rewrites(
         robot_code, suite, _typed_value_rewrites(suite), _TYPED_READ_GUARD,
         "Typed value normalizer", "Get Attribute … value line(s)", _GET_PROPERTY,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Text checks: `Should Contain` on a Get Text read becomes a whole-word,
+# any-letter-case `Should Match Regexp`. Runs on the shared suite reader above.
+# ---------------------------------------------------------------------------
+
+_SHOULD_MATCH_REGEXP = "Should Match Regexp"
+# Get Text and Select Options By are the rewrite's own evidence; Set Variable is the keyword whose meaning the
+# reader relies on (_follow); Should Contain is what it rewrites and Should Match Regexp what it writes.
+_TEXT_CHECK_GUARD = ("Get Text", "Should Contain", _SHOULD_MATCH_REGEXP, "Set Variable", "Select Options By")
+# Should Contain's argument names: a second cell `name=…` with one of these is a named argument, not the text.
+_SHOULD_CONTAIN_ARGUMENTS = frozenset({
+    "container", "item", "msg", "values", "ignore_case", "strip_spaces", "collapse_spaces",
+})
+# Characters a literal may not hold: `{`/`}` (a variable or a quantifier), `\` (a Robot escape), `^` and `[`/`]`
+# (a literal `[` needs `[[]`, which Python's `re` warns about as a possible nested set).
+_NOT_IN_TEXT_CHECK_RE = re.compile(r"[\\{}^\[\]]")
+# The other regex metacharacters, each written as a one-character class.
+_CLASS_ESCAPED = frozenset(".*+?()|$")
+# A word character next to the words: under `(?i)` it covers A-Z too.
+_WORD_CLASS = "[0-9a-z_]"
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _whole_word_pattern(literal: str) -> str:
+    """`(?i)` + a not-a-word-before guard + the literal with its metacharacters as one-character classes + a
+    not-a-word-after guard; each guard only on a side where the literal itself ends in a word character."""
+    body = "".join(f"[{c}]" if c in _CLASS_ESCAPED else c for c in literal)
+    head = f"(?<!{_WORD_CLASS})" if _is_word_char(literal[0]) else ""
+    tail = f"(?!{_WORD_CLASS})" if _is_word_char(literal[-1]) else ""
+    return "(?i)" + head + body + tail
+
+
+def _whole_word_line(step: _Step, steps: list[_Step], resolved: list[list[str | None]],
+                     assigner: dict[str, int], selects: set[str | None]) -> str | None:
+    """The rewritten line of one `Should Contain` the rule accepts, or None."""
+    if (step.setting or step.continued or step.assigns or step.keyword != "should contain"
+            or step.prefix not in _BUILTIN_PREFIXES or len(step.args) not in (2, 3)
+            or step.args[2:] not in ([], ["ignore_case=True"])):
+        return None
+    target = _SCALAR_CELL_RE.fullmatch(step.args[0])
+    literal = step.args[1]
+    if (target is None or not literal or _NOT_IN_TEXT_CHECK_RE.search(literal)
+            or ("=" in literal and literal.split("=", 1)[0] in _SHOULD_CONTAIN_ARGUMENTS)):
+        return None
+    at = assigner.get(_canon_variable(target.group(1)))
+    read = steps[at] if at is not None else None
+    if (read is None or read.setting or read.continued or read.keyword != "get text"
+            or read.prefix not in _BROWSER_PREFIXES or not read.scalar_assign or len(read.assigns) != 1
+            or len(read.args) != 1):
+        return None
+    locator = _canon_locator(resolved[at][0])
+    if selects and (locator is None or None in selects or locator in selects):
+        return None  # a read of a <select> stays for rewrite_select_text_reads and the pass checker
+    parts = list(step.parts)
+    literal_at = step.arg_idx[1]
+    separator = parts[literal_at - 1]
+    message = f"msg='{step.args[0]}' does not contain '{literal}' (whole words, any letter case)"
+    # The cells after the literal up to the last argument (the `ignore_case=True` cell, if any) become the two new
+    # cells; a trailing comment stays after them.
+    parts[literal_at + 1:step.arg_idx[-1] + 1] = [separator, message, separator, "values=False"]
+    return _rebuild(_Step(**{**vars(step), "parts": parts}), _SHOULD_MATCH_REGEXP,
+                    replace_second_arg=_whole_word_pattern(literal))
+
+
+def _text_check_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number -> rewritten line, for every Should Contain the whole-word rule accepts."""
+    rewrites = {}
+    for test in suite.tests:
+        if not test.followable:
+            continue
+        resolved = _follow(test, suite.variables)
+        selects = {
+            _canon_locator(args[0]) if args else None
+            for step, args in zip(test.steps, resolved) if step.keyword == "select options by"
+        }
+        assigner: dict[str, int] = {}  # canonical variable name -> index of the most recent step assigning it
+        for i, step in enumerate(test.steps):
+            line = _whole_word_line(step, test.steps, resolved, assigner, selects)
+            if line is not None:
+                rewrites[step.line_no] = line
+            for name in step.assigns:
+                assigner[name] = i
+    return rewrites
+
+
+def rewrite_text_checks_whole_word(robot_code: str) -> str:
+    """Rewrite `Should Contain    ${v}    LITERAL` (optionally with `ignore_case=True`) on a `Get Text` read into
+    `Should Match Regexp    ${v}    PATTERN    msg=…    values=False`: the words, as whole words, in any letter case.
+
+    `Should Contain` is a substring test. With `ignore_case=True` it passes "Active" on "Inactive",
+    "Available" on "Unavailable" and "1" on "10 items"; without it, it fails CSS-uppercased text (MUI shows
+    "Contained" as `CONTAINED`, and Get Text returns `innerText`). PATTERN is `(?i)` + LITERAL + a guard on each
+    end where LITERAL ends in a word character: `(?<![0-9a-z_])` before, `(?![0-9a-z_])` after. Each of
+    `. * + ? ( ) | $` in LITERAL is written as a one-character class (`[.]`); every other character, spaces
+    included, as is. Example: `Should Contain    ${status}    Active    ignore_case=True` becomes `Should Match
+    Regexp    ${status}    (?i)(?<![0-9a-z_])Active(?![0-9a-z_])    msg='${status}' does not contain 'Active'
+    (whole words, any letter case)    values=False` — the failure message keeps Should Contain's shape.
+    PATTERN holds no backslash: Robot unescapes a cell before the keyword sees it (`\\w` reaches `re` as `w`),
+    and `rewrite_typed_value_reads` leaves alone any file holding one, so a repair round would read the file
+    differently.
+
+    Rewritten, inside one test the shared reader can follow: a BuiltIn `Should Contain` (no prefix or
+    `BuiltIn.`, kept) — not a setting, not continued on a `...` line, assigning nothing — whose arguments are
+    exactly `${v}` and LITERAL, or those and `ignore_case=True` (dropped), where the most recent step before it
+    that assigns `${v}` (names compared as Robot compares them) is a Browser `Get Text` (no prefix or
+    `Browser.`) with one argument, the locator, and one scalar assignment, not continued; the read's locator
+    (resolved like the read rewrites, `id=x` and `css=#x` equal) is no `Select Options By` locator of the same
+    test — that read stays for `rewrite_select_text_reads` and the pass checker — and, when the test has a
+    select, both locators are known; LITERAL is non-empty and holds none of `\\ { } ^ [ ]`, and is not a named
+    argument (its text before the first `=` is not `container`, `item`, `msg`, `values`, `ignore_case`,
+    `strip_spaces` or `collapse_spaces`). A trailing comment stays after the new cells.
+    Left alone: a variable or any other `{…}` in LITERAL, any other or a further cell (`ignore_case=False`,
+    `strip_spaces=True`, `msg=…`), a container that is not one plain `${v}` (`${v}[0]`), a value read by another
+    keyword (`Get Texts`, `Get Selected Options`, `Get Elements`, `Get Attribute`, a `Get Text` with an inline
+    assertion) or re-assigned after the read (`Set Variable`, any assignment), a variable no step of the test
+    assigns, another library's or a BDD-prefixed `Should Contain`, a test with a control structure (FOR, IF,
+    TRY…), a template or a line the reader cannot read, and whole files the reader refuses (pipe-separated
+    lines, a scoped `Set … Variable`, `VAR`, …), that hold `language:` anywhere (translated settings, a
+    template among them, which the reader cannot see), or that define their own `Get Text` / `Should Contain` /
+    `Should Match Regexp` / `Set Variable` / `Select Options By` or catch errors (TRY, or own keywords under an
+    error-catching wrapper). Residual: a non-ASCII letter next to the words counts as a boundary (`Active`
+    matches inside `éActive`). Idempotent: a rewritten line is no longer `Should Contain`.
+    """
+    if not robot_code:
+        return robot_code
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.lower())
+    if "shouldcontain" not in squashed or "gettext" not in squashed:
+        return robot_code
+    if "language:" in robot_code.lower():
+        return robot_code  # a language setting makes Robot accept translated settings (a template) the reader cannot see
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _text_check_rewrites(suite), _TEXT_CHECK_GUARD,
+        "Text check normalizer", "Should Contain line(s)", f"{_SHOULD_MATCH_REGEXP} (whole words, any letter case)",
     )
 
 
