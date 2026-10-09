@@ -332,7 +332,14 @@ def _select_check_cannot_fail(variables: dict[str, str], stmts: list[_Statement]
             if not _VARIABLE.fullmatch(stmt.args[0].strip()):
                 continue
             locator = read_into.get(_var_key(stmt.args[0]))
-            if locator is not None and _resolve(stmt.args[1], variables) in selected[locator]:
+            if locator is None:
+                continue
+            value = _resolve(stmt.args[1], variables)
+            if any(a.strip() == "ignore_case=True" for a in stmt.args[2:]):
+                # The check ignores letter case, so a value in another case still cannot fail.
+                if value.casefold() in {s.casefold() for s in selected[locator]}:
+                    return locator
+            elif value in selected[locator]:
                 return locator
     return None
 

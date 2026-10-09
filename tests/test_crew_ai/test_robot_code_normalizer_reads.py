@@ -130,6 +130,14 @@ class TestSelectReadRewritten:
         body = (_SELECT, _READ, _CHECK, _CHECK + _IGNORE_CASE)
         assert rewrite_select_text_reads(_suite(*body)) == _suite(_SELECT, _READ_NEW, *body[2:])
 
+    def test_a_case_insensitive_check_in_another_letter_case_is_rewritten(self):
+        """With `ignore_case=True`, `option 2` passes on the whole <select>'s text whatever is selected."""
+        select = "Select Options By    id=dropdown    label    Option 2"
+        check = "Should Contain    ${s}    option 2    ignore_case=True"
+        source = _suite(select, "${s}=    Get Text    id=dropdown", check)
+        expected = _suite(select, "${s}=    Get Selected Options    id=dropdown    label", check)
+        assert rewrite_select_text_reads(source) == expected
+
     @pytest.mark.parametrize("attribute, value", [("label", "Option 2"), ("value", "2"), ("text", "Option 2"),
                                                   ("LABEL", "Option 2")])
     def test_the_select_attribute_is_carried_over(self, attribute, value):
@@ -605,6 +613,18 @@ class TestSelectReadLeftAlone:
 
     def test_one_odd_check_among_case_insensitive_ones_leaves_it_alone(self):
         source = _suite(_SELECT, _READ, _CHECK + _IGNORE_CASE, _CHECK + "    ignore_case=False")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_another_letter_case_without_the_flag_is_left_alone(self):
+        # Without `ignore_case=True` a case mismatch fails loudly at run time: not a check that cannot fail.
+        source = _suite("Select Options By    id=dropdown    label    Option 2", "${s}=    Get Text    id=dropdown",
+                        "Should Contain    ${s}    option 2")
+        assert rewrite_select_text_reads(source) == source
+
+    def test_the_flag_on_a_value_that_is_not_selected_is_left_alone(self):
+        # The control for the case-insensitive compare: `Option 1` never matches the selected `Option 2`.
+        source = _suite("Select Options By    id=dropdown    label    Option 2", "${s}=    Get Text    id=dropdown",
+                        "Should Contain    ${s}    Option 1    ignore_case=True")
         assert rewrite_select_text_reads(source) == source
 
     def test_a_read_in_another_test_is_left_alone(self):

@@ -1044,7 +1044,8 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
                               values: frozenset[str], resolved: list[list[str | None]]) -> bool:
     """True when only allowed steps run after the read and at least one is the
     check `Should Contain ${name} V` with V a selected value, optionally with
-    one more cell that is exactly `ignore_case=True`.
+    one more cell that is exactly `ignore_case=True` (then V is compared with
+    the selected values ignoring letter case, as the check itself does).
 
     Every line of the test after the read must be that check, a `Log` of the
     bare `${name}` whose other cells are literal, or Browser's `Close Browser`
@@ -1080,9 +1081,12 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
                 and m.string.count("{", 0, m.start()) == m.string.count("}", 0, m.start())) else m.group(0), content)
             return "no" if _mentions_variable(rest, name) or _NOT_LITERAL_RE.search(rest) else "log"
         target = _SCALAR_CELL_RE.fullmatch(step.args[0]) if step.args else None
+        ignore_case = len(step.args) == 3 and step.args[2] == "ignore_case=True"
         if (step.keyword == "should contain" and step.prefix in _BUILTIN_PREFIXES
-                and (len(step.args) == 2 or (len(step.args) == 3 and step.args[2] == "ignore_case=True"))
-                and target and _canon_variable(target.group(1)) == name and args[1] in values):
+                and (len(step.args) == 2 or ignore_case)
+                and target and _canon_variable(target.group(1)) == name
+                and (args[1] in values if not ignore_case
+                     else args[1] is not None and args[1].casefold() in {v.casefold() for v in values})):
             return "check"
         return "no"
 
@@ -1191,7 +1195,8 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     or an earlier `Set Variable`), with `id=x` and `css=#x` equal — and
     after the read the test runs only `Should Contain    ${x}    <V>` (V one of
     the selected values; at least one such line; one more cell is allowed
-    when it is exactly `ignore_case=True`), a `Log` of the bare `${x}`
+    when it is exactly `ignore_case=True`, and then V matches a selected
+    value in any letter case), a `Log` of the bare `${x}`
     whose other cells are literal, and Browser's `Close Browser` / `Close
     Context` / `Close Page` with literal arguments (blank and comment lines
     between are fine), and no teardown: Robot can reach `${x}` through a name

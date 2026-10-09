@@ -242,6 +242,26 @@ class TestSelectCheckCannotFail:
         assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
         assert found[0].detail == "id=dropdown"
 
+    LETTER_CASE_HEAD = ("    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                        "    Select Options By    id=dropdown    label    Option 2\n"
+                        "    ${s}=    Get Text    id=dropdown\n")
+
+    def test_a_case_insensitive_check_in_another_letter_case_is_flagged(self):
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    option 2    ignore_case=True\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
+    def test_another_letter_case_without_the_flag_is_not_flagged(self):
+        # A case mismatch without `ignore_case=True` fails loudly at run time: not hollow.
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    option 2\n")
+        assert shapes(code, Q08) == set()
+
+    def test_the_flag_on_a_value_that_is_not_selected_is_not_flagged(self):
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    Option 1    ignore_case=True\n")
+        query = "Go to the dropdown page, select Option 2, and verify Option 1 is still listed"
+        assert shapes(code, query) == set()
+
     def test_get_selected_options_is_not_flagged(self):  # mirrors 8e37b6e1-6450-4c80-888a-c7f56bbc4738
         code = robot("${dropdown_locator}    id=dropdown\n",
                      "    New Page    https://the-internet.herokuapp.com/dropdown\n"
