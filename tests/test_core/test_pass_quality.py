@@ -24,6 +24,7 @@ from src.backend.core.pass_quality import (
     Finding,
     check_pass_quality,
     hollow_shapes,
+    norm_locator,
     pass_suggestions,
 )
 
@@ -290,6 +291,13 @@ class TestSelectCheckCannotFail:
                          "    Should Contain    ${all}    Option 1\n")
         query = "Go to the dropdown page, select Option 2, and verify Option 1 is still listed"
         assert shapes(code, query) == set()
+
+    def test_the_spellings_of_one_id_share_one_key(self):
+        spellings = ["#x", "css=#x", "css=select#x", "id=x", 'css=[id="x"]', "xpath=//select[@id='x']"]
+        assert {norm_locator(spelling) for spelling in spellings} == {"id=x"}
+        # A class after the id and a select without an id name no single id: left as they are.
+        assert norm_locator("css=#a.b") == "css=#a.b"
+        assert norm_locator("xpath=//form/select") == "xpath=//form/select"
 
 
 class TestReadLocatorIsTheAnswer:

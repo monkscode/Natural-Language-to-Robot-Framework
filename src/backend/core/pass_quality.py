@@ -60,7 +60,8 @@ Pasted code (empty query): only the query-free rules run, SELECT_CHECK_CANNOT_FA
 and EMPTY_TEST.
 
 Referenced by: bench/gate_hollow.py (the bench gate's hollow registry),
-api/history_endpoints.py (the History detail's suggestions, via pass_suggestions).
+api/history_endpoints.py (the History detail's suggestions, via pass_suggestions),
+crew_ai/robot_code_normalizer.py (the text-check rewrite, via check_pass_quality and norm_locator).
 Depends on: bisect, re, dataclasses. Standard library only: importing this module must
 never load config, a database driver or an LLM client.
 """
@@ -293,7 +294,8 @@ def _resolve(text: str, variables: dict[str, str]) -> str:
     return text.strip()
 
 
-def _norm_locator(locator: str) -> str:
+def norm_locator(locator: str) -> str:
+    """The key under which the spellings of one id compare equal (`_ID_FORMS`): `css=select#x` -> `id=x`."""
     locator = locator.strip()
     for form in _ID_FORMS:
         m = form.fullmatch(locator)
@@ -317,10 +319,10 @@ def _select_check_cannot_fail(variables: dict[str, str], stmts: list[_Statement]
     read_into: dict[str, str] = {}
     for stmt in stmts:
         if stmt.keyword == "select options by" and len(stmt.args) >= 3:
-            locator = _norm_locator(_resolve(stmt.args[0], variables))
+            locator = norm_locator(_resolve(stmt.args[0], variables))
             selected[locator] = {_resolve(v, variables) for v in stmt.args[2:]}
         elif stmt.keyword == "get text" and stmt.args:
-            locator = _norm_locator(_resolve(stmt.args[0], variables))
+            locator = norm_locator(_resolve(stmt.args[0], variables))
             if locator not in selected:
                 continue
             if stmt.assigned:

@@ -52,11 +52,17 @@ Referenced by:
         (insert_change_waits after generation)
     src.backend.services.workflow_service._stream_docker_execution
         (remove_change_waits for the learning hand-off)
+
+Depends on:
+    src.backend.core.pass_quality
+        (check_pass_quality, norm_locator — standard library only)
 """
 
 import logging
 import re
 from dataclasses import dataclass
+
+from src.backend.core.pass_quality import check_pass_quality, norm_locator
 
 logger = logging.getLogger(__name__)
 
@@ -1422,6 +1428,13 @@ def _whole_word_pattern(literal: str) -> str:
     return "(?i)" + head + body + tail
 
 
+def _checker_locator(value: str | None) -> str | None:
+    """A resolved locator under this module's rule and then the pass checker's, which also reads `css=select#x`,
+    `css=[id="x"]` and `xpath=//select[@id='x']` as `id=x`; None stays None."""
+    canon = _canon_locator(value)
+    return None if canon is None else norm_locator(canon)
+
+
 def _whole_word_line(step: _Step, steps: list[_Step], resolved: list[list[str | None]],
                      assigner: dict[str, int], selects: set[str | None]) -> str | None:
     """The rewritten line of one `Should Contain` the rule accepts, or None."""
@@ -1440,9 +1453,11 @@ def _whole_word_line(step: _Step, steps: list[_Step], resolved: list[list[str | 
             or read.prefix not in _BROWSER_PREFIXES or not read.scalar_assign or len(read.assigns) != 1
             or len(read.args) != 1):
         return None
-    locator = _canon_locator(resolved[at][0])
+    locator = _checker_locator(resolved[at][0])
     if selects and (locator is None or None in selects or locator in selects):
-        return None  # a read of a <select> stays for rewrite_select_text_reads and the pass checker
+        # A read of a <select>, in any spelling the pass checker reads as the same id, stays for
+        # rewrite_select_text_reads (which follows `id=x` / `css=#x` only) and the pass checker.
+        return None
     parts = list(step.parts)
     literal_at = step.arg_idx[1]
     separator = parts[literal_at - 1]
@@ -1462,7 +1477,7 @@ def _text_check_rewrites(suite: _Suite) -> dict[int, str]:
             continue
         resolved = _follow(test, suite.variables)
         selects = {
-            _canon_locator(args[0]) if args else None
+            _checker_locator(args[0]) if args else None
             for step, args in zip(test.steps, resolved) if step.keyword == "select options by"
         }
         assigner: dict[str, int] = {}  # canonical variable name -> index of the most recent step assigning it
@@ -1473,6 +1488,31 @@ def _text_check_rewrites(suite: _Suite) -> dict[int, str]:
             for name in step.assigns:
                 assigner[name] = i
     return rewrites
+
+
+def _pass_checker_would_differ(robot_code: str, suite: _Suite, rewrites: dict[int, str]) -> bool:
+    """True, with one INFO line, when the pass checker would report the rewritten file differently.
+
+    The checker pools the statements of every test and user-keyword body; the rewrite follows one test. A
+    cannot-fail select check the checker sees through a select elsewhere in the file would stop being reported
+    once its `Should Contain` is gone. Compared without the query, which is not available here: the checker's
+    query-free rules, the select check among them (its one rule keyed on the keyword name `should contain`).
+    """
+    lines = list(suite.lines)
+    for line_no, text in rewrites.items():
+        lines[line_no] = text
+    before, after = (
+        [(finding.shape, finding.detail) for finding in check_pass_quality(code, None)]
+        for code in (robot_code, "\n".join(lines))  # the second is the text _apply_rewrites would return
+    )
+    if before == after:
+        return False
+    logger.info(
+        f"Text check normalizer: left {len(rewrites)} Should Contain line(s) unchanged — the rewrite would change "
+        f"what the pass checker reports ({[shape for shape, _ in before]} → {[shape for shape, _ in after]}) "
+        "(signal: text-check-refused)"
+    )
+    return True
 
 
 def rewrite_text_checks_whole_word(robot_code: str) -> str:
@@ -1496,8 +1536,9 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     exactly `${v}` and LITERAL, or those and `ignore_case=True` (dropped), where the most recent step before it
     that assigns `${v}` (names compared as Robot compares them) is a Browser `Get Text` (no prefix or
     `Browser.`) with one argument, the locator, and one scalar assignment, not continued; the read's locator
-    (resolved like the read rewrites, `id=x` and `css=#x` equal) is no `Select Options By` locator of the same
-    test — that read stays for `rewrite_select_text_reads` and the pass checker — and, when the test has a
+    (resolved like the read rewrites) is no `Select Options By` locator of the same test under the pass
+    checker's locator rule (`id=x`, `css=#x`, `css=select#x`, `css=[id="x"]`, `xpath=//select[@id='x']` equal)
+    — that read stays for `rewrite_select_text_reads` and the pass checker — and, when the test has a
     select, both locators are known; LITERAL is non-empty and holds none of `\\ { } ^ [ ]`, and is not a named
     argument (its text before the first `=` is not `container`, `item`, `msg`, `values`, `ignore_case`,
     `strip_spaces` or `collapse_spaces`). A trailing comment stays after the new cells.
@@ -1510,8 +1551,11 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     lines, a scoped `Set … Variable`, `VAR`, …), that hold `language:` anywhere (translated settings, a
     template among them, which the reader cannot see), or that define their own `Get Text` / `Should Contain` /
     `Should Match Regexp` / `Set Variable` / `Select Options By` or catch errors (TRY, or own keywords under an
-    error-catching wrapper). Residual: a non-ASCII letter next to the words counts as a boundary (`Active`
-    matches inside `éActive`). Idempotent: a rewritten line is no longer `Should Contain`.
+    error-catching wrapper), and a file where the rewrite would change what the pass checker reports (a
+    cannot-fail select check the checker sees through a select in another test or a user keyword; one INFO
+    line, `signal: text-check-refused`). Residual: a non-ASCII letter next to the words counts as a boundary
+    (`Active` matches inside `éActive`); a select and its read under two spellings neither rule equates.
+    Idempotent: a rewritten line is no longer `Should Contain`.
     """
     if not robot_code:
         return robot_code
@@ -1523,8 +1567,11 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code
+    rewrites = _text_check_rewrites(suite)
+    if rewrites and _pass_checker_would_differ(robot_code, suite, rewrites):
+        return robot_code
     return _apply_rewrites(
-        robot_code, suite, _text_check_rewrites(suite), _TEXT_CHECK_GUARD,
+        robot_code, suite, rewrites, _TEXT_CHECK_GUARD,
         "Text check normalizer", "Should Contain line(s)", f"{_SHOULD_MATCH_REGEXP} (whole words, any letter case)",
     )
 

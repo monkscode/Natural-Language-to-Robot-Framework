@@ -13,10 +13,17 @@ file (`_suite(_READ, _CHECK)`) IS rewritten, and the guard cases carry their own
 import logging
 import re
 import warnings
+from unittest.mock import patch
 
 import pytest
 
-from src.backend.crew_ai.robot_code_normalizer import rewrite_text_checks_whole_word
+import src.backend.crew_ai.robot_code_normalizer as normalizer
+from src.backend.core.pass_quality import SELECT_CHECK_CANNOT_FAIL, check_pass_quality, hollow_shapes
+from src.backend.crew_ai.robot_code_normalizer import (
+    rewrite_select_text_reads,
+    rewrite_text_checks_whole_word,
+    rewrite_typed_value_reads,
+)
 
 LOGGER = "src.backend.crew_ai.robot_code_normalizer"
 
@@ -268,3 +275,199 @@ class TestTextCheckIdempotentAndLogged:
             "Text check normalizer: rewrote 2 Should Contain line(s) to Should Match Regexp "
             "(whole words, any letter case)"
         ]
+
+
+# ---------------------------------------------------------------------------
+# The pass checker keeps sight of a cannot-fail select check: one locator rule
+# for "the same element", and a rewrite that never changes what the checker
+# reports
+# ---------------------------------------------------------------------------
+
+QUERY = ("Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, "
+         "and verify Option 2 is selected")
+
+_FLAGGED_CHECK = "Should Contain    ${selected_option}    Option 2    ignore_case=True"
+_PLAIN_CHECK = "Should Contain    ${selected_option}    Option 2"
+_OTHER_CASE_CHECK = "Should Contain    ${selected_option}    option 2"
+_OPTION_2_NEW = ("Should Match Regexp    ${selected_option}    (?i)(?<![0-9a-z_])Option 2(?![0-9a-z_])    "
+                 "msg='${selected_option}' does not contain 'Option 2' (whole words, any letter case)    values=False")
+
+# (the select's locator, the read's locator): one element in two spellings the pass checker reads as one id.
+_SPELLED_DIFFERENTLY = [
+    ("css=select#dropdown", "id=dropdown"),
+    ("id=dropdown", "css=select#dropdown"),
+    ('xpath=//select[@id="dropdown"]', "id=dropdown"),
+    ('css=[id="dropdown"]', "id=dropdown"),
+    ("xpath=//select[@id='dropdown']", "css=#dropdown"),
+]
+_CHECKS = [
+    pytest.param(_FLAGGED_CHECK, id="with the flag"),
+    pytest.param(_PLAIN_CHECK, id="without the flag"),
+    pytest.param(_OTHER_CASE_CHECK, id="another letter case, no flag"),
+]
+
+
+def _dropdown(select: str, read: str, check: str) -> str:
+    """The q08 file as the assembler writes it: a select of `select`, a Get Text of `read`, then `check`."""
+    return (
+        "*** Settings ***\n"
+        "Library    Browser    timeout=30s\n"
+        "\n"
+        "*** Variables ***\n"
+        f"${{dropdown_trigger}}    {select}\n"
+        f"${{dropdown_verification}}    {read}\n"
+        "\n"
+        "*** Test Cases ***\n"
+        "Generated Test\n"
+        "    New Browser    chromium    headless=True\n"
+        "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+        "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+        "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+        f"    {check}\n"
+        "    Close Browser\n"
+    )
+
+
+# The select sits in another test: the rewrite follows one test at a time, the checker reads the whole file.
+_TWO_TESTS = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Pick\n"
+    "    New Browser    chromium    headless=True\n"
+    "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+    "    Select Options By    id=dropdown    label    Option 2\n"
+    "\n"
+    "Check\n"
+    "    ${selected_option}=    Get Text    id=dropdown\n"
+    f"    {_FLAGGED_CHECK}\n"
+)
+# The select sits in a user keyword. *** Keywords *** comes first: the checker reads the file top to bottom and
+# reports the check only when the select is above the read.
+_USER_KEYWORD = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "\n"
+    "*** Keywords ***\n"
+    "Pick Option\n"
+    "    Select Options By    id=dropdown    label    Option 2\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Generated Test\n"
+    "    New Browser    chromium    headless=True\n"
+    "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+    "    Pick Option\n"
+    "    ${selected_option}=    Get Text    id=dropdown\n"
+    f"    {_FLAGGED_CHECK}\n"
+    "    Close Browser\n"
+)
+_SEEN_ONLY_BY_THE_CHECKER = [
+    pytest.param(_TWO_TESTS, id="a select in another test"),
+    pytest.param(_USER_KEYWORD, id="a select in a user keyword"),
+]
+
+_ANOTHER_ID = _dropdown("id=country", "id=heading", _FLAGGED_CHECK)
+_ANOTHER_ID_WIDER_SPELLING = _dropdown("css=select#country", "css=select#dropdown", _FLAGGED_CHECK)
+
+# Every file of this section.
+_CHECKER_FILES = [
+    *(pytest.param(_dropdown(select, read, check.values[0]), id=f"{select} / {read} / {check.id}")
+      for select, read in _SPELLED_DIFFERENTLY for check in _CHECKS),
+    pytest.param(_ANOTHER_ID, id="another id"),
+    pytest.param(_ANOTHER_ID_WIDER_SPELLING, id="another id in the wider spelling"),
+    *_SEEN_ONLY_BY_THE_CHECKER,
+]
+# The inputs of the REWRITTEN cases above.
+_REWRITTEN_INPUTS = [
+    pytest.param(_suite(_READ, _CHECK), id="two cells"),
+    pytest.param(_suite(_READ, _CHECK + _FLAG), id="three cells with the flag"),
+    pytest.param(_suite(_READ, "BuiltIn.Should Contain    ${status}    Active" + _FLAG), id="the BuiltIn prefix"),
+    pytest.param(_suite("${status}=    Browser.Get Text    ${status_locator}", _CHECK), id="a Browser-prefixed read"),
+    pytest.param(_suite(_READ, _CHECK + _FLAG).replace("\n", "\r\n"), id="a CRLF file"),
+    pytest.param(_suite(_READ, _CHECK, "Should Contain    ${status}    Verified" + _FLAG), id="two checks"),
+    *(pytest.param(_suite(_READ, f"Should Contain    ${{status}}    {literal}" + _FLAG), id=f"pattern {literal}")
+      for literal, _ in _PATTERNS),
+    pytest.param(_suite(_READ, _CHECK + _FLAG + "    # the account status"), id="a trailing comment"),
+    pytest.param(_suite(_READ, *(f"Should Contain    ${{status}}    {lit}" for lit, _ in _PATTERNS)),
+                 id="every pattern in one file"),
+    pytest.param(_suite("Select Options By    id=country    label    India", _READ, _CHECK),
+                 id="a select of another element"),
+]
+
+
+def _chain(code: str) -> str:
+    """The three read rewrites in the cleanup step's order."""
+    return rewrite_text_checks_whole_word(rewrite_typed_value_reads(rewrite_select_text_reads(code)))
+
+
+def _report(code: str, query: str | None) -> list[tuple[str, str]]:
+    """What the pass checker reports on `code`."""
+    return [(finding.shape, finding.detail) for finding in check_pass_quality(code, query)]
+
+
+def _messages(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == LOGGER and r.levelno == logging.INFO]
+
+
+class TestASelectReadInAnotherSpellingIsLeftAlone:
+    @pytest.mark.parametrize(("select", "read"), _SPELLED_DIFFERENTLY)
+    @pytest.mark.parametrize("check", _CHECKS)
+    def test_left_alone_by_the_locator_rule(self, caplog, select, read, check):
+        code = _dropdown(select, read, check)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = rewrite_text_checks_whole_word(code)
+        assert out == code
+        # No `rewrote` line, and no refusal either: the locator rule acts before the checker comparison runs.
+        assert _messages(caplog) == []
+
+    @pytest.mark.parametrize(("select", "read"), _SPELLED_DIFFERENTLY)
+    @pytest.mark.parametrize("check", _CHECKS[:2])
+    def test_the_checker_still_reports_the_check_after_the_chain(self, select, read, check):
+        assert SELECT_CHECK_CANNOT_FAIL in hollow_shapes(_chain(_dropdown(select, read, check)), QUERY)
+
+    def test_a_select_of_another_id_does_not_block(self):
+        # The control: two different ids are two elements, so the read is a text read and its check is rewritten.
+        assert rewrite_text_checks_whole_word(_ANOTHER_ID) == _ANOTHER_ID.replace(_FLAGGED_CHECK, _OPTION_2_NEW)
+
+    def test_another_id_in_the_wider_spelling_does_not_block(self):
+        assert rewrite_text_checks_whole_word(_ANOTHER_ID_WIDER_SPELLING) == (
+            _ANOTHER_ID_WIDER_SPELLING.replace(_FLAGGED_CHECK, _OPTION_2_NEW))
+
+
+class TestTheRewriteNeverChangesWhatThePassCheckerReports:
+    @pytest.mark.parametrize("code", _SEEN_ONLY_BY_THE_CHECKER)
+    def test_a_select_only_the_checker_sees_leaves_the_file_alone(self, caplog, code):
+        assert SELECT_CHECK_CANNOT_FAIL in hollow_shapes(code, QUERY)  # the precondition: the checker reports it
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = rewrite_text_checks_whole_word(code)
+        assert out == code
+        messages = _messages(caplog)
+        refused = [m for m in messages if "signal: text-check-refused" in m]
+        assert len(refused) == 1
+        assert SELECT_CHECK_CANNOT_FAIL in refused[0] and "→" in refused[0]
+        assert not any("rewrote" in m for m in messages)
+
+    def test_one_info_line_says_what_would_have_changed(self, caplog):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            rewrite_text_checks_whole_word(_TWO_TESTS)
+        assert [r.getMessage() for r in caplog.records if r.name == LOGGER] == [
+            "Text check normalizer: left 1 Should Contain line(s) unchanged — the rewrite would change what the "
+            "pass checker reports (['SELECT_CHECK_CANNOT_FAIL'] → []) (signal: text-check-refused)"
+        ]
+
+    def test_with_the_checker_silent_the_same_file_is_rewritten(self):
+        # The refusal above comes from the comparison, not from an earlier rule.
+        with patch.object(normalizer, "check_pass_quality", return_value=[]):
+            out = rewrite_text_checks_whole_word(_TWO_TESTS)
+        assert out == _TWO_TESTS.replace(_FLAGGED_CHECK, _OPTION_2_NEW)
+
+    @pytest.mark.parametrize("query", [None, QUERY], ids=["no query", "the q08 query"])
+    @pytest.mark.parametrize("source", [*_REWRITTEN_INPUTS, *_CHECKER_FILES])
+    def test_the_checker_reports_the_same_before_and_after(self, source, query):
+        assert _report(rewrite_text_checks_whole_word(source), query) == _report(source, query)
+
+    @pytest.mark.parametrize("source", _CHECKER_FILES)
+    def test_a_second_pass_is_byte_identical(self, source):
+        once = rewrite_text_checks_whole_word(source)
+        assert rewrite_text_checks_whole_word(once) == once

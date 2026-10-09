@@ -701,6 +701,30 @@ class TestExtractAndNormalize:
         assert "Should Contain    ${heading}" not in first
         assert second == first
 
+    def test_a_select_check_in_another_spelling_stays_for_the_pass_checker(self):
+        """q08 with the select as `css=select#dropdown` and its read as `id=dropdown`: the select rewrite does
+        not see one element, and the text-check rewrite must leave the cannot-fail check as the Should Contain
+        the History drawer's checker reads. Wired in: the check line stays and the suggestion is still made."""
+        from src.backend.core.pass_quality import pass_suggestions
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${dropdown_trigger}    css=select#dropdown\n"
+                "${dropdown_verification}    id=dropdown\n\n"
+                "*** Test Cases ***\nGenerated Test\n"
+                "    New Browser    chromium    headless=True\n"
+                "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n"
+                "    Close Browser\n")
+        query = ("Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, "
+                 "and verify Option 2 is selected")
+        out = ds.extract_and_normalize_robot_code(self._task_output(pydantic=code))
+        assert "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n" in out
+        assert "Should Match Regexp" not in out
+        assert pass_suggestions(out, query) == [
+            "The check reads the whole dropdown's text, which lists every option. "
+            "Consider checking the selected option instead."]
+
     # The read rewrites and the text-check rewrite are optional and skip-only: one that raises must cost only its
     # own rewrite, never the paid-for generation. The rest of cleanup (the other rewrites, the Browser timeout) still runs.
     _N1_RAW = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
