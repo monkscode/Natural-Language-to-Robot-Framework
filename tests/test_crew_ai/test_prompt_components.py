@@ -424,14 +424,16 @@ class TestStateVerificationHandling:
 NAMED_TEXT_CHECK_BLOCK = """
 --- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
 This rule is ONLY for the visibility words "is displayed / visible / shown /
-present", "appears" and "can be seen". With those words, a check is a TEXT
-check when the user names the words the element shows. An element can be
-visible and still show other words, so visibility alone does not verify it.
+present", "appears" and "can be seen". With those words, when the user names
+the words the element shows, they ask two things: that the element is
+visible, and that it shows those words. An element can be visible and show
+other words, or hold the words while it is still hidden.
 Examples: "verify the Products heading is displayed", "check the message
 'Saved' is visible", "make sure the Logout link appears".
-*   Use keyword `Get Text` on that element and put the user's words in
-    'value' (e.g. value = "Products").
-Keep the visibility check, with no words in 'value', when:
+*   Plan TWO steps on that element, with the same element_description:
+    first the visibility check with value = "visible", then keyword
+    `Get Text` with the user's words in 'value' (e.g. value = "Products").
+Plan only the visibility check, with value = "visible", when:
 *   the user names no words the element shows: "verify the logo is
     displayed", "verify the search results are visible", "verify an error
     message appears";
@@ -449,6 +451,29 @@ class TestPlanningNamedTextCheckBlock:
 
     def test_block_text_is_exact(self):
         assert PromptComponents.PLANNING_NAMED_TEXT_CHECK == NAMED_TEXT_CHECK_BLOCK
+
+    def test_named_words_plan_a_visibility_step_then_a_text_step(self):
+        block = PromptComponents.PLANNING_NAMED_TEXT_CHECK
+        assert "Plan TWO steps on that element, with the same element_description:" in block
+        two_steps = block[block.index("Plan TWO steps"):block.index("Plan only the visibility check")]
+        assert 'first the visibility check with value = "visible"' in two_steps
+        assert two_steps.index('value = "visible"') < two_steps.index("`Get Text`")
+        assert "with the user's words in 'value'" in two_steps
+
+    def test_visibility_only_line_carries_visible(self):
+        lines = PromptComponents.PLANNING_NAMED_TEXT_CHECK.splitlines()
+        only = [ln for ln in lines if ln.startswith("Plan only the visibility check")]
+        assert only == ['Plan only the visibility check, with value = "visible", when:']
+
+    def test_hidden_line_and_keep_list_stay(self):
+        block = PromptComponents.PLANNING_NAMED_TEXT_CHECK
+        assert 'the hidden check (value = "hidden").' in block
+        assert "Every other check keeps the shape the other rules give it" in block
+        for kept in ('"contains"', '"only has"', '"says"', '"is selected"', "counts", "element states"):
+            assert kept in block
+
+    def test_no_words_in_value_phrase_is_gone(self):
+        assert "no words in 'value'" not in PromptComponents.PLANNING_NAMED_TEXT_CHECK
 
 
 class TestAssemblerComparesIgnoreCase:

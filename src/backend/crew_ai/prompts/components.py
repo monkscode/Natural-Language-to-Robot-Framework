@@ -772,14 +772,16 @@ shows an error":
     PLANNING_NAMED_TEXT_CHECK = """
 --- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
 This rule is ONLY for the visibility words "is displayed / visible / shown /
-present", "appears" and "can be seen". With those words, a check is a TEXT
-check when the user names the words the element shows. An element can be
-visible and still show other words, so visibility alone does not verify it.
+present", "appears" and "can be seen". With those words, when the user names
+the words the element shows, they ask two things: that the element is
+visible, and that it shows those words. An element can be visible and show
+other words, or hold the words while it is still hidden.
 Examples: "verify the Products heading is displayed", "check the message
 'Saved' is visible", "make sure the Logout link appears".
-*   Use keyword `Get Text` on that element and put the user's words in
-    'value' (e.g. value = "Products").
-Keep the visibility check, with no words in 'value', when:
+*   Plan TWO steps on that element, with the same element_description:
+    first the visibility check with value = "visible", then keyword
+    `Get Text` with the user's words in 'value' (e.g. value = "Products").
+Plan only the visibility check, with value = "visible", when:
 *   the user names no words the element shows: "verify the logo is
     displayed", "verify the search results are visible", "verify an error
     message appears";
