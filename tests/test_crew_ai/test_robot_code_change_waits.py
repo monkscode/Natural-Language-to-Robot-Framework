@@ -1235,6 +1235,65 @@ class TestOnlyGetTextIsProvenAfterTheFirstAction:
         assert insert_change_waits(placed, [_W]).count("Wait Until Keyword Succeeds") == 1
 
 
+_VISIBLE_WAIT = "    Wait For Elements State    ${total_locator}    visible"
+
+
+class TestAVisibilityWaitAfterTheActionIsProven:
+    """Owner, 2026-10-09 ("Allow it in F1"): `Wait For Elements State` cannot change the page, it only
+    waits, so it may follow the first action line. Only that keyword: a sleep, a load-state wait or a
+    wrapper around the visibility wait still refuse the whole file."""
+
+    def test_the_pair_goes_around_the_click_and_directly_above_the_read(self):
+        original = _doc(*_OPEN, _CLICK, _VISIBLE_WAIT, _READ, _CLOSE)
+        assert insert_change_waits(original, [_W]) == _doc(
+            *_OPEN, _BEFORE_TOTAL, _CLICK, _VISIBLE_WAIT, _WAIT_TOTAL, _READ, _CLOSE
+        )
+
+    def test_a_hidden_wait_on_another_element_is_placed(self):
+        hidden = "    Wait For Elements State    ${other_locator}    hidden"
+        original = _doc(*_OPEN, _CLICK, hidden, _READ, _CLOSE)
+        assert insert_change_waits(original, [_W]) == _doc(
+            *_OPEN, _BEFORE_TOTAL, _CLICK, hidden, _WAIT_TOTAL, _READ, _CLOSE
+        )
+
+    def test_the_browser_prefix_and_a_timeout_cell_are_placed(self):
+        prefixed = "    Browser.Wait For Elements State    ${total_locator}    visible    timeout=10s"
+        original = _doc(*_OPEN, _CLICK, prefixed, _READ, _CLOSE)
+        assert insert_change_waits(original, [_W]) == _doc(
+            *_OPEN, _BEFORE_TOTAL, _CLICK, prefixed, _WAIT_TOTAL, _READ, _CLOSE
+        )
+
+    @pytest.mark.parametrize(("keyword", "line"), [
+        ("Sleep", "    Sleep    1s"),
+        ("Wait For Load State", "    Wait For Load State    networkidle"),
+        ("Run Keyword And Ignore Error", "    Run Keyword And Ignore Error    Wait For Elements State    "
+                                         "${total_locator}    visible"),
+    ], ids=["sleep", "load-state", "wrapped-visibility-wait"])
+    def test_other_waits_after_the_click_still_refuse_the_whole_file(self, keyword, line, caplog):
+        original = _doc(*_OPEN, _CLICK, line, _READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, [_W]) == original
+        assert [r.getMessage() for r in _warnings(caplog)] == [_NOT_PERFORMED_MESSAGE.format(keyword=keyword)]
+
+    def test_a_visibility_wait_between_typing_and_enter_still_refuses(self, caplog):
+        # The Enter-after-typing rule stays conservative: the wait is not skipped when it looks back.
+        wait = "    Wait For Elements State    ${search_locator}    visible"
+        original = _doc(*_OPEN, _FILL, wait, _ENTER, _READ, _CLOSE)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            assert insert_change_waits(original, [_w("css=#total", _Q)]) == original
+        assert [r.getMessage() for r in _warnings(caplog)] == [_NOT_PERFORMED_MESSAGE.format(keyword="Press Keys")]
+        # control: the same file without the wait is placed
+        control = _doc(*_OPEN, _FILL, _ENTER, _READ, _CLOSE)
+        assert insert_change_waits(control, [_w("css=#total", _Q)]).count("Wait Until Keyword Succeeds") == 1
+
+    def test_remove_undoes_it_and_a_second_insert_changes_nothing(self):
+        original = _doc(*_OPEN, _CLICK, _VISIBLE_WAIT, _READ, _CLOSE)
+        placed = insert_change_waits(original, [_W])
+        assert placed != original  # control: there is a pair to undo
+        assert remove_change_waits(placed) == original
+        assert insert_change_waits(placed, [_W]) == placed
+
+
 class TestVariablesSectionNameIsTaken:
     def test_the_taken_wait_is_skipped_and_the_others_are_placed(self, caplog):
         head = _HEAD + "${total_locator_before}    0 items\n"

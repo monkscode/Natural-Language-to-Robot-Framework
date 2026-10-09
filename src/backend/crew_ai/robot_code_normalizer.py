@@ -1401,8 +1401,9 @@ _CHANGE_WAIT_ACTIONS = frozenset({
 })
 # The only action line an element may have first when it has several (then only `Press Keys … Enter` follows).
 _TYPING_ACTIONS = frozenset({"fill text", "type text", "fill secret", "type secret"})
-# Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for.
-_PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate"})
+# Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for
+# (`Wait For Elements State` only waits for an element's state; it never changes the page).
+_PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate", "wait for elements state"})
 # The actions browser-service really performs while it discovers the page: NLRF maps `Press Keys` to a click, so
 # it is NOT among them (a `Press Keys` after the first action line is judged by its own rule).
 _PROVEN_ACTIONS = _CHANGE_WAIT_ACTIONS - {"press keys"}
@@ -1533,7 +1534,8 @@ def _is_proven_after_first_action(steps: list[_Step], index: int,
     """True when the step at `index` is a kind that cannot change what a wait waits for (R17): one of
     the actions browser-service performs (`Press Keys` excepted), `Get Text` (R17c: no other `Get …`,
     browser-service compares text and cannot see an attribute or a count come back), `should …`,
-    `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own
+    `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), `Wait For Elements State`
+    (it only waits, it cannot change the page; not wrapped in another keyword), one of the framework's own
     pair lines, a setting such as `[Teardown]` (never a step of the body), `Keyboard Key    press
     Enter` written directly after a typing line, or (R17b) `Press Keys    X    Enter` — exactly one key
     cell `Enter`, not continued — whose most recent action is a typing line on the SAME element or
@@ -1766,7 +1768,8 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     above except `Press Keys`, `Get Text` (R17c: any other `Get …` — Get Attribute, Get Classes, Get
     Property, Get Selected Options, Get Element Count, Get Url, … — refuses the file: browser-service
     compares text, so it cannot see those values come back), `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
-    `Evaluate JavaScript`), the framework's own pair lines, a setting such as `[Teardown]`,
+    `Evaluate JavaScript`), `Wait For Elements State` (a visibility wait cannot change the page; it only waits),
+    the framework's own pair lines, a setting such as `[Teardown]`,
     `Keyboard Key    press    Enter` written directly after a Fill/Type Text or Fill/Type Secret line, and
     `Press Keys    X    Enter` (exactly the one key cell `Enter`, not continued on a `...` line) whose
     most recent ACTION step before it is a Fill/Type Text or Fill/Type Secret line on the SAME element X
