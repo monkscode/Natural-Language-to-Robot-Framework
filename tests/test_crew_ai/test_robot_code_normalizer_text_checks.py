@@ -279,8 +279,8 @@ class TestTextCheckIdempotentAndLogged:
 
 # ---------------------------------------------------------------------------
 # The pass checker keeps sight of a cannot-fail select check: one locator rule
-# for "the same element", and a rewrite that never changes what the checker
-# reports
+# for "the same element", the selects of the whole file, and a rewrite that
+# never changes what the checker reports
 # ---------------------------------------------------------------------------
 
 QUERY = ("Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, "
@@ -328,47 +328,115 @@ def _dropdown(select: str, read: str, check: str) -> str:
     )
 
 
-# The select sits in another test: the rewrite follows one test at a time, the checker reads the whole file.
-_TWO_TESTS = (
-    "*** Settings ***\n"
-    "Library    Browser    timeout=30s\n"
-    "\n"
-    "*** Test Cases ***\n"
-    "Pick\n"
-    "    New Browser    chromium    headless=True\n"
-    "    New Page    https://the-internet.herokuapp.com/dropdown\n"
-    "    Select Options By    id=dropdown    label    Option 2\n"
-    "\n"
-    "Check\n"
-    "    ${selected_option}=    Get Text    id=dropdown\n"
-    f"    {_FLAGGED_CHECK}\n"
-)
-# The select sits in a user keyword. *** Keywords *** comes first: the checker reads the file top to bottom and
-# reports the check only when the select is above the read.
-_USER_KEYWORD = (
-    "*** Settings ***\n"
-    "Library    Browser    timeout=30s\n"
-    "\n"
+def _two_tests(check: str, select: str = "id=dropdown", read: str = "id=dropdown") -> str:
+    """The select sits in another test: test `Pick` selects on `select`, test `Check` reads `read`, then `check`."""
+    return (
+        "*** Settings ***\n"
+        "Library    Browser    timeout=30s\n"
+        "\n"
+        "*** Test Cases ***\n"
+        "Pick\n"
+        "    New Browser    chromium    headless=True\n"
+        "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+        f"    Select Options By    {select}    label    Option 2\n"
+        "\n"
+        "Check\n"
+        f"    ${{selected_option}}=    Get Text    {read}\n"
+        f"    {check}\n"
+    )
+
+
+_PICK_OPTION = (
     "*** Keywords ***\n"
     "Pick Option\n"
     "    Select Options By    id=dropdown    label    Option 2\n"
-    "\n"
-    "*** Test Cases ***\n"
-    "Generated Test\n"
-    "    New Browser    chromium    headless=True\n"
-    "    New Page    https://the-internet.herokuapp.com/dropdown\n"
-    "    Pick Option\n"
-    "    ${selected_option}=    Get Text    id=dropdown\n"
-    f"    {_FLAGGED_CHECK}\n"
-    "    Close Browser\n"
 )
-_SEEN_ONLY_BY_THE_CHECKER = [
-    pytest.param(_TWO_TESTS, id="a select in another test"),
-    pytest.param(_USER_KEYWORD, id="a select in a user keyword"),
+
+
+def _user_keyword(check: str, keywords_first: bool) -> str:
+    """The select sits in the user keyword `Pick Option`. With *** Keywords *** first the pass checker reports the
+    check; below the tests it does not (it reads the file top to bottom)."""
+    tests = (
+        "*** Test Cases ***\n"
+        "Generated Test\n"
+        "    New Browser    chromium    headless=True\n"
+        "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+        "    Pick Option\n"
+        "    ${selected_option}=    Get Text    id=dropdown\n"
+        f"    {check}\n"
+        "    Close Browser\n"
+    )
+    body = _PICK_OPTION + "\n" + tests if keywords_first else tests + "\n" + _PICK_OPTION
+    return "*** Settings ***\nLibrary    Browser    timeout=30s\n\n" + body
+
+
+def _masked(check: str) -> str:
+    """Test `A` holds a cannot-fail check the pass checker reports (it gives one finding per shape); test `B` reads
+    the same select, then `check`."""
+    return (
+        "*** Settings ***\n"
+        "Library    Browser    timeout=30s\n"
+        "\n"
+        "*** Test Cases ***\n"
+        "A\n"
+        "    Select Options By    css=select#dropdown    label    Option 2\n"
+        "    ${a}=    Get Text    id=dropdown\n"
+        "    Should Contain    ${a}    Option 2    ignore_case=True\n"
+        "\n"
+        "B\n"
+        "    ${selected_option}=    Get Text    id=dropdown\n"
+        f"    {check}\n"
+    )
+
+
+# The select is outside the read's test: only a reading of the whole file finds it.
+_SELECT_ELSEWHERE = [
+    ("another test", _two_tests),
+    ("another test, spelled css=select#dropdown", lambda check: _two_tests(check, select="css=select#dropdown")),
+    ("a user keyword above the tests", lambda check: _user_keyword(check, keywords_first=True)),
+    ("a user keyword below the tests", lambda check: _user_keyword(check, keywords_first=False)),
+    ("another test, behind a check the checker reports", _masked),
+]
+_SELECT_ELSEWHERE_FILES = [
+    pytest.param(build(check.values[0]), id=f"{where} / {check.id}")
+    for where, build in _SELECT_ELSEWHERE for check in _CHECKS
+]
+
+_HEADING_READ = "${t}=    Get Text    id=heading"
+_HEADING_CHECK = "Should Contain    ${t}    Products    ignore_case=True"
+_PRODUCTS = "(?i)(?<![0-9a-z_])Products(?![0-9a-z_])"
+_HEADING_NEW = _new("Products", _PRODUCTS, variable="${t}")
+# No select step at all: the file only names the keyword where the reader does not read it as a step.
+_SELECT_ONLY_MENTIONED = [
+    pytest.param(_suite("# Select Options By is used elsewhere", _HEADING_READ, _HEADING_CHECK), id="a comment line"),
+    pytest.param(_suite(_HEADING_READ, _HEADING_CHECK).replace("Auto-generated test case", "uses Select Options By"),
+                 id="a documentation line"),
+    pytest.param(_suite("Run Keyword If    ${x}    Select Options By    id=a    label    b", _HEADING_READ,
+                        _HEADING_CHECK), id="a Run Keyword If argument"),
 ]
 
 _ANOTHER_ID = _dropdown("id=country", "id=heading", _FLAGGED_CHECK)
 _ANOTHER_ID_WIDER_SPELLING = _dropdown("css=select#country", "css=select#dropdown", _FLAGGED_CHECK)
+_PRODUCTS_CHECK = "Should Contain    ${selected_option}    Products    ignore_case=True"
+_ANOTHER_ID_IN_ANOTHER_TEST = _two_tests(_PRODUCTS_CHECK, select="id=country", read="id=heading")
+_ANOTHER_ID_IN_ONE_TEST = _suite("Select Options By    id=country    label    India", _HEADING_READ, _HEADING_CHECK)
+
+# The comparison with the pass checker is the rule that acts here: the checker reads `${loc}` as declared (the
+# select's element), the rewrite follows the re-pointed value (another element).
+_REPOINTED = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "\n"
+    "*** Variables ***\n"
+    "${loc}    id=dropdown\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "T\n"
+    "    Select Options By    ${loc}    label    Option 2\n"
+    "    ${loc}=    Set Variable    id=heading\n"
+    "    ${selected_option}=    Get Text    ${loc}\n"
+    f"    {_FLAGGED_CHECK}\n"
+)
 
 # Every file of this section.
 _CHECKER_FILES = [
@@ -376,7 +444,11 @@ _CHECKER_FILES = [
       for select, read in _SPELLED_DIFFERENTLY for check in _CHECKS),
     pytest.param(_ANOTHER_ID, id="another id"),
     pytest.param(_ANOTHER_ID_WIDER_SPELLING, id="another id in the wider spelling"),
-    *_SEEN_ONLY_BY_THE_CHECKER,
+    *_SELECT_ELSEWHERE_FILES,
+    *_SELECT_ONLY_MENTIONED,
+    pytest.param(_ANOTHER_ID_IN_ANOTHER_TEST, id="another id in another test"),
+    pytest.param(_ANOTHER_ID_IN_ONE_TEST, id="another id in the same test, the assembler's file"),
+    pytest.param(_REPOINTED, id="a re-pointed locator variable"),
 ]
 # The inputs of the REWRITTEN cases above.
 _REWRITTEN_INPUTS = [
@@ -435,13 +507,42 @@ class TestASelectReadInAnotherSpellingIsLeftAlone:
             _ANOTHER_ID_WIDER_SPELLING.replace(_FLAGGED_CHECK, _OPTION_2_NEW))
 
 
-class TestTheRewriteNeverChangesWhatThePassCheckerReports:
-    @pytest.mark.parametrize("code", _SEEN_ONLY_BY_THE_CHECKER)
-    def test_a_select_only_the_checker_sees_leaves_the_file_alone(self, caplog, code):
-        assert SELECT_CHECK_CANNOT_FAIL in hollow_shapes(code, QUERY)  # the precondition: the checker reports it
+class TestTheSelectsOfTheWholeFile:
+    @pytest.mark.parametrize("code", _SELECT_ELSEWHERE_FILES)
+    def test_a_read_of_a_select_set_elsewhere_is_left_alone(self, caplog, code):
         with caplog.at_level(logging.INFO, logger=LOGGER):
             out = rewrite_text_checks_whole_word(code)
         assert out == code
+        # No `rewrote` line, and no refusal either: the whole-file rule acts before the checker comparison runs.
+        assert _messages(caplog) == []
+
+    @pytest.mark.parametrize("code", _SELECT_ONLY_MENTIONED)
+    def test_a_file_that_only_mentions_the_keyword_is_left_alone(self, caplog, code):
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = rewrite_text_checks_whole_word(code)
+        assert out == code
+        assert _messages(caplog) == []
+        # control: the same file naming another keyword there is rewritten
+        control = code.replace("Select Options By", "Deselect Options")
+        assert rewrite_text_checks_whole_word(control) == control.replace(_HEADING_CHECK, _HEADING_NEW)
+
+    def test_a_select_of_another_id_in_another_test_does_not_block(self):
+        # The control for the whole-file rule: two different ids are two elements, in two tests too.
+        new = _new("Products", _PRODUCTS, variable="${selected_option}")
+        assert rewrite_text_checks_whole_word(_ANOTHER_ID_IN_ANOTHER_TEST) == (
+            _ANOTHER_ID_IN_ANOTHER_TEST.replace(_PRODUCTS_CHECK, new))
+
+    def test_a_select_of_another_id_in_the_same_test_does_not_block(self):
+        assert rewrite_text_checks_whole_word(_ANOTHER_ID_IN_ONE_TEST) == (
+            _ANOTHER_ID_IN_ONE_TEST.replace(_HEADING_CHECK, _HEADING_NEW))
+
+
+class TestTheRewriteNeverChangesWhatThePassCheckerReports:
+    def test_a_select_read_only_the_checker_sees_leaves_the_file_alone(self, caplog):
+        assert SELECT_CHECK_CANNOT_FAIL in hollow_shapes(_REPOINTED, QUERY)  # the precondition: the checker reports it
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            out = rewrite_text_checks_whole_word(_REPOINTED)
+        assert out == _REPOINTED
         messages = _messages(caplog)
         refused = [m for m in messages if "signal: text-check-refused" in m]
         assert len(refused) == 1
@@ -450,7 +551,7 @@ class TestTheRewriteNeverChangesWhatThePassCheckerReports:
 
     def test_one_info_line_says_what_would_have_changed(self, caplog):
         with caplog.at_level(logging.INFO, logger=LOGGER):
-            rewrite_text_checks_whole_word(_TWO_TESTS)
+            rewrite_text_checks_whole_word(_REPOINTED)
         assert [r.getMessage() for r in caplog.records if r.name == LOGGER] == [
             "Text check normalizer: left 1 Should Contain line(s) unchanged — the rewrite would change what the "
             "pass checker reports (['SELECT_CHECK_CANNOT_FAIL'] → []) (signal: text-check-refused)"
@@ -459,8 +560,8 @@ class TestTheRewriteNeverChangesWhatThePassCheckerReports:
     def test_with_the_checker_silent_the_same_file_is_rewritten(self):
         # The refusal above comes from the comparison, not from an earlier rule.
         with patch.object(normalizer, "check_pass_quality", return_value=[]):
-            out = rewrite_text_checks_whole_word(_TWO_TESTS)
-        assert out == _TWO_TESTS.replace(_FLAGGED_CHECK, _OPTION_2_NEW)
+            out = rewrite_text_checks_whole_word(_REPOINTED)
+        assert out == _REPOINTED.replace(_FLAGGED_CHECK, _OPTION_2_NEW)
 
     @pytest.mark.parametrize("query", [None, QUERY], ids=["no query", "the q08 query"])
     @pytest.mark.parametrize("source", [*_REWRITTEN_INPUTS, *_CHECKER_FILES])

@@ -1472,14 +1472,20 @@ def _whole_word_line(step: _Step, steps: list[_Step], resolved: list[list[str | 
 def _text_check_rewrites(suite: _Suite) -> dict[int, str]:
     """line number -> rewritten line, for every Should Contain the whole-word rule accepts."""
     rewrites = {}
-    for test in suite.tests:
-        if not test.followable:
-            continue
-        resolved = _follow(test, suite.variables)
-        selects = {
-            _checker_locator(args[0]) if args else None
-            for step, args in zip(test.steps, resolved) if step.keyword == "select options by"
-        }
+    followed = [(test, _follow(test, suite.variables)) for test in suite.tests if test.followable]
+    # The selects of the WHOLE file: a select in another test sets the same <select> a read here reads.
+    select_args = [
+        args for test, resolved in followed for step, args in zip(test.steps, resolved)
+        if not step.setting and not step.continued and step.keyword == "select options by"
+    ]
+    selects = {_checker_locator(args[0]) if args else None for args in select_args}
+    # Fail-closed: the keyword named anywhere it was not read as such a step (a user keyword's body, a test the
+    # reader cannot follow, a setting, a `Run Keyword …` argument, a `...` line, a comment) selects on an
+    # unknown element. Counted: the mentions in the file text against the steps read above.
+    mentions = re.sub(_SPACE_UNDERSCORE, "", "\n".join(suite.lines).lower()).count("selectoptionsby")
+    if mentions > len(select_args):
+        selects.add(None)
+    for test, resolved in followed:
         assigner: dict[str, int] = {}  # canonical variable name -> index of the most recent step assigning it
         for i, step in enumerate(test.steps):
             line = _whole_word_line(step, test.steps, resolved, assigner, selects)
@@ -1536,10 +1542,12 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     exactly `${v}` and LITERAL, or those and `ignore_case=True` (dropped), where the most recent step before it
     that assigns `${v}` (names compared as Robot compares them) is a Browser `Get Text` (no prefix or
     `Browser.`) with one argument, the locator, and one scalar assignment, not continued; the read's locator
-    (resolved like the read rewrites) is no `Select Options By` locator of the same test under the pass
-    checker's locator rule (`id=x`, `css=#x`, `css=select#x`, `css=[id="x"]`, `xpath=//select[@id='x']` equal)
-    — that read stays for `rewrite_select_text_reads` and the pass checker — and, when the test has a
-    select, both locators are known; LITERAL is non-empty and holds none of `\\ { } ^ [ ]`, and is not a named
+    (resolved like the read rewrites) is no `Select Options By` locator of the WHOLE FILE (every plain select
+    step — not a setting, not continued — of every test the reader can follow, resolved in its own test: a
+    select in another test sets the same `<select>`) under the pass checker's locator rule (`id=x`, `css=#x`,
+    `css=select#x`, `css=[id="x"]`, `xpath=//select[@id='x']` equal) — that read stays for
+    `rewrite_select_text_reads` and the pass checker — and, when the file has a select, both locators are
+    known; LITERAL is non-empty and holds none of `\\ { } ^ [ ]`, and is not a named
     argument (its text before the first `=` is not `container`, `item`, `msg`, `values`, `ignore_case`,
     `strip_spaces` or `collapse_spaces`). A trailing comment stays after the new cells.
     Left alone: a variable or any other `{…}` in LITERAL, any other or a further cell (`ignore_case=False`,
@@ -1551,8 +1559,11 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     lines, a scoped `Set … Variable`, `VAR`, …), that hold `language:` anywhere (translated settings, a
     template among them, which the reader cannot see), or that define their own `Get Text` / `Should Contain` /
     `Should Match Regexp` / `Set Variable` / `Select Options By` or catch errors (TRY, or own keywords under an
-    error-catching wrapper), and a file where the rewrite would change what the pass checker reports (a
-    cannot-fail select check the checker sees through a select in another test or a user keyword; one INFO
+    error-catching wrapper), every check of a file that names `Select Options By` anywhere the reader does not
+    read it as a plain step of a followable test (a user keyword's body, a test it cannot follow, a setting, a
+    `Run Keyword …` argument, a `...` line, a comment: a select on an unknown element), and a file where the
+    rewrite would change what the pass checker reports (a cannot-fail select check only the checker reports:
+    it reads a variable as declared where the reader follows a `Set Variable`; one INFO
     line, `signal: text-check-refused`). Residual: a non-ASCII letter next to the words counts as a boundary
     (`Active` matches inside `éActive`); a select and its read under two spellings neither rule equates.
     Idempotent: a rewritten line is no longer `Should Contain`.
