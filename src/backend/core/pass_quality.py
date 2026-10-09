@@ -207,6 +207,7 @@ _WHOLE_NUMBER = re.compile(r"(?<!\w)(?<!\d[.,])\d{1,18}(?![.,]?\d)(?!\w)")
 _CELL_SPLIT = re.compile(r"\s{2,}|\t")
 _LIBRARY_PREFIX = re.compile(r"^(browser|builtin|collections|string)\.")
 _KEYWORD_SETTINGS = ("[setup]", "[teardown]")
+_RESOLVE_LIMIT = 10_000  # the most characters one pass of _resolve may substitute before it is abandoned
 
 
 @dataclass(frozen=True)
@@ -286,8 +287,26 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
 
 
 def _resolve(text: str, variables: dict[str, str]) -> str:
+    """`text`, stripped, with its variables replaced by their values in up to five passes (a value may name another).
+
+    A pass is abandoned as soon as the values it substitutes add up to more than `_RESOLVE_LIMIT` characters, and
+    the text as it stood before that pass is returned: a variable that names itself k times would grow to k**5
+    copies, and the text-check rewrite runs this checker while a test is generated.
+    """
     for _ in range(5):
-        new = _VARIABLE.sub(lambda m: variables.get(_var_key(m.group(0)), m.group(0)), text)
+        parts: list[str] = []
+        substituted = 0
+        end = 0
+        for m in _VARIABLE.finditer(text):
+            value = variables.get(_var_key(m.group(0)))
+            if value is None:
+                continue
+            substituted += len(value)
+            if substituted > _RESOLVE_LIMIT:
+                return text.strip()
+            parts += [text[end:m.start()], value]
+            end = m.end()
+        new = "".join(parts) + text[end:]
         if new == text:
             return new.strip()
         text = new

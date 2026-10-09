@@ -900,6 +900,42 @@ class TestLongRequests:
             " there are 20 books", " 5 items ", " the total is 7"]
 
 
+class TestVariableExpansionIsBounded:
+    """A variable may name itself: `${loc}    ${loc} ${loc}` grows to k**5 copies in the five passes.
+
+    Never more than 16 self-references in a test here: without the bound 32 need about 235 MB.
+    """
+
+    @staticmethod
+    def naming_itself(times: int) -> str:
+        return " ".join(["${loc}"] * times)
+
+    @pytest.mark.parametrize("times", [12, 16])
+    def test_a_variable_naming_itself_stays_within_the_limit(self, times):
+        resolved = pass_quality._resolve("${loc}", {"loc": self.naming_itself(times)})
+        assert len(resolved) <= pass_quality._RESOLVE_LIMIT
+
+    def test_an_abandoned_pass_returns_the_text_as_it_stood_before_it(self):
+        # One pass that fans out: 50 values of 6,000 characters each. The pass before it stays.
+        variables = {"a": "x" * 6000, "b": "${a}" * 50}
+        assert pass_quality._resolve("${b}", variables) == "${a}" * 50
+
+    def test_small_values_resolve_as_before(self):
+        variables = {"url": "https://example.com", "page": "${url}/login", "loc": "css=a[href='${page}']"}
+        assert pass_quality._resolve("${loc}", variables) == "css=a[href='https://example.com/login']"
+        assert pass_quality._resolve("  css=h1  ", variables) == "css=h1"
+
+    def test_a_finding_names_no_locator_longer_than_the_limit(self):
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${loc}    " + self.naming_itself(12)
+                + "\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    ${loc}    label    Option 2\n"
+                "    ${v}=    Get Text    ${loc}\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert len(found[0].detail) <= pass_quality._RESOLVE_LIMIT
+
+
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:
     """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
     `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with

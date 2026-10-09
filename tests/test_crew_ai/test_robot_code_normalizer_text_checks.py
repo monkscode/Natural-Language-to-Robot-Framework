@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+import src.backend.core.pass_quality as pass_quality
 import src.backend.crew_ai.robot_code_normalizer as normalizer
 from src.backend.core.pass_quality import SELECT_CHECK_CANNOT_FAIL, check_pass_quality, hollow_shapes
 from src.backend.crew_ai.robot_code_normalizer import (
@@ -572,3 +573,26 @@ class TestTheRewriteNeverChangesWhatThePassCheckerReports:
     def test_a_second_pass_is_byte_identical(self, source):
         once = rewrite_text_checks_whole_word(source)
         assert rewrite_text_checks_whole_word(once) == once
+
+    def test_the_checker_expands_no_variable_beyond_its_limit(self):
+        # The rewrite asks the checker while a test is generated, before `robot --dryrun` can reject the file. A
+        # variable naming itself k times grew to k**5 copies there. Never more than 16 references in a test.
+        code = (
+            "*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+            "${loc}    " + " ".join(["${loc}"] * 12) + "\n\n"
+            "*** Test Cases ***\nT\n"
+            "    New Page    https://example.com\n"
+            "    ${v}=    Get Text    ${loc}\n"
+            "    Should Contain    ${v}    Example Domain    ignore_case=True\n"
+        )
+        resolve = pass_quality._resolve
+        returned = []
+
+        def recording(text, variables):
+            returned.append(resolve(text, variables))
+            return returned[-1]
+
+        with patch.object(pass_quality, "_resolve", wraps=recording):
+            out = rewrite_text_checks_whole_word(code)
+        assert "Should Match Regexp" in out  # no select: the checker was asked and reports nothing either way
+        assert returned and max(len(value) for value in returned) <= pass_quality._RESOLVE_LIMIT
