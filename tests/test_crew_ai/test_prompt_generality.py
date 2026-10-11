@@ -27,6 +27,17 @@ def _capture_plan_description(hint_context=None):
     return mock_task.call_args.kwargs["description"]
 
 
+class TestNamedTextCheckComposition:
+
+    def test_block_sits_between_state_verification_and_loops(self):
+        desc = _capture_plan_description()
+        assert PromptComponents.PLANNING_NAMED_TEXT_CHECK.strip() in desc
+        state = desc.index("--- VERIFYING A FIELD'S STATE")
+        named = desc.index("--- VERIFYING THAT NAMED TEXT IS DISPLAYED ---")
+        loops = desc.index("--- HANDLING LOOPS ---")
+        assert state < named < loops
+
+
 class TestSearchEnterRule:
 
     def test_enter_is_a_default_with_user_intent_exception(self):

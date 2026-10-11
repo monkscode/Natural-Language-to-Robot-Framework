@@ -32,10 +32,10 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies five smaller deterministic rules defined
+The same cleanup step also applies six smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
-`rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads` and
-`rewrite_typed_value_reads`.
+`rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads`,
+`rewrite_typed_value_reads` and `rewrite_text_checks_whole_word`.
 
 Two further public functions are not part of that cleanup step:
 `insert_change_waits` puts a before-read and a never-failing wait around a read
@@ -52,11 +52,17 @@ Referenced by:
         (insert_change_waits after generation)
     src.backend.services.workflow_service._stream_docker_execution
         (remove_change_waits for the learning hand-off)
+
+Depends on:
+    src.backend.core.pass_quality
+        (check_pass_quality, norm_locator — standard library only)
 """
 
 import logging
 import re
 from dataclasses import dataclass
+
+from src.backend.core.pass_quality import check_pass_quality, norm_locator
 
 logger = logging.getLogger(__name__)
 
@@ -1043,7 +1049,9 @@ _NOT_LITERAL_RE = re.compile(r"[$@&%\\{}]")
 def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: str,
                               values: frozenset[str], resolved: list[list[str | None]]) -> bool:
     """True when only allowed steps run after the read and at least one is the
-    check `Should Contain ${name} V` with V a selected value.
+    check `Should Contain ${name} V` with V a selected value, optionally with
+    one more cell that is exactly `ignore_case=True` (then V is compared with
+    the selected values ignoring letter case, as the check itself does).
 
     Every line of the test after the read must be that check, a `Log` of the
     bare `${name}` whose other cells are literal, or Browser's `Close Browser`
@@ -1079,8 +1087,12 @@ def _only_checked_as_selected(suite: _Suite, test: _Test, read_at: int, name: st
                 and m.string.count("{", 0, m.start()) == m.string.count("}", 0, m.start())) else m.group(0), content)
             return "no" if _mentions_variable(rest, name) or _NOT_LITERAL_RE.search(rest) else "log"
         target = _SCALAR_CELL_RE.fullmatch(step.args[0]) if step.args else None
-        if (step.keyword == "should contain" and step.prefix in _BUILTIN_PREFIXES and len(step.args) == 2
-                and target and _canon_variable(target.group(1)) == name and args[1] in values):
+        ignore_case = len(step.args) == 3 and step.args[2] == "ignore_case=True"
+        if (step.keyword == "should contain" and step.prefix in _BUILTIN_PREFIXES
+                and (len(step.args) == 2 or ignore_case)
+                and target and _canon_variable(target.group(1)) == name
+                and (args[1] in values if not ignore_case
+                     else args[1] is not None and args[1].casefold() in {v.casefold() for v in values})):
             return "check"
         return "no"
 
@@ -1188,7 +1200,9 @@ def rewrite_select_text_reads(robot_code: str) -> str:
     element — the same text once `${var}`s are resolved (from *** Variables ***
     or an earlier `Set Variable`), with `id=x` and `css=#x` equal — and
     after the read the test runs only `Should Contain    ${x}    <V>` (V one of
-    the selected values; at least one such line), a `Log` of the bare `${x}`
+    the selected values; at least one such line; one more cell is allowed
+    when it is exactly `ignore_case=True`, and then V matches a selected
+    value in any letter case), a `Log` of the bare `${x}`
     whose other cells are literal, and Browser's `Close Browser` / `Close
     Context` / `Close Page` with literal arguments (blank and comment lines
     between are fine), and no teardown: Robot can reach `${x}` through a name
@@ -1380,6 +1394,202 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Text checks: `Should Contain` on a Get Text read becomes a whole-word,
+# any-letter-case `Should Match Regexp`. Runs on the shared suite reader above.
+# ---------------------------------------------------------------------------
+
+_SHOULD_MATCH_REGEXP = "Should Match Regexp"
+# Get Text and Select Options By are the rewrite's own evidence; Set Variable is the keyword whose meaning the
+# reader relies on (_follow); Should Contain is what it rewrites and Should Match Regexp what it writes.
+_TEXT_CHECK_GUARD = ("Get Text", "Should Contain", _SHOULD_MATCH_REGEXP, "Set Variable", "Select Options By")
+# Should Contain's argument names: a second cell `name=…` with one of these is a named argument, not the text.
+_SHOULD_CONTAIN_ARGUMENTS = frozenset({
+    "container", "item", "msg", "values", "ignore_case", "strip_spaces", "collapse_spaces",
+})
+# Characters a literal may not hold: `{`/`}` (a variable or a quantifier), `\` (a Robot escape), `^` and `[`/`]`
+# (a literal `[` needs `[[]`, which Python's `re` warns about as a possible nested set).
+_NOT_IN_TEXT_CHECK_RE = re.compile(r"[\\{}^\[\]]")
+# The other regex metacharacters, each written as a one-character class.
+_CLASS_ESCAPED = frozenset(".*+?()|$")
+# A word character next to the words: under `(?i)` it covers A-Z too.
+_WORD_CLASS = "[0-9a-z_]"
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _whole_word_pattern(literal: str) -> str:
+    """`(?i)` + a not-a-word-before guard + the literal with its metacharacters as one-character classes + a
+    not-a-word-after guard; each guard only on a side where the literal itself ends in a word character."""
+    body = "".join(f"[{c}]" if c in _CLASS_ESCAPED else c for c in literal)
+    head = f"(?<!{_WORD_CLASS})" if _is_word_char(literal[0]) else ""
+    tail = f"(?!{_WORD_CLASS})" if _is_word_char(literal[-1]) else ""
+    return "(?i)" + head + body + tail
+
+
+def _checker_locator(value: str | None) -> str | None:
+    """A resolved locator under this module's rule and then the pass checker's, which also reads `css=select#x`,
+    `css=[id="x"]` and `xpath=//select[@id='x']` as `id=x`; None stays None."""
+    canon = _canon_locator(value)
+    return None if canon is None else norm_locator(canon)
+
+
+def _whole_word_line(step: _Step, steps: list[_Step], resolved: list[list[str | None]],
+                     assigner: dict[str, int], selects: set[str | None]) -> str | None:
+    """The rewritten line of one `Should Contain` the rule accepts, or None."""
+    if (step.setting or step.continued or step.assigns or step.keyword != "should contain"
+            or step.prefix not in _BUILTIN_PREFIXES or len(step.args) not in (2, 3)
+            or step.args[2:] not in ([], ["ignore_case=True"])):
+        return None
+    target = _SCALAR_CELL_RE.fullmatch(step.args[0])
+    literal = step.args[1]
+    if (target is None or not literal or _NOT_IN_TEXT_CHECK_RE.search(literal)
+            or ("=" in literal and literal.split("=", 1)[0] in _SHOULD_CONTAIN_ARGUMENTS)):
+        return None
+    at = assigner.get(_canon_variable(target.group(1)))
+    read = steps[at] if at is not None else None
+    if (read is None or read.setting or read.continued or read.keyword != "get text"
+            or read.prefix not in _BROWSER_PREFIXES or not read.scalar_assign or len(read.assigns) != 1
+            or len(read.args) != 1):
+        return None
+    locator = _checker_locator(resolved[at][0])
+    if selects and (locator is None or None in selects or locator in selects):
+        # A read of a <select>, in any spelling the pass checker reads as the same id, stays for
+        # rewrite_select_text_reads (which follows `id=x` / `css=#x` only) and the pass checker.
+        return None
+    parts = list(step.parts)
+    literal_at = step.arg_idx[1]
+    separator = parts[literal_at - 1]
+    message = f"msg='{step.args[0]}' does not contain '{literal}' (whole words, any letter case)"
+    # The cells after the literal up to the last argument (the `ignore_case=True` cell, if any) become the two new
+    # cells; a trailing comment stays after them.
+    parts[literal_at + 1:step.arg_idx[-1] + 1] = [separator, message, separator, "values=False"]
+    return _rebuild(_Step(**{**vars(step), "parts": parts}), _SHOULD_MATCH_REGEXP,
+                    replace_second_arg=_whole_word_pattern(literal))
+
+
+def _text_check_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number -> rewritten line, for every Should Contain the whole-word rule accepts."""
+    rewrites = {}
+    followed = [(test, _follow(test, suite.variables)) for test in suite.tests if test.followable]
+    # The selects of the WHOLE file: a select in another test sets the same <select> a read here reads.
+    select_args = [
+        args for test, resolved in followed for step, args in zip(test.steps, resolved)
+        if not step.setting and not step.continued and step.keyword == "select options by"
+    ]
+    selects = {_checker_locator(args[0]) if args else None for args in select_args}
+    # Fail-closed: the keyword named anywhere it was not read as such a step (a user keyword's body, a test the
+    # reader cannot follow, a setting, a `Run Keyword …` argument, a `...` line, a comment) selects on an
+    # unknown element. Counted: the mentions in the file text against the steps read above.
+    mentions = re.sub(_SPACE_UNDERSCORE, "", "\n".join(suite.lines).lower()).count("selectoptionsby")
+    if mentions > len(select_args):
+        selects.add(None)
+    for test, resolved in followed:
+        assigner: dict[str, int] = {}  # canonical variable name -> index of the most recent step assigning it
+        for i, step in enumerate(test.steps):
+            line = _whole_word_line(step, test.steps, resolved, assigner, selects)
+            if line is not None:
+                rewrites[step.line_no] = line
+            for name in step.assigns:
+                assigner[name] = i
+    return rewrites
+
+
+def _pass_checker_would_differ(robot_code: str, suite: _Suite, rewrites: dict[int, str]) -> bool:
+    """True, with one INFO line, when the pass checker would report the rewritten file differently.
+
+    The checker pools the statements of every test and user-keyword body and reads each variable as declared; the
+    rewrite reads the selects of the whole file but follows a read and its check inside one test. A
+    cannot-fail select check the checker sees through a select elsewhere in the file would stop being reported
+    once its `Should Contain` is gone. Compared without the query, which is not available here: the checker's
+    query-free rules, the select check among them (its one rule keyed on the keyword name `should contain`).
+    """
+    lines = list(suite.lines)
+    for line_no, text in rewrites.items():
+        lines[line_no] = text
+    before, after = (
+        [(finding.shape, finding.detail) for finding in check_pass_quality(code, None)]
+        for code in (robot_code, "\n".join(lines))  # the second is the text _apply_rewrites would return
+    )
+    if before == after:
+        return False
+    logger.info(
+        f"Text check normalizer: left {len(rewrites)} Should Contain line(s) unchanged — the rewrite would change "
+        f"what the pass checker reports ({[shape for shape, _ in before]} → {[shape for shape, _ in after]}) "
+        "(signal: text-check-refused)"
+    )
+    return True
+
+
+def rewrite_text_checks_whole_word(robot_code: str) -> str:
+    """Rewrite `Should Contain    ${v}    LITERAL` (optionally with `ignore_case=True`) on a `Get Text` read into
+    `Should Match Regexp    ${v}    PATTERN    msg=…    values=False`: the words, as whole words, in any letter case.
+
+    `Should Contain` is a substring test. With `ignore_case=True` it passes "Active" on "Inactive",
+    "Available" on "Unavailable" and "1" on "10 items"; without it, it fails CSS-uppercased text (MUI shows
+    "Contained" as `CONTAINED`, and Get Text returns `innerText`). PATTERN is `(?i)` + LITERAL + a guard on each
+    end where LITERAL ends in a word character: `(?<![0-9a-z_])` before, `(?![0-9a-z_])` after. Each of
+    `. * + ? ( ) | $` in LITERAL is written as a one-character class (`[.]`); every other character, spaces
+    included, as is. Example: `Should Contain    ${status}    Active    ignore_case=True` becomes `Should Match
+    Regexp    ${status}    (?i)(?<![0-9a-z_])Active(?![0-9a-z_])    msg='${status}' does not contain 'Active'
+    (whole words, any letter case)    values=False` — the failure message keeps Should Contain's shape.
+    PATTERN holds no backslash: Robot unescapes a cell before the keyword sees it (`\\w` reaches `re` as `w`),
+    and `rewrite_typed_value_reads` leaves alone any file holding one, so a repair round would read the file
+    differently.
+
+    Rewritten, inside one test the shared reader can follow: a BuiltIn `Should Contain` (no prefix or
+    `BuiltIn.`, kept) — not a setting, not continued on a `...` line, assigning nothing — whose arguments are
+    exactly `${v}` and LITERAL, or those and `ignore_case=True` (dropped), where the most recent step before it
+    that assigns `${v}` (names compared as Robot compares them) is a Browser `Get Text` (no prefix or
+    `Browser.`) with one argument, the locator, and one scalar assignment, not continued; the read's locator
+    (resolved like the read rewrites) is no `Select Options By` locator of the WHOLE FILE (every plain select
+    step — not a setting, not continued — of every test the reader can follow, resolved in its own test: a
+    select in another test sets the same `<select>`) under the pass checker's locator rule (`id=x`, `css=#x`,
+    `css=select#x`, `css=[id="x"]`, `xpath=//select[@id='x']` equal) — that read stays for
+    `rewrite_select_text_reads` and the pass checker — and, when the file has a select, both locators are
+    known; LITERAL is non-empty and holds none of `\\ { } ^ [ ]`, and is not a named
+    argument (its text before the first `=` is not `container`, `item`, `msg`, `values`, `ignore_case`,
+    `strip_spaces` or `collapse_spaces`). A trailing comment stays after the new cells.
+    Left alone: a variable or any other `{…}` in LITERAL, any other or a further cell (`ignore_case=False`,
+    `strip_spaces=True`, `msg=…`), a container that is not one plain `${v}` (`${v}[0]`), a value read by another
+    keyword (`Get Texts`, `Get Selected Options`, `Get Elements`, `Get Attribute`, a `Get Text` with an inline
+    assertion) or re-assigned after the read (`Set Variable`, any assignment), a variable no step of the test
+    assigns, another library's or a BDD-prefixed `Should Contain`, a test with a control structure (FOR, IF,
+    TRY…), a template or a line the reader cannot read, and whole files the reader refuses (pipe-separated
+    lines, a scoped `Set … Variable`, `VAR`, …), that hold `language:` anywhere (translated settings, a
+    template among them, which the reader cannot see), or that define their own `Get Text` / `Should Contain` /
+    `Should Match Regexp` / `Set Variable` / `Select Options By` or catch errors (TRY, or own keywords under an
+    error-catching wrapper), every check of a file that names `Select Options By` anywhere the reader does not
+    read it as a plain step of a followable test (a user keyword's body, a test it cannot follow, a setting, a
+    `Run Keyword …` argument, a `...` line, a comment: a select on an unknown element), and a file where the
+    rewrite would change what the pass checker reports (a cannot-fail select check only the checker reports:
+    it reads a variable as declared where the reader follows a `Set Variable`; one INFO
+    line, `signal: text-check-refused`). Residual: a non-ASCII letter next to the words counts as a boundary
+    (`Active` matches inside `éActive`); a select and its read under two spellings neither rule equates; a select
+    whose keyword name the file never spells (`Select${SPACE}Options${SPACE}By` built at run time, `ſ` for `s`).
+    Idempotent: a rewritten line is no longer `Should Contain`.
+    """
+    if not robot_code:
+        return robot_code
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.lower())
+    if "shouldcontain" not in squashed or "gettext" not in squashed:
+        return robot_code
+    if "language:" in robot_code.lower():
+        return robot_code  # a language setting makes Robot accept translated settings (a template) the reader cannot see
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    rewrites = _text_check_rewrites(suite)
+    if rewrites and _pass_checker_would_differ(robot_code, suite, rewrites):
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, rewrites, _TEXT_CHECK_GUARD,
+        "Text check normalizer", "Should Contain line(s)", f"{_SHOULD_MATCH_REGEXP} (whole words, any letter case)",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Change waits: a READ whose text browser-service saw change because of an
 # earlier action. insert_change_waits puts two never-failing lines around it,
 # remove_change_waits is its exact inverse (learning is shown the test without
@@ -1393,8 +1603,9 @@ _CHANGE_WAIT_ACTIONS = frozenset({
 })
 # The only action line an element may have first when it has several (then only `Press Keys … Enter` follows).
 _TYPING_ACTIONS = frozenset({"fill text", "type text", "fill secret", "type secret"})
-# Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for.
-_PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate"})
+# Steps that are neither browser-service actions nor reads and still cannot change what a wait waits for
+# (`Wait For Elements State` only waits for an element's state; it never changes the page).
+_PROVEN_OUTSIDE = frozenset({"log", "close browser", "evaluate", "wait for elements state"})
 # The actions browser-service really performs while it discovers the page: NLRF maps `Press Keys` to a click, so
 # it is NOT among them (a `Press Keys` after the first action line is judged by its own rule).
 _PROVEN_ACTIONS = _CHANGE_WAIT_ACTIONS - {"press keys"}
@@ -1525,7 +1736,8 @@ def _is_proven_after_first_action(steps: list[_Step], index: int,
     """True when the step at `index` is a kind that cannot change what a wait waits for (R17): one of
     the actions browser-service performs (`Press Keys` excepted), `Get Text` (R17c: no other `Get …`,
     browser-service compares text and cannot see an attribute or a count come back), `should …`,
-    `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), one of the framework's own
+    `Log`, `Close Browser`, BuiltIn `Evaluate` (not `Evaluate JavaScript`), `Wait For Elements State`
+    (it only waits, it cannot change the page; not wrapped in another keyword), one of the framework's own
     pair lines, a setting such as `[Teardown]` (never a step of the body), `Keyboard Key    press
     Enter` written directly after a typing line, or (R17b) `Press Keys    X    Enter` — exactly one key
     cell `Enter`, not continued — whose most recent action is a typing line on the SAME element or
@@ -1758,7 +1970,8 @@ def insert_change_waits(robot_code: str, change_waits) -> str:
     above except `Press Keys`, `Get Text` (R17c: any other `Get …` — Get Attribute, Get Classes, Get
     Property, Get Selected Options, Get Element Count, Get Url, … — refuses the file: browser-service
     compares text, so it cannot see those values come back), `Should …`, `Log`, `Close Browser`, BuiltIn `Evaluate` (not
-    `Evaluate JavaScript`), the framework's own pair lines, a setting such as `[Teardown]`,
+    `Evaluate JavaScript`), `Wait For Elements State` (a visibility wait cannot change the page; it only waits),
+    the framework's own pair lines, a setting such as `[Teardown]`,
     `Keyboard Key    press    Enter` written directly after a Fill/Type Text or Fill/Type Secret line, and
     `Press Keys    X    Enter` (exactly the one key cell `Enter`, not continued on a `...` line) whose
     most recent ACTION step before it is a Fill/Type Text or Fill/Type Secret line on the SAME element X

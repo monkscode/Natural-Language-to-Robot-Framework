@@ -116,3 +116,5 @@ bench/private/
 # tracked docs/*.png diagrams and any future one are unaffected.
 .playwright-mcp/
 /*.png
+# graphify knowledge graph (generated)
+graphify-out/

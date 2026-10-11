@@ -486,8 +486,8 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
     adds two lines per marked read, neither of which can fail the test: a before-read
     above the action and, above the read, a wait until Get Text differs from it (both
     wrapped in Run Keyword And Ignore Error). Anything not proven safe (a later step
-    browser-service never performs, a repeated action, a test timeout, a loop) leaves
-    the file unchanged + one WARNING.
+    browser-service never performs — a Wait For Elements State excepted —, a repeated
+    action, a test timeout, a loop) leaves the file unchanged + one WARNING.
     Then the robot --dryrun validate-and-repair loop
     (dryrun_service.validate_and_repair — deterministic; unrepairable → loud fail);
     the repair LLM is handed the test WITHOUT the two lines, and the insert runs again

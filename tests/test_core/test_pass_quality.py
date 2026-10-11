@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -24,6 +25,7 @@ from src.backend.core.pass_quality import (
     Finding,
     check_pass_quality,
     hollow_shapes,
+    norm_locator,
     pass_suggestions,
 )
 
@@ -231,6 +233,37 @@ class TestSelectCheckCannotFail:
         assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
         assert found[0].detail == "id=dropdown"
 
+    def test_a_case_insensitive_check_is_still_flagged(self):
+        # Pin: the planner's `ignore_case=True` third cell changes nothing for the checker.
+        code = robot(self.SELECT_VARS,
+                     "    New Page    ${url}\n"
+                     "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                     "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                     "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
+    LETTER_CASE_HEAD = ("    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                        "    Select Options By    id=dropdown    label    Option 2\n"
+                        "    ${s}=    Get Text    id=dropdown\n")
+
+    def test_a_case_insensitive_check_in_another_letter_case_is_flagged(self):
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    option 2    ignore_case=True\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
+    def test_another_letter_case_without_the_flag_is_not_flagged(self):
+        # A case mismatch without `ignore_case=True` fails loudly at run time: not hollow.
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    option 2\n")
+        assert shapes(code, Q08) == set()
+
+    def test_the_flag_on_a_value_that_is_not_selected_is_not_flagged(self):
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    Option 1    ignore_case=True\n")
+        query = "Go to the dropdown page, select Option 2, and verify Option 1 is still listed"
+        assert shapes(code, query) == set()
+
     def test_get_selected_options_is_not_flagged(self):  # mirrors 8e37b6e1-6450-4c80-888a-c7f56bbc4738
         code = robot("${dropdown_locator}    id=dropdown\n",
                      "    New Page    https://the-internet.herokuapp.com/dropdown\n"
@@ -259,6 +292,13 @@ class TestSelectCheckCannotFail:
                          "    Should Contain    ${all}    Option 1\n")
         query = "Go to the dropdown page, select Option 2, and verify Option 1 is still listed"
         assert shapes(code, query) == set()
+
+    def test_the_spellings_of_one_id_share_one_key(self):
+        spellings = ["#x", "css=#x", "css=select#x", "id=x", 'css=[id="x"]', "xpath=//select[@id='x']"]
+        assert {norm_locator(spelling) for spelling in spellings} == {"id=x"}
+        # A class after the id and a select without an id name no single id: left as they are.
+        assert norm_locator("css=#a.b") == "css=#a.b"
+        assert norm_locator("xpath=//form/select") == "xpath=//form/select"
 
 
 class TestReadLocatorIsTheAnswer:
@@ -859,6 +899,487 @@ class TestLongRequests:
         query = "Go to x, verify there are 20 books, then verify 5 items and check the Total is 7. Done"
         assert pass_quality._verify_clauses(query) == [
             " there are 20 books", " 5 items ", " the total is 7"]
+
+
+class TestVariableExpansionIsBounded:
+    """A variable may name itself: `${loc}    ${loc} ${loc}` grows to k**5 copies in the five passes.
+
+    Never more than 16 self-references in a test here: without the bound 32 need about 235 MB.
+    """
+
+    @staticmethod
+    def naming_itself(times: int) -> str:
+        return " ".join(["${loc}"] * times)
+
+    @pytest.mark.parametrize("times", [12, 16])
+    def test_a_variable_naming_itself_stays_within_the_limit(self, times):
+        resolved = pass_quality._resolve("${loc}", {"loc": self.naming_itself(times)})
+        assert len(resolved) <= pass_quality._RESOLVE_LIMIT
+
+    def test_an_abandoned_pass_returns_the_text_as_it_stood_before_it(self):
+        # One pass that fans out: 50 values of 6,000 characters each. The pass before it stays.
+        variables = {"a": "x" * 6000, "b": "${a}" * 50}
+        assert pass_quality._resolve("${b}", variables) == "${a}" * 50
+
+    def test_small_values_resolve_as_before(self):
+        variables = {"url": "https://example.com", "page": "${url}/login", "loc": "css=a[href='${page}']"}
+        assert pass_quality._resolve("${loc}", variables) == "css=a[href='https://example.com/login']"
+        assert pass_quality._resolve("  css=h1  ", variables) == "css=h1"
+
+    def test_a_finding_names_no_locator_longer_than_the_limit(self):
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${loc}    " + self.naming_itself(12)
+                + "\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    ${loc}    label    Option 2\n"
+                "    ${v}=    Get Text    ${loc}\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert len(found[0].detail) <= pass_quality._RESOLVE_LIMIT
+
+
+class TestTheVariableScanIsLinear:
+    """A run of `${` that never closes: the scan read on from every `${` to the next `}` or the end, so its time grew
+    with the square of the run. A name holds no `{` now, so each start stops at the next one.
+
+    Never more than 9,980 unclosed `${` in one value here. The values Robot gives were executed in the runner image
+    (Robot Framework 7.4.2).
+    """
+
+    @pytest.mark.parametrize("opened", [4_995, 9_980])
+    def test_an_unclosed_run_resolves_in_under_half_a_second(self, opened):
+        # 4,995: a 9,994-char value substituted on every pass (2.4 s with the old scan). 9,980: over the bound at once.
+        variables = {"a": "${a}" + "${" * opened}
+        start = time.perf_counter()
+        pass_quality._resolve("${a}", variables)
+        assert time.perf_counter() - start < 0.5
+
+    def test_a_nested_reference_resolves_from_the_inside_out(self):
+        # Robot resolves `${b}` first: with b = x, `${a${b}}` reads `${ax}`.
+        assert pass_quality._resolve("${a${b}}", {"b": "x", "ax": "Products"}) == "Products"
+
+    def test_a_nested_name_in_the_variables_section_is_declared_as_robot_resolves_it(self):
+        # Robot resolves a declared name with the variables declared above it; one declared below is an error.
+        variables, _ = pass_quality._parse("*** Variables ***\n${b}    x\n${p${b}}    v\n${q${c}}    w\n${c}    y\n")
+        assert variables == {"b": "x", "px": "v", "c": "y"}
+
+    def test_an_inline_python_cell_uses_the_variable_it_names(self):
+        # `${{ $count + 1 }}` is a Python expression that reads `${count}`, not a variable named `{ $count + 1 `.
+        assert pass_quality._used_variables(("${{ $count + 1 }}",)) == {"count"}
+
+    def test_an_item_access_uses_the_variable_before_the_brackets(self):
+        assert pass_quality._used_variables(("${books}[0]",)) == {"books"}
+
+    def test_an_environment_variable_names_one_element_for_both_steps(self):
+        # Robot reads %{DROPDOWN} from the environment for both steps: one element, so the check cannot fail.
+        code = robot("", "    Select Options By    %{DROPDOWN}    label    Option 2\n"
+                         "    Get Text    %{DROPDOWN}    contains    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "%{DROPDOWN}")]
+
+
+class TestAValueTheBoundStopsIsNotRead:
+    """A resolution the bound stops returns text that still holds references. The count and read-locator rules do
+    not read that text as resolved: they report nothing rather than guess (the files of review_probes/rr3_probe.py).
+    """
+
+    COUNT_QUERY = "Go to https://x, get the titles of all books and verify there are 20 books"
+    READ_QUERY = "Go to https://x and get the page heading"
+
+    @staticmethod
+    def count_file(pad: int) -> str:
+        return ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${expected}    20\n${pad}    " + "x" * pad + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}\n")
+
+    @pytest.mark.parametrize("pad", [9_000, 10_001])
+    def test_a_long_sibling_argument_hides_no_count(self, pad):
+        assert check_pass_quality(self.count_file(pad), self.COUNT_QUERY) == []
+
+    @pytest.mark.parametrize("pad, second, found", [
+        (6_000, 6_000, []),                       # 12,000 characters for one statement: stopped
+        (4_000, 4_000, [READ_NOT_PERFORMED]),     # 8,000: resolved, the same answer as each argument alone
+    ])
+    def test_the_arguments_of_one_statement_share_one_bound(self, pad, second, found):
+        # The count is compared with 5, not 20: resolved, the missing read is reported; stopped, the rule reports
+        # nothing rather than guess (here at the cost of that true report).
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${expected}    5\n${pad}    " + "x" * pad + "\n${pad2}    " + "y" * second + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}    values=${pad2}\n")
+        assert [f.shape for f in check_pass_quality(code, self.COUNT_QUERY)] == found
+
+    def test_many_arguments_each_under_the_bound_are_not_all_resolved(self):
+        # The re-review's shape: 200 arguments, each a variable naming itself once beside 9,990 characters. Each pass
+        # of each argument stays under the bound, so each argument alone grows to about 50,000 characters (10 MB in
+        # all when every argument had a bound of its own).
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${a}    ${a}" + "x" * 9_990 + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    5    " + "    ".join(["${a}"] * 200) + "\n")
+        with patch.object(pass_quality, "_resolve_checked", wraps=pass_quality._resolve_checked) as resolve:
+            found = check_pass_quality(code, self.COUNT_QUERY)
+        assert len([c for c in resolve.call_args_list if c.args[0] == "${a}"]) <= 2
+        assert found == []      # stopped: the rule reports nothing rather than guess
+
+    def test_a_count_inside_a_value_the_bound_stops_is_not_reported_missing(self):
+        # Robot puts the value into the expression: `5 == 20 #xxx…` compares the count with 20 (`#` starts a comment).
+        code = books("    ${count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be True    ${count} == ${expected}\n",
+                     "${expected}    20 #" + "x" * 10_000 + "\n")
+        assert READ_NOT_PERFORMED not in shapes(code, Q10)
+
+    @pytest.mark.parametrize("size, flagged", [(9_000, True), (10_001, False)])
+    def test_a_read_locator_the_bound_stops_is_not_read_as_the_answer(self, size, flagged):
+        code = robot("${title}    " + "x" * size + "\n",
+                     "    New Page    https://x\n"
+                     "    ${heading}=    Get Text    text=\"${title}\"\n")
+        assert (READ_LOCATOR_IS_THE_ANSWER in shapes(code, self.READ_QUERY)) is flagged
+
+    def test_resolve_checked_says_when_the_bound_stopped_a_pass(self):
+        small = {"url": "https://example.com", "page": "${url}/login", "loc": "css=a[href='${page}']"}
+        for text in ("${loc}", "  css=h1  "):
+            assert pass_quality._resolve_checked(text, small) == (pass_quality._resolve(text, small), False)
+        fan_out = {"a": "x" * 6000, "b": "${a}" * 50}
+        assert pass_quality._resolve_checked("${b}", fan_out) == ("${a}" * 50, True)
+
+
+class TestTheVariablesSectionIsReadAsRobotReadsIt:
+    """The Variables section as Robot 7.4.2 reads it (executed in the runner image): a `...` line continues its own
+    declaration, never an earlier one; the FIRST declaration of a name wins, and a later one is skipped with its
+    continuation (no error is logged); a declared `${{ … }}` name returns its declared value, not the Python result.
+    """
+
+    COUNT_QUERY = "Go to https://x, get the titles of all books and verify there are 20 books"
+    READ_QUERY = "Go to https://x and get the page heading"
+    HEAD = "*** Settings ***\nLibrary    Browser    timeout=30s\n\n*** Variables ***\n"
+
+    @classmethod
+    def count_file(cls, variables: str, check: str) -> str:
+        return (cls.HEAD + variables + "\n*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    " + check + "\n")
+
+    @classmethod
+    def read_file(cls, variables: str, locator: str = "${title}") -> str:
+        return (cls.HEAD + variables + "\n*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${heading}=    Get Text    " + locator + "\n")
+
+    @pytest.mark.parametrize("variables", [
+        '${title}    css=h1\n${x${EMPTY}}    a\n...    text="Welcome back"\n',
+        '${title}    css=h1\n${q${later}}    a\n...    text="Welcome back"\n${later}    y\n',
+    ])
+    def test_a_continuation_after_a_name_the_checker_does_not_declare_joins_no_earlier_variable(self, variables):
+        # Robot: ${title} = css=h1. The checker declares neither nested name, so it drops their continuation.
+        assert check_pass_quality(self.read_file(variables), self.READ_QUERY) == []
+
+    def test_a_continuation_after_a_declared_name_still_joins_it(self):
+        # The control: Robot reads ${title} = css=h1 and ${x} = `a text="Welcome back"`.
+        code = self.read_file('${title}    css=h1\n${x}    a\n...    text="Welcome back"\n')
+        assert check_pass_quality(code, self.READ_QUERY) == []
+        assert pass_quality._parse(code)[0] == {"title": "css=h1", "x": 'a text="Welcome back"'}
+
+    def test_a_select_value_above_such_a_continuation_keeps_its_value(self):
+        code = (self.HEAD + "${opt}    Option 2\n${x${EMPTY}}    a\n...    b\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    id=dropdown    label    ${opt}\n"
+                "    ${v}=    Get Text    id=dropdown\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    @pytest.mark.parametrize("variables", [
+        "${ed}    ed\n${expected}    20\n${expect${ed}}    5\n",   # `${expect${ed}}` declares `${expected}` again
+        "${expected}    20\n${expected}    5\n",
+    ])
+    def test_the_first_declaration_of_a_name_wins(self, variables):
+        code = self.count_file(variables, "Should Be Equal As Integers    ${count}    ${expected}")
+        assert READ_NOT_PERFORMED not in shapes(code, self.COUNT_QUERY)
+
+    def test_a_later_declaration_is_skipped_with_its_continuation(self):
+        variables, _ = pass_quality._parse("*** Variables ***\n${expected}    20\n${expected}    5\n...    6\n")
+        assert variables == {"expected": "20"}
+
+    def test_a_declared_inline_python_name_in_the_count_assertion_is_not_read_as_python(self):
+        # Robot: the declared `${{ 1 + 1 }}` returns 20, so the count is compared with 20.
+        code = self.count_file("${{ 1 + 1 }}    20\n", "Should Be Equal As Integers    ${count}    ${{ 1 + 1 }}")
+        assert READ_NOT_PERFORMED not in shapes(code, self.COUNT_QUERY)
+
+    def test_a_declared_inline_python_name_in_a_read_locator_is_not_read_as_the_answer(self):
+        # Robot reads text="Welcome back", which the query names.
+        code = self.read_file("${{ 'w' }}    Welcome back\n", "text=\"${{ 'w' }}\"")
+        assert check_pass_quality(code, "Go to https://x and get the Welcome back heading") == []
+
+    @pytest.mark.parametrize("check, found", [
+        ("Should Be Equal As Integers    ${count}    ${{ 20 }}", []),             # Python's 20 is compared
+        ("Should Be True    ${{ $count > 0 }}", [READ_NOT_PERFORMED]),              # 20 is never compared
+    ])
+    def test_an_inline_python_cell_reads_as_before_in_a_file_that_declares_no_such_name(self, check, found):
+        # The same answers on develop (f84d713) and 574f060: only a file that declares a `${{ … }}` name changes.
+        assert [f.shape for f in check_pass_quality(self.count_file("", check), self.COUNT_QUERY)] == found
+
+
+class TestAVariablesLineRobotRejectsDeclaresNothing:
+    """A Variables line declares a name only when Robot accepts it (executed in the runner image, Robot Framework
+    7.4.2): one `$`, `@` or `&` reference and nothing else but an optional `=`. A rejected line sets nothing, so the
+    valid line of the same name below it is the one Robot uses. A `&{…}` line is rejected when one of its items is
+    neither `name=value` (an `=` no odd run of backslashes escapes) nor a dictionary variable. A type after the name's
+    last ": " (Robot 7.3+) is not part of the name: `${t: int}` declares `${t}`, `${t:int}` is a name of its own, and
+    a type Robot does not know rejects the line.
+    """
+
+    VARS = TestTheVariablesSectionIsReadAsRobotReadsIt
+    EQ = "Should Be Equal As Integers    ${count}    ${expected}"
+    REJECTED = ["${expected}x    5", "%{expected}    5", "${expected}[0]    5", "${expected} ${x}    5",
+                "&{expected}    notadict"]
+
+    @pytest.mark.parametrize("rejected", REJECTED)
+    def test_a_rejected_line_leaves_the_name_to_the_valid_line_below(self, rejected):
+        # Robot: ${expected} = 20, the number the request asks to verify.
+        code = self.VARS.count_file(rejected + "\n${expected}    20\n", self.EQ)
+        assert check_pass_quality(code, self.VARS.COUNT_QUERY) == []
+
+    def test_a_rejected_read_locator_line_leaves_the_locator_below(self):
+        # Robot: ${title} = css=h1, which holds no text literal.
+        code = self.VARS.read_file('${title}x    text="Welcome back"\n${title}    css=h1\n')
+        assert check_pass_quality(code, self.VARS.READ_QUERY) == []
+
+    def test_a_rejected_select_value_line_leaves_the_value_below(self):
+        # Robot: ${opt} = Option 2, so the whole <select>'s text is checked for the selected option.
+        code = (self.VARS.HEAD + "${opt}x    Option 9\n${opt}    Option 2\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    id=dropdown    label    ${opt}\n"
+                "    ${v}=    Get Text    id=dropdown\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    def test_a_rejected_line_continues_nothing(self):
+        variables, _ = pass_quality._parse("*** Variables ***\n${expected}x    5\n...    6\n${expected}    20\n")
+        assert variables == {"expected": "20"}
+
+    @pytest.mark.parametrize("rejected", REJECTED)
+    def test_a_rejected_line_below_a_valid_one_changes_nothing(self, rejected):
+        code = self.VARS.count_file("${expected}    20\n" + rejected + "\n", self.EQ)
+        assert check_pass_quality(code, self.VARS.COUNT_QUERY) == []
+
+    def test_a_rejected_read_locator_line_below_the_valid_one_changes_nothing(self):
+        code = self.VARS.read_file('${title}    css=h1\n${title}x    text="Welcome back"\n')
+        assert check_pass_quality(code, self.VARS.READ_QUERY) == []
+
+    def test_dictionary_items_are_read_as_robot_reads_them(self):
+        # Runner: d2, d3 and d8 are rejected (the `${dN}    20` below them wins); the others keep their dictionary.
+        code = ("*** Variables ***\n&{other}    k=v\n"
+                "&{d1}    a=1    b=2\n${d1}    20\n"
+                "&{d2}    notadict\n${d2}    20\n"
+                "&{d3}    a\\=1\n${d3}    20\n"
+                "&{d4}    =1\n${d4}    20\n"
+                "&{d5}    &{other}\n${d5}    20\n"
+                "&{d6}    a\\\\=1\n${d6}    20\n"
+                "&{d7}    ${k}=v\n${d7}    20\n"
+                "&{d8}    a=1    notadict\n${d8}    20\n")
+        assert pass_quality._parse(code)[0] == {
+            "other": "k=v", "d1": "a=1 b=2", "d2": "20", "d3": "20", "d4": "=1", "d5": "&{other}",
+            "d6": "a\\\\=1", "d7": "${k}=v", "d8": "20"}
+
+    @pytest.mark.parametrize("dictionary, found", [
+        ("&{expected}    a\\=1", []),                     # rejected: ${expected} = 20, the line below
+        ("&{expected}    =1", [READ_NOT_PERFORMED]),      # accepted: the dictionary is compared, not 20
+    ])
+    def test_a_dictionary_line_before_the_count_number(self, dictionary, found):
+        code = self.VARS.count_file(dictionary + "\n${expected}    20\n", self.EQ)
+        assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
+
+    def test_typed_names_are_read_as_robot_reads_them(self):
+        # Runner: t = 5, u = 20 and u:int = 5, v = 5, y = 20 (unknown type), e1 = 5, a:b = 8 (type `int`; the
+        # `${a: b}` line has the unknown type `b`), t2 = 5 (`INT`), t3 = 5 (`int | None`).
+        code = ("*** Variables ***\n${t: int}    5\n${t}    20\n${u:int}    5\n${u}    20\n"
+                "${v: int}=    5\n${v}    20\n${y: nosuch}    5\n${y}    20\n${e1} =    5\n${e1}    20\n"
+                "${a: b: int}    8\n${a: b}    20\n${t2: INT}    5\n${t2}    20\n"
+                "${t3: int | None}    5\n${t3}    20\n")
+        assert pass_quality._parse(code)[0] == {
+            "t": "5", "u:int": "5", "u": "20", "v": "5", "y": "20", "e1": "5", "a:b": "8", "t2": "5", "t3": "5"}
+
+    @pytest.mark.parametrize("variables, found", [
+        ("${expected: int}    20\n", []),                                          # Robot: 20
+        ("${expected: int}    5\n${expected}    20\n", [READ_NOT_PERFORMED]),      # Robot: 5
+        ("${expected: nosuch}    5\n${expected}    20\n", []),                     # rejected: Robot 20
+    ])
+    def test_a_typed_name_before_the_count_number(self, variables, found):
+        code = self.VARS.count_file(variables, self.EQ)
+        assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
+
+
+class TestTheSelectRuleFollowsARePointedLocator:
+    """The select rule reads each locator and value as it stands where it is used (Robot Framework 7.4.2, executed in
+    the runner image): `${loc}=    Set Variable    id=heading` between the select and the read sends Get Text to
+    id=heading, so that check can fail. Every body starts from the Variables section; `${x}=    Set Variable    <one
+    argument>` is followed, any other assignment leaves x a value the checker does not know (equal to nothing else).
+    A file holding a step that can re-point what the rule cannot follow reports no select check (deny by default).
+    """
+
+    HEAD = "*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+    VARIABLES = "${loc}    id=dropdown\n${opt}    Option 2\n"
+    F1_PAIR = ("    ${loc_before}=    Run Keyword And Ignore Error    Get Text    ${loc}\n"
+               "    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text    ${loc}"
+               "    !=    ${loc_before}[1]\n")
+
+    @classmethod
+    def select_file(cls, between: str = "", before: str = "", variables: str | None = None, after: str = "",
+                    locator: str = "${loc}", name: str = "T", check: str = "    Should Contain    ${v}    Option 2\n",
+                    settings: str = "") -> str:
+        return (cls.HEAD.replace("\n\n", settings + "\n\n") + (cls.VARIABLES if variables is None else variables)
+                + "\n*** Test Cases ***\n" + name + "\n" + before
+                + f"    Select Options By    {locator}    label    ${{opt}}\n" + between
+                + f"    ${{v}}=    Get Text    {locator}\n" + check + after)
+
+    @staticmethod
+    def select_found(code: str) -> list[tuple[str, str]]:
+        return [(f.shape, f.detail) for f in check_pass_quality(code, None) if f.shape == SELECT_CHECK_CANNOT_FAIL]
+
+    REPORTED = [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    def test_a_locator_re_pointed_between_the_select_and_the_read_is_not_reported(self):
+        assert self.select_found(self.select_file("    ${loc}=    Set Variable    id=heading\n")) == []
+
+    def test_the_same_file_without_the_re_point_is_reported(self):
+        assert self.select_found(self.select_file()) == self.REPORTED
+
+    @pytest.mark.parametrize("value", ["id=dropdown", "css=#dropdown"])
+    def test_a_re_point_to_the_same_element_is_reported(self, value):
+        assert self.select_found(self.select_file(f"    ${{loc}}=    Set Variable    {value}\n")) == self.REPORTED
+
+    def test_the_reads_variable_assigned_again_before_the_check_is_not_reported(self):
+        # Robot checks the text of id=result, which can fail.
+        code = self.select_file("", check="    ${v}=    Get Text    id=result\n    Should Contain    ${v}    Option 2\n")
+        assert self.select_found(code) == []
+
+    def test_the_selected_value_is_read_at_the_select_and_the_checked_value_at_the_check(self):
+        # The check compares Option 1, which is not the option selected: not this shape.
+        code = self.select_file(check="    ${opt}=    Set Variable    Option 1\n    Should Contain    ${v}    ${opt}\n")
+        assert self.select_found(code) == []
+        assert self.select_found(self.select_file(check="    Should Contain    ${v}    ${opt}\n")) == self.REPORTED
+
+    def test_a_locator_set_in_the_body_is_followed(self):
+        code = self.select_file(before="    ${dd}=    Set Variable    id=dropdown\n", variables="${opt}    Option 2\n",
+                                locator="${dd}")
+        assert self.select_found(code) == self.REPORTED
+
+    def test_one_value_the_checker_does_not_know_used_for_both_steps_is_reported(self):
+        code = self.select_file(before="    ${dd}=    Get Element    id=dropdown\n", variables="${opt}    Option 2\n",
+                                locator="${dd}")
+        assert self.select_found(code) == [(SELECT_CHECK_CANNOT_FAIL, "${dd}")]
+
+    def test_a_second_value_the_checker_does_not_know_between_is_not_reported(self):
+        code = self.select_file("    ${dd}=    Get Element    id=other\n",
+                                before="    ${dd}=    Get Element    id=dropdown\n",
+                                variables="${opt}    Option 2\n", locator="${dd}")
+        assert self.select_found(code) == []
+
+    @pytest.mark.parametrize("assignment", [
+        "    ${loc}=    Set Variable    id=dropdown    id=heading\n",      # another number of arguments
+        "    ${loc: str}=    Set Variable    id=dropdown\n",                # a type
+        "    ${loc}=    Catenate    id=dropdown\n",                         # another keyword
+        "    ${loc}=    Set Variable    ${{'id=dropdown'}}\n",              # a value the checker cannot resolve
+    ])
+    def test_any_other_assignment_between_is_a_value_the_checker_does_not_know(self, assignment):
+        assert self.select_found(self.select_file(assignment)) == []
+
+    @pytest.mark.parametrize("block", [
+        "    IF    $flag\n        ${loc}=    Set Variable    id=heading\n    ELSE\n"
+        "        ${loc}=    Set Variable    id=dropdown\n    END\n",
+        "    ${loc}=    Set Variable    id=heading\n    FOR    ${item}    IN    @{items}\n"
+        "        ${loc}=    Set Variable    id=dropdown\n    END\n",
+    ])
+    def test_a_set_variable_where_lines_do_not_run_in_order_is_not_followed(self, block):
+        # The last line written says id=dropdown, but Robot may skip it (an IF branch, an empty loop).
+        assert self.select_found(self.select_file(block)) == []
+
+    @pytest.mark.parametrize("variable_line", ["    FOR    ${loc}    IN    id=heading\n    END\n",
+                                               "    VAR    ${loc}    id=dropdown\n",
+                                               "    TRY\n        Fail    x\n    EXCEPT    AS    ${loc}\n    END\n"])
+    def test_a_for_variable_a_var_and_an_except_as_assign(self, variable_line):
+        assert self.select_found(self.select_file(variable_line)) == []
+
+    def test_a_variables_value_keeps_what_it_named_when_the_body_re_points_that_name(self):
+        # Robot resolves the Variables section from itself: ${loc} stays id=heading after `${a}=  Set Variable
+        # id=dropdown` (runner image), so the read is of another element and the check can fail.
+        code = self.select_file(before="    ${a}=    Set Variable    id=dropdown\n",
+                                variables="${a}    id=heading\n${loc}    ${a}\n${opt}    Option 2\n")
+        code = code.replace("    Select Options By    ${loc}", "    Select Options By    id=dropdown")
+        assert self.select_found(code) == []
+        assert self.select_found(code.replace("${loc}    ${a}", "${loc}    id=dropdown")) == self.REPORTED
+
+    def test_each_test_starts_from_the_variables_section(self):
+        # The second test's read is not the first test's re-pointed locator.
+        code = self.select_file("    ${loc}=    Set Variable    id=heading\n",
+                                after="\nSecond\n    ${v}=    Get Text    ${loc}\n    Should Contain    ${v}    Option 2\n")
+        assert self.select_found(code) == self.REPORTED
+
+    @pytest.mark.parametrize("between, after, settings", [
+        pytest.param("    Set Test Variable    ${loc}    id=heading\n", "", "", id="setter"),
+        pytest.param("    Set Task Variable    ${loc}    id=heading\n", "", "", id="setter-task"),
+        pytest.param("    SetTestVariable    ${loc}    id=heading\n", "", "", id="setter-without-spaces"),
+        pytest.param("    Given BuiltIn.Set Suite Variable    ${loc}    id=heading\n", "", "", id="setter-prefixed"),
+        pytest.param("    Run Keyword If    $flag    Set Test Variable    ${loc}    id=heading\n", "", "",
+                     id="setter-behind-run-keyword-if"),
+        pytest.param("    Run Keyword    ${kw}    \\${loc}    id=heading\n", "", "", id="run-keyword"),
+        pytest.param("    IF    $flag    Run Keyword    ${kw}    \\${loc}    id=heading\n", "", "",
+                     id="run-keyword-in-an-inline-if"),
+        pytest.param("    Wait Until Keyword Succeeds    2x    1s    ${kw}    \\${loc}    id=heading\n", "", "",
+                     id="wait-until-keyword-succeeds"),
+        pytest.param("    Import Variables    ${CURDIR}/v.py\n", "", "", id="import-variables"),
+        pytest.param("    Import Resource    ${CURDIR}/r.resource\n", "", "", id="import-resource"),
+        pytest.param("    Set Selector Prefix    iframe#f >>>\n", "", "", id="set-selector-prefix"),
+        pytest.param("    Repoint\n", "\n*** Keywords ***\nRepoint\n    VAR    ${loc}    id=heading    scope=TEST\n", "",
+                     id="var-with-a-scope"),
+        pytest.param("    ${loc}=    Set Variable    id=dropdown\n",
+                     "\n*** Keywords ***\nSet Variable\n    [Arguments]    ${value}\n    RETURN    id=heading\n", "",
+                     id="own-set-variable-keyword"),
+        pytest.param("", "\n*** Keywords ***\nGet ${what}\n    [Arguments]    ${locator}\n    RETURN    x\n", "",
+                     id="own-embedded-argument-keyword"),
+        pytest.param("    ${l${EMPTY}oc}=    Set Variable    id=heading\n", "", "", id="nested-assigned-name"),
+        pytest.param("    ${l$oc}=    Set Variable    id=heading\n", "", "", id="dollar-in-assigned-name"),
+        pytest.param("    ${loc}[0]=    Set Variable    id=heading\n", "", "", id="item-assignment"),
+        pytest.param(" ${loc}=    Set Variable    id=dropdown\n", "", "", id="one-space-line"),
+        pytest.param("    Log    x\n...    y\n", "", "", id="column-0-continuation"),
+        pytest.param("| | ${loc}= | Set Variable | id=heading |\n", "", "", id="pipe-separated-line"),
+        pytest.param("    [Template]    Log\n", "", "", id="template"),
+        pytest.param("", "", "\nTest Template    Log", id="test-template-setting"),
+    ])
+    def test_a_file_holding_what_the_rule_cannot_follow_reports_no_select_check(self, between, after, settings):
+        assert self.select_found(self.select_file(between, after=after, settings=settings)) == []
+
+    @pytest.mark.parametrize("name", ["T    ${loc}=    Set Variable    id=heading", "T\n    ...    No Operation"])
+    def test_a_step_on_the_name_line_reports_no_select_check(self, name):
+        assert self.select_found(self.select_file(name=name)) == []
+
+    def test_the_change_wait_pair_between_the_select_and_the_read_is_still_reported(self):
+        assert self.select_found(self.select_file(self.F1_PAIR)) == self.REPORTED
+
+    @pytest.mark.parametrize("line", [
+        "    Run Keyword And Ignore Error    Click    id=go\n",
+        "    Run Keyword And Ignore Error    Get Text    ${loc}    then    value\n",
+    ])
+    def test_another_run_keyword_and_ignore_error_reports_no_select_check(self, line):
+        assert self.select_found(self.select_file(line)) == []
+
+    # The reviewer's table (rr5 probe, section A): Robot reads id=heading after the re-point.
+    REPOINTED = "    ${loc}=    Set Variable    id=heading\n"
+
+    @pytest.mark.parametrize("junk, between, found", [
+        ("", REPOINTED, []),
+        ("not_a_var    a\n...    b\n", REPOINTED, []),
+        ("${x${EMPTY}}    a\n...    b\n", REPOINTED, []),
+        ("not_a_var    a\n...    b\n", "", REPORTED),
+    ])
+    def test_the_reviewers_table_reads_as_robot_reads_it(self, junk, between, found):
+        assert self.select_found(self.select_file(between, variables=self.VARIABLES + junk)) == found
 
 
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:

@@ -680,8 +680,53 @@ class TestExtractAndNormalize:
         assert "    ${city_value}=    Get Property    ${customer_city_locator}    value\n" in first
         assert second == first
 
-    # Both read rewrites are optional and skip-only: one that raises must cost only its own rewrite, never the
-    # paid-for generation. The rest of cleanup (the other rewrite, the Browser timeout) still runs.
+    def test_text_check_rewritten_by_the_pipeline_after_the_select_rewrite(self):
+        """An AssemblyOutput holding q08's select check AND a plain text check: the select read becomes
+        Get Selected Options and its Should Contain stays (a list, not text); the text check becomes a
+        whole-word, any-letter-case Should Match Regexp. Wired in, and stable across a repair round."""
+        code = self._Q08_RAW.replace(
+            "    New Page    ${url}\n",
+            "    New Page    ${url}\n"
+            "    ${heading}=    Get Text    css=h3\n"
+            "    Should Contain    ${heading}    Dropdown List    ignore_case=True\n",
+        ).replace("    Should Contain    ${selected_option}    Option 2\n",
+                  "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n")
+        first = ds.extract_and_normalize_robot_code(self._task_output(pydantic=code))
+        second = ds.extract_and_normalize_robot_code(self._task_output(pydantic=first))
+        assert "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n" in first
+        assert "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n" in first
+        assert ("    Should Match Regexp    ${heading}    (?i)(?<![0-9a-z_])Dropdown List(?![0-9a-z_])    "
+                "msg='${heading}' does not contain 'Dropdown List' (whole words, any letter case)    "
+                "values=False\n") in first
+        assert "Should Contain    ${heading}" not in first
+        assert second == first
+
+    def test_a_select_check_in_another_spelling_stays_for_the_pass_checker(self):
+        """q08 with the select as `css=select#dropdown` and its read as `id=dropdown`: the select rewrite does
+        not see one element, and the text-check rewrite must leave the cannot-fail check as the Should Contain
+        the History drawer's checker reads. Wired in: the check line stays and the suggestion is still made."""
+        from src.backend.core.pass_quality import pass_suggestions
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${dropdown_trigger}    css=select#dropdown\n"
+                "${dropdown_verification}    id=dropdown\n\n"
+                "*** Test Cases ***\nGenerated Test\n"
+                "    New Browser    chromium    headless=True\n"
+                "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n"
+                "    Close Browser\n")
+        query = ("Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, "
+                 "and verify Option 2 is selected")
+        out = ds.extract_and_normalize_robot_code(self._task_output(pydantic=code))
+        assert "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n" in out
+        assert "Should Match Regexp" not in out
+        assert pass_suggestions(out, query) == [
+            "The check reads the whole dropdown's text, which lists every option. "
+            "Consider checking the selected option instead."]
+
+    # The read rewrites and the text-check rewrite are optional and skip-only: one that raises must cost only its
+    # own rewrite, never the paid-for generation. The rest of cleanup (the other rewrites, the Browser timeout) still runs.
     _N1_RAW = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
                "${customer_city_locator}    id=customer.address.city\n\n"
                "*** Test Cases ***\nT\n"
@@ -694,7 +739,9 @@ class TestExtractAndNormalize:
          "    ${city_value}=    Get Property    ${customer_city_locator}    value\n"),
         ("rewrite_typed_value_reads", _Q08_RAW,
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
-    ], ids=["select read rewrite raises", "typed value rewrite raises"])
+        ("rewrite_text_checks_whole_word", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+    ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises"])
     def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
             self, caplog, failing, raw, still_rewritten):
         with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),

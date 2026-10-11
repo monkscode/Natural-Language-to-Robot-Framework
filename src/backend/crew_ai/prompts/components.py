@@ -206,9 +206,9 @@ Text from web elements often contains newlines and special characters.
 NEVER use `Should Be True 'X' in "${text}"` - it breaks with newlines!
 
 - ❌ WRONG: `Should Be True    'Cierra' in "${row_text}"`  (SyntaxError if text has \\n)
-- ✅ CORRECT: `Should Contain    ${row_text}    Cierra`  (handles newlines safely)
+- ✅ CORRECT: `Should Contain    ${row_text}    Cierra    ignore_case=True`  (handles newlines safely; the page's styling can change letter case)
 
-**Rule:** For ANY text validation from Get Text or Get Elements, use `Should Contain`.
+**Rule:** For ANY text validation from Get Text or Get Elements, use `Should Contain` with `ignore_case=True` — Get Text returns the text as displayed, and CSS can change its letter case.
 
 **NUMERIC VALIDATION (Prices, Counts, etc.)**
 When you encounter a step with keyword 'Should Be True' and a 'condition_expression' key:
@@ -255,7 +255,7 @@ Step 3: {"keyword": "Should Contain", "value": "expected_text"}
     FOR    ${element}    IN    @{elements}
         ${text}=    Get Text    ${element}
         Exit For Loop If    len($text.strip()) == 0
-        Should Contain    ${text}    expected_text
+        Should Contain    ${text}    expected_text    ignore_case=True
     END
 ```
 
@@ -264,7 +264,7 @@ Text from web elements often contains newlines and whitespace. AVOID Python expr
 - ❌ WRONG: `Continue For Loop If    '${text}' == ''`  (breaks with newlines)
 - ❌ WRONG: `Should Be True    'X' in '${text}'`  (breaks with newlines)
 - ✅ CORRECT: `Exit For Loop If    len($text.strip()) == 0`  (uses $var for Python object)
-- ✅ CORRECT: `Should Contain    ${text}    expected_text`
+- ✅ CORRECT: `Should Contain    ${text}    expected_text    ignore_case=True`
 
 **NOTE:** Use `$variable` (no curly braces) to pass variable as Python object, allowing `.strip()` method.
 
@@ -314,7 +314,7 @@ is — it just sends Browser hunting for one and fails with
 **Key Rules:**
 1. Use `@{variable}` (list notation) for Get Elements return value
 2. Exit on empty/whitespace: `Exit For Loop If    len($text.strip()) == 0`
-3. Use `Should Contain` for text validation (NOT `Should Be True 'X' in 'Y'`)
+3. Use `Should Contain` with `ignore_case=True` for text validation (NOT `Should Be True 'X' in 'Y'`)
 4. Use `${element}` as the loop variable inside FOR
 5. On `element_type: "collection"`, pick the keyword by cardinality (table above)
 6. Always close with `END`
@@ -767,6 +767,31 @@ Example — "Click Save without filling anything and verify the Email field
 shows an error":
 1. Click Element → Save button in the customer form
 2. Get Classes → Email input field in the customer form   (no value)
+"""
+
+    PLANNING_NAMED_TEXT_CHECK = """
+--- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
+This rule is ONLY for the visibility words "is displayed / visible / shown /
+present", "appears" and "can be seen". With those words, when the user names
+the words the element shows, they ask two things: that the element is
+visible, and that it shows those words. An element can be visible and show
+other words, or hold the words while it is still hidden.
+Examples: "verify the Products heading is displayed", "check the message
+'Saved' is visible", "make sure the Logout link appears".
+*   Plan TWO steps on that element, with the same element_description:
+    first the visibility check with value = "visible", then keyword
+    `Get Text` with the user's words in 'value' (e.g. value = "Products").
+Plan only the visibility check, with value = "visible", when:
+*   the user names no words the element shows: "verify the logo is
+    displayed", "verify the search results are visible", "verify an error
+    message appears";
+*   the element shows no text: images, icons, empty fields — even when the
+    user names them ("verify the Backpack image is displayed").
+When the user asks that something is NOT displayed, hidden or gone, keep
+the hidden check (value = "hidden").
+Every other check keeps the shape the other rules give it: "contains",
+"only has", "says", "is selected", counts ("verify 6 products are
+displayed") and element states (checked, enabled, disabled, shows an error).
 """
 
     PLANNING_LOOP_HANDLING = """

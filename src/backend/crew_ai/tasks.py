@@ -490,6 +490,8 @@ class RobotTasks:
 
             {PromptComponents.PLANNING_STATE_VERIFICATION}
 
+            {PromptComponents.PLANNING_NAMED_TEXT_CHECK}
+
             {PromptComponents.PLANNING_LOOP_HANDLING}
 
             {PromptComponents.PLANNING_OUTPUT_RULES}
