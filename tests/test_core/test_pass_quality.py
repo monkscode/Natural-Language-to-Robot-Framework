@@ -1125,6 +1125,96 @@ class TestTheVariablesSectionIsReadAsRobotReadsIt:
         assert [f.shape for f in check_pass_quality(self.count_file("", check), self.COUNT_QUERY)] == found
 
 
+class TestAVariablesLineRobotRejectsDeclaresNothing:
+    """A Variables line declares a name only when Robot accepts it (executed in the runner image, Robot Framework
+    7.4.2): one `$`, `@` or `&` reference and nothing else but an optional `=`. A rejected line sets nothing, so the
+    valid line of the same name below it is the one Robot uses. A `&{…}` line is rejected when one of its items is
+    neither `name=value` (an `=` no odd run of backslashes escapes) nor a dictionary variable. A type after the name's
+    last ": " (Robot 7.3+) is not part of the name: `${t: int}` declares `${t}`, `${t:int}` is a name of its own, and
+    a type Robot does not know rejects the line.
+    """
+
+    VARS = TestTheVariablesSectionIsReadAsRobotReadsIt
+    EQ = "Should Be Equal As Integers    ${count}    ${expected}"
+    REJECTED = ["${expected}x    5", "%{expected}    5", "${expected}[0]    5", "${expected} ${x}    5",
+                "&{expected}    notadict"]
+
+    @pytest.mark.parametrize("rejected", REJECTED)
+    def test_a_rejected_line_leaves_the_name_to_the_valid_line_below(self, rejected):
+        # Robot: ${expected} = 20, the number the request asks to verify.
+        code = self.VARS.count_file(rejected + "\n${expected}    20\n", self.EQ)
+        assert check_pass_quality(code, self.VARS.COUNT_QUERY) == []
+
+    def test_a_rejected_read_locator_line_leaves_the_locator_below(self):
+        # Robot: ${title} = css=h1, which holds no text literal.
+        code = self.VARS.read_file('${title}x    text="Welcome back"\n${title}    css=h1\n')
+        assert check_pass_quality(code, self.VARS.READ_QUERY) == []
+
+    def test_a_rejected_select_value_line_leaves_the_value_below(self):
+        # Robot: ${opt} = Option 2, so the whole <select>'s text is checked for the selected option.
+        code = (self.VARS.HEAD + "${opt}x    Option 9\n${opt}    Option 2\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    id=dropdown    label    ${opt}\n"
+                "    ${v}=    Get Text    id=dropdown\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    def test_a_rejected_line_continues_nothing(self):
+        variables, _ = pass_quality._parse("*** Variables ***\n${expected}x    5\n...    6\n${expected}    20\n")
+        assert variables == {"expected": "20"}
+
+    @pytest.mark.parametrize("rejected", REJECTED)
+    def test_a_rejected_line_below_a_valid_one_changes_nothing(self, rejected):
+        code = self.VARS.count_file("${expected}    20\n" + rejected + "\n", self.EQ)
+        assert check_pass_quality(code, self.VARS.COUNT_QUERY) == []
+
+    def test_a_rejected_read_locator_line_below_the_valid_one_changes_nothing(self):
+        code = self.VARS.read_file('${title}    css=h1\n${title}x    text="Welcome back"\n')
+        assert check_pass_quality(code, self.VARS.READ_QUERY) == []
+
+    def test_dictionary_items_are_read_as_robot_reads_them(self):
+        # Runner: d2, d3 and d8 are rejected (the `${dN}    20` below them wins); the others keep their dictionary.
+        code = ("*** Variables ***\n&{other}    k=v\n"
+                "&{d1}    a=1    b=2\n${d1}    20\n"
+                "&{d2}    notadict\n${d2}    20\n"
+                "&{d3}    a\\=1\n${d3}    20\n"
+                "&{d4}    =1\n${d4}    20\n"
+                "&{d5}    &{other}\n${d5}    20\n"
+                "&{d6}    a\\\\=1\n${d6}    20\n"
+                "&{d7}    ${k}=v\n${d7}    20\n"
+                "&{d8}    a=1    notadict\n${d8}    20\n")
+        assert pass_quality._parse(code)[0] == {
+            "other": "k=v", "d1": "a=1 b=2", "d2": "20", "d3": "20", "d4": "=1", "d5": "&{other}",
+            "d6": "a\\\\=1", "d7": "${k}=v", "d8": "20"}
+
+    @pytest.mark.parametrize("dictionary, found", [
+        ("&{expected}    a\\=1", []),                     # rejected: ${expected} = 20, the line below
+        ("&{expected}    =1", [READ_NOT_PERFORMED]),      # accepted: the dictionary is compared, not 20
+    ])
+    def test_a_dictionary_line_before_the_count_number(self, dictionary, found):
+        code = self.VARS.count_file(dictionary + "\n${expected}    20\n", self.EQ)
+        assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
+
+    def test_typed_names_are_read_as_robot_reads_them(self):
+        # Runner: t = 5, u = 20 and u:int = 5, v = 5, y = 20 (unknown type), e1 = 5, a:b = 8 (type `int`; the
+        # `${a: b}` line has the unknown type `b`), t2 = 5 (`INT`), t3 = 5 (`int | None`).
+        code = ("*** Variables ***\n${t: int}    5\n${t}    20\n${u:int}    5\n${u}    20\n"
+                "${v: int}=    5\n${v}    20\n${y: nosuch}    5\n${y}    20\n${e1} =    5\n${e1}    20\n"
+                "${a: b: int}    8\n${a: b}    20\n${t2: INT}    5\n${t2}    20\n"
+                "${t3: int | None}    5\n${t3}    20\n")
+        assert pass_quality._parse(code)[0] == {
+            "t": "5", "u:int": "5", "u": "20", "v": "5", "y": "20", "e1": "5", "a:b": "8", "t2": "5", "t3": "5"}
+
+    @pytest.mark.parametrize("variables, found", [
+        ("${expected: int}    20\n", []),                                          # Robot: 20
+        ("${expected: int}    5\n${expected}    20\n", [READ_NOT_PERFORMED]),      # Robot: 5
+        ("${expected: nosuch}    5\n${expected}    20\n", []),                     # rejected: Robot 20
+    ])
+    def test_a_typed_name_before_the_count_number(self, variables, found):
+        code = self.VARS.count_file(variables, self.EQ)
+        assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
+
+
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:
     """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
     `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with

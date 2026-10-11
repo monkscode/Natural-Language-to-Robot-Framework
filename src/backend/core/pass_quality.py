@@ -214,6 +214,23 @@ _RESOLVE_PASSES = 5      # a value may name another: _resolve substitutes in up 
 # a key no Robot name can produce (a declared name's key never holds a brace).
 _INLINE_PYTHON_DECLARATION = re.compile(r"[$@&%]\{\{.*\}\}\s*=?")
 _INLINE_PYTHON_NAME = "{{"
+# A name cell Robot accepts (`search_variable(name, parse_type=True)` + `is_assign`, Robot Framework 7.4.2): ONE `$`,
+# `@` or `&` reference, nothing around it but optional spaces and `=`. `${a}x`, `%{a}`, `${a}[0]`, `${a} ${b}` and a
+# bare word are rejected. Robot 7.3+ reads a type after the name's LAST ": ": `${t: int}` names `${t}`, while
+# `${t:int}` is a name of its own.
+_NAME_CELL = re.compile(r"([$@&])\{(.+)\}(?:\s*=)?")
+# The type names Robot knows (`TYPE_NAMES` in robot/running/arguments/typeinfo.py, 7.4.2; any letter case). A type
+# that is neither one of them nor a union of them (`int | None`) is one the checker cannot confirm, `list[int]`
+# included: the line declares nothing.
+_TYPE_NAMES = frozenset({
+    "...", "ellipsis", "any", "object", "str", "string", "unicode", "bool", "boolean", "int", "integer", "long",
+    "float", "double", "decimal", "bytes", "bytearray", "datetime", "date", "timedelta", "path", "none", "sequence",
+    "list", "tuple", "set", "frozenset", "mapping", "map", "dictionary", "dict", "union", "literal", "secret"})
+# A `&{…}` item Robot accepts (`DictVariableResolver`, `split_from_equals`): a dictionary variable, or an `=` outside
+# every variable reference that no odd run of backslashes escapes (`=1` and `a\\=1` are accepted, `a\=1` is not).
+_DICT_VARIABLE = re.compile(r"&\{[^{}]+\}(?:\[[^\[\]]*\])*")
+_REFERENCE = re.compile(r"[$@&%]\{[^{}]*\}(?:\[[^\[\]]*\])*")
+_UNESCAPED_EQUALS = re.compile(r"(?<!\\)(?:\\\\)*=")
 
 
 @dataclass(frozen=True)
@@ -251,23 +268,51 @@ def _declared_name(cell: str, variables: dict[str, str]) -> str:
     return m.group(1) + _resolve(m.group(2), variables) + m.group(3) if m else cell
 
 
+def _name_key(cell: str, variables: dict[str, str] | None = None) -> str | None:
+    """The key of the one name `cell` declares, or None when Robot rejects the cell or the checker cannot key it.
+
+    The type after the name's last ": " is dropped when Robot knows it, and rejects the cell when the checker cannot
+    confirm it. With `variables`, the variables inside the name are resolved from them (those declared above it), as
+    Robot does: with b = x, `${p${b}}` declares `${px}`. A name that still holds a brace declares nothing.
+    """
+    m = _NAME_CELL.fullmatch(cell)
+    if not m:
+        return None
+    base = m.group(2)
+    if ": " in base:
+        base, type_ = base.rsplit(": ", 1)
+        if not all(part.strip().lower() in _TYPE_NAMES for part in type_.split("|")):
+            return None
+    if variables is not None:
+        base = _resolve(base, variables)
+    if not base or "{" in base or "}" in base:
+        return None
+    return re.sub(r"[\s_]", "", base.lower())
+
+
+def _is_dict_item(item: str) -> bool:
+    """True when Robot accepts `item` as one item of a `&{…}` declaration."""
+    return bool(_DICT_VARIABLE.fullmatch(item) or _UNESCAPED_EQUALS.search(_REFERENCE.sub("x", item)))
+
+
 def _declare(cells: list[str], variables: dict[str, str]) -> str | None:
     """Record one Variables-section line as Robot does; return the key its `...` lines continue, or None.
 
-    The FIRST declaration of a name wins: a later one is skipped, and so are its `...` lines. A line that records no
-    name continues nothing (Robot keeps a `...` line with its own declaration). A `${{ … }}` name is recorded under
+    A line declares a name only when Robot accepts it (`_name_key`; a `&{…}` line also needs every item to be one Robot
+    accepts): a line Robot rejects sets nothing, so a later valid line of that name is the one recorded. The FIRST
+    declaration of a name wins: a later one is skipped, and so are its `...` lines. A line that records no name
+    continues nothing (Robot keeps a `...` line with its own declaration). A `${{ … }}` name is recorded under
     `_INLINE_PYTHON_NAME`.
     """
-    name = _declared_name(cells[0], variables)
-    if _VARIABLE.match(name):
-        key = _var_key(name)
-        if key in variables:
-            return None
-        variables[key] = " ".join(cells[1:])
-        return key
-    if _INLINE_PYTHON_DECLARATION.fullmatch(name):
-        variables[_INLINE_PYTHON_NAME] = ""
-    return None
+    key = _name_key(cells[0], variables)
+    if key is None:
+        if _INLINE_PYTHON_DECLARATION.fullmatch(_declared_name(cells[0], variables)):
+            variables[_INLINE_PYTHON_NAME] = ""
+        return None
+    if key in variables or (cells[0].startswith("&") and not all(_is_dict_item(c) for c in cells[1:])):
+        return None
+    variables[key] = " ".join(cells[1:])
+    return key
 
 
 def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
