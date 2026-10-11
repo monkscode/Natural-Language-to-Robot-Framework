@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -996,6 +997,35 @@ class TestAValueTheBoundStopsIsNotRead:
     @pytest.mark.parametrize("pad", [9_000, 10_001])
     def test_a_long_sibling_argument_hides_no_count(self, pad):
         assert check_pass_quality(self.count_file(pad), self.COUNT_QUERY) == []
+
+    @pytest.mark.parametrize("pad, second, found", [
+        (6_000, 6_000, []),                       # 12,000 characters for one statement: stopped
+        (4_000, 4_000, [READ_NOT_PERFORMED]),     # 8,000: resolved, the same answer as each argument alone
+    ])
+    def test_the_arguments_of_one_statement_share_one_bound(self, pad, second, found):
+        # The count is compared with 5, not 20: resolved, the missing read is reported; stopped, the rule reports
+        # nothing rather than guess (here at the cost of that true report).
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${expected}    5\n${pad}    " + "x" * pad + "\n${pad2}    " + "y" * second + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}    values=${pad2}\n")
+        assert [f.shape for f in check_pass_quality(code, self.COUNT_QUERY)] == found
+
+    def test_many_arguments_each_under_the_bound_are_not_all_resolved(self):
+        # The re-review's shape: 200 arguments, each a variable naming itself once beside 9,990 characters. Each pass
+        # of each argument stays under the bound, so each argument alone grows to about 50,000 characters (10 MB in
+        # all when every argument had a bound of its own).
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${a}    ${a}" + "x" * 9_990 + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    5    " + "    ".join(["${a}"] * 200) + "\n")
+        with patch.object(pass_quality, "_resolve_checked", wraps=pass_quality._resolve_checked) as resolve:
+            found = check_pass_quality(code, self.COUNT_QUERY)
+        assert len([c for c in resolve.call_args_list if c.args[0] == "${a}"]) <= 2
+        assert found == []      # stopped: the rule reports nothing rather than guess
 
     def test_a_count_inside_a_value_the_bound_stops_is_not_reported_missing(self):
         # Robot puts the value into the expression: `5 == 20 #xxx…` compares the count with 20 (`#` starts a comment).

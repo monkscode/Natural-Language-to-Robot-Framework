@@ -208,6 +208,7 @@ _CELL_SPLIT = re.compile(r"\s{2,}|\t")
 _LIBRARY_PREFIX = re.compile(r"^(browser|builtin|collections|string)\.")
 _KEYWORD_SETTINGS = ("[setup]", "[teardown]")
 _RESOLVE_LIMIT = 10_000  # the most characters one pass of _resolve may substitute before it is abandoned
+_RESOLVE_PASSES = 5      # a value may name another: _resolve substitutes in up to this many passes
 # A Variables-section name in the inline-Python form: Robot returns its declared value for a later `${{ … }}` of that
 # name, so in such a file a `${{` left after resolution may be the name, not an expression. `_parse` records it under
 # a key no Robot name can produce (a declared name's key never holds a brace).
@@ -316,18 +317,24 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
     return variables, parsed
 
 
-def _resolve_checked(text: str, variables: dict[str, str]) -> tuple[str, bool]:
-    """What `_resolve` returns, and True when the bound abandoned one of its passes."""
-    for _ in range(5):
+def _resolve_checked(text: str, variables: dict[str, str],
+                     spent: list[int] | None = None) -> tuple[str, bool]:
+    """What `_resolve` returns, and True when the bound abandoned one of its passes.
+
+    `spent` shares the bound between the texts of one statement, pass by pass, as if they were resolved joined:
+    `spent[i]` holds what the texts before this one substituted in their pass i, and this text's pass i adds to it.
+    Without `spent` the text has a bound of its own.
+    """
+    spent = [0] * _RESOLVE_PASSES if spent is None else spent
+    for i in range(_RESOLVE_PASSES):
         parts: list[str] = []
-        substituted = 0
         end = 0
         for m in _VARIABLE.finditer(text):
             value = variables.get(_var_key(m.group(0)))
             if value is None:
                 continue
-            substituted += len(value)
-            if substituted > _RESOLVE_LIMIT:
+            spent[i] += len(value)
+            if spent[i] > _RESOLVE_LIMIT:
                 return text.strip(), True
             parts += [text[end:m.start()], value]
             end = m.end()
@@ -554,6 +561,19 @@ def _used_variables(args: tuple[str, ...]) -> set[str]:
             | {_var_key(name) for name in _PYTHON_VARIABLE.findall(text)})
 
 
+def _resolved_arguments(args: tuple[str, ...], variables: dict[str, str]) -> list[str] | None:
+    """Each argument resolved on its own text under ONE bound shared by them all (`_resolve_checked`'s `spent`), or
+    None as soon as one is not read: no further argument is resolved."""
+    spent = [0] * _RESOLVE_PASSES
+    texts = []
+    for arg in args:
+        text, stopped = _resolve_checked(arg, variables, spent)
+        if _not_read(text, stopped, variables):
+            return None
+        texts.append(text)
+    return texts
+
+
 def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statement]) -> bool:
     """True when the query reads a whole collection, asks to verify a number N and the test asserts a count against N.
 
@@ -569,9 +589,9 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
     (`Wait For Elements State  xpath=(//li)[20]  visible`) checks no count. A
     variable assigned in the test body is never replaced by its declared start
     value: `${n}    0` under Variables is not what `${n} < 5` compares. Each
-    argument is resolved on its own, and a value the bound stops is not read,
-    nor a `${{` left in a file that declares a `${{ … }}` name; the rule
-    reports nothing rather than guess.
+    argument is resolved on its own, the arguments of one statement share one
+    bound, and a value the bound stops is not read, nor a `${{` left in a file
+    that declares a `${{ … }}` name; the rule reports nothing rather than guess.
     """
     if not _asks_for_a_whole_collection(query):
         return False
@@ -587,9 +607,8 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
             continue
         # A counting keyword's first argument is what it counts, never the number expected.
         if _is_assertion(stmt):
-            resolved = [_resolve_checked(arg, declared) for arg in (stmt.args[1:] if counter else stmt.args)]
-            if (any(_not_read(text, stopped, declared) for text, stopped in resolved)
-                    or wanted & _whole_numbers("  ".join(text for text, _ in resolved))):
+            texts = _resolved_arguments(stmt.args[1:] if counter else stmt.args, declared)
+            if texts is None or wanted & _whole_numbers("  ".join(texts)):
                 return True
         counts.update(stmt.assigned)
     return False
