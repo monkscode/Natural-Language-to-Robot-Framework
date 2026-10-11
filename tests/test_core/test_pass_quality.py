@@ -1215,6 +1215,173 @@ class TestAVariablesLineRobotRejectsDeclaresNothing:
         assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
 
 
+class TestTheSelectRuleFollowsARePointedLocator:
+    """The select rule reads each locator and value as it stands where it is used (Robot Framework 7.4.2, executed in
+    the runner image): `${loc}=    Set Variable    id=heading` between the select and the read sends Get Text to
+    id=heading, so that check can fail. Every body starts from the Variables section; `${x}=    Set Variable    <one
+    argument>` is followed, any other assignment leaves x a value the checker does not know (equal to nothing else).
+    A file holding a step that can re-point what the rule cannot follow reports no select check (deny by default).
+    """
+
+    HEAD = "*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+    VARIABLES = "${loc}    id=dropdown\n${opt}    Option 2\n"
+    F1_PAIR = ("    ${loc_before}=    Run Keyword And Ignore Error    Get Text    ${loc}\n"
+               "    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text    ${loc}"
+               "    !=    ${loc_before}[1]\n")
+
+    @classmethod
+    def select_file(cls, between: str = "", before: str = "", variables: str | None = None, after: str = "",
+                    locator: str = "${loc}", name: str = "T", check: str = "    Should Contain    ${v}    Option 2\n",
+                    settings: str = "") -> str:
+        return (cls.HEAD.replace("\n\n", settings + "\n\n") + (cls.VARIABLES if variables is None else variables)
+                + "\n*** Test Cases ***\n" + name + "\n" + before
+                + f"    Select Options By    {locator}    label    ${{opt}}\n" + between
+                + f"    ${{v}}=    Get Text    {locator}\n" + check + after)
+
+    @staticmethod
+    def select_found(code: str) -> list[tuple[str, str]]:
+        return [(f.shape, f.detail) for f in check_pass_quality(code, None) if f.shape == SELECT_CHECK_CANNOT_FAIL]
+
+    REPORTED = [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    def test_a_locator_re_pointed_between_the_select_and_the_read_is_not_reported(self):
+        assert self.select_found(self.select_file("    ${loc}=    Set Variable    id=heading\n")) == []
+
+    def test_the_same_file_without_the_re_point_is_reported(self):
+        assert self.select_found(self.select_file()) == self.REPORTED
+
+    @pytest.mark.parametrize("value", ["id=dropdown", "css=#dropdown"])
+    def test_a_re_point_to_the_same_element_is_reported(self, value):
+        assert self.select_found(self.select_file(f"    ${{loc}}=    Set Variable    {value}\n")) == self.REPORTED
+
+    def test_the_reads_variable_assigned_again_before_the_check_is_not_reported(self):
+        # Robot checks the text of id=result, which can fail.
+        code = self.select_file("", check="    ${v}=    Get Text    id=result\n    Should Contain    ${v}    Option 2\n")
+        assert self.select_found(code) == []
+
+    def test_the_selected_value_is_read_at_the_select_and_the_checked_value_at_the_check(self):
+        # The check compares Option 1, which is not the option selected: not this shape.
+        code = self.select_file(check="    ${opt}=    Set Variable    Option 1\n    Should Contain    ${v}    ${opt}\n")
+        assert self.select_found(code) == []
+        assert self.select_found(self.select_file(check="    Should Contain    ${v}    ${opt}\n")) == self.REPORTED
+
+    def test_a_locator_set_in_the_body_is_followed(self):
+        code = self.select_file(before="    ${dd}=    Set Variable    id=dropdown\n", variables="${opt}    Option 2\n",
+                                locator="${dd}")
+        assert self.select_found(code) == self.REPORTED
+
+    def test_one_value_the_checker_does_not_know_used_for_both_steps_is_reported(self):
+        code = self.select_file(before="    ${dd}=    Get Element    id=dropdown\n", variables="${opt}    Option 2\n",
+                                locator="${dd}")
+        assert self.select_found(code) == [(SELECT_CHECK_CANNOT_FAIL, "${dd}")]
+
+    def test_a_second_value_the_checker_does_not_know_between_is_not_reported(self):
+        code = self.select_file("    ${dd}=    Get Element    id=other\n",
+                                before="    ${dd}=    Get Element    id=dropdown\n",
+                                variables="${opt}    Option 2\n", locator="${dd}")
+        assert self.select_found(code) == []
+
+    @pytest.mark.parametrize("assignment", [
+        "    ${loc}=    Set Variable    id=dropdown    id=heading\n",      # another number of arguments
+        "    ${loc: str}=    Set Variable    id=dropdown\n",                # a type
+        "    ${loc}=    Catenate    id=dropdown\n",                         # another keyword
+        "    ${loc}=    Set Variable    ${{'id=dropdown'}}\n",              # a value the checker cannot resolve
+    ])
+    def test_any_other_assignment_between_is_a_value_the_checker_does_not_know(self, assignment):
+        assert self.select_found(self.select_file(assignment)) == []
+
+    @pytest.mark.parametrize("block", [
+        "    IF    $flag\n        ${loc}=    Set Variable    id=heading\n    ELSE\n"
+        "        ${loc}=    Set Variable    id=dropdown\n    END\n",
+        "    ${loc}=    Set Variable    id=heading\n    FOR    ${item}    IN    @{items}\n"
+        "        ${loc}=    Set Variable    id=dropdown\n    END\n",
+    ])
+    def test_a_set_variable_where_lines_do_not_run_in_order_is_not_followed(self, block):
+        # The last line written says id=dropdown, but Robot may skip it (an IF branch, an empty loop).
+        assert self.select_found(self.select_file(block)) == []
+
+    @pytest.mark.parametrize("variable_line", ["    FOR    ${loc}    IN    id=heading\n    END\n",
+                                               "    VAR    ${loc}    id=dropdown\n",
+                                               "    TRY\n        Fail    x\n    EXCEPT    AS    ${loc}\n    END\n"])
+    def test_a_for_variable_a_var_and_an_except_as_assign(self, variable_line):
+        assert self.select_found(self.select_file(variable_line)) == []
+
+    def test_a_variables_value_keeps_what_it_named_when_the_body_re_points_that_name(self):
+        # Robot resolves the Variables section from itself: ${loc} stays id=heading after `${a}=  Set Variable
+        # id=dropdown` (runner image), so the read is of another element and the check can fail.
+        code = self.select_file(before="    ${a}=    Set Variable    id=dropdown\n",
+                                variables="${a}    id=heading\n${loc}    ${a}\n${opt}    Option 2\n")
+        code = code.replace("    Select Options By    ${loc}", "    Select Options By    id=dropdown")
+        assert self.select_found(code) == []
+        assert self.select_found(code.replace("${loc}    ${a}", "${loc}    id=dropdown")) == self.REPORTED
+
+    def test_each_test_starts_from_the_variables_section(self):
+        # The second test's read is not the first test's re-pointed locator.
+        code = self.select_file("    ${loc}=    Set Variable    id=heading\n",
+                                after="\nSecond\n    ${v}=    Get Text    ${loc}\n    Should Contain    ${v}    Option 2\n")
+        assert self.select_found(code) == self.REPORTED
+
+    @pytest.mark.parametrize("between, after, settings", [
+        pytest.param("    Set Test Variable    ${loc}    id=heading\n", "", "", id="setter"),
+        pytest.param("    Set Task Variable    ${loc}    id=heading\n", "", "", id="setter-task"),
+        pytest.param("    SetTestVariable    ${loc}    id=heading\n", "", "", id="setter-without-spaces"),
+        pytest.param("    Given BuiltIn.Set Suite Variable    ${loc}    id=heading\n", "", "", id="setter-prefixed"),
+        pytest.param("    Run Keyword If    $flag    Set Test Variable    ${loc}    id=heading\n", "", "",
+                     id="setter-behind-run-keyword-if"),
+        pytest.param("    Run Keyword    ${kw}    \\${loc}    id=heading\n", "", "", id="run-keyword"),
+        pytest.param("    IF    $flag    Run Keyword    ${kw}    \\${loc}    id=heading\n", "", "",
+                     id="run-keyword-in-an-inline-if"),
+        pytest.param("    Wait Until Keyword Succeeds    2x    1s    ${kw}    \\${loc}    id=heading\n", "", "",
+                     id="wait-until-keyword-succeeds"),
+        pytest.param("    Import Variables    ${CURDIR}/v.py\n", "", "", id="import-variables"),
+        pytest.param("    Import Resource    ${CURDIR}/r.resource\n", "", "", id="import-resource"),
+        pytest.param("    Set Selector Prefix    iframe#f >>>\n", "", "", id="set-selector-prefix"),
+        pytest.param("    Repoint\n", "\n*** Keywords ***\nRepoint\n    VAR    ${loc}    id=heading    scope=TEST\n", "",
+                     id="var-with-a-scope"),
+        pytest.param("    ${loc}=    Set Variable    id=dropdown\n",
+                     "\n*** Keywords ***\nSet Variable\n    [Arguments]    ${value}\n    RETURN    id=heading\n", "",
+                     id="own-set-variable-keyword"),
+        pytest.param("", "\n*** Keywords ***\nGet ${what}\n    [Arguments]    ${locator}\n    RETURN    x\n", "",
+                     id="own-embedded-argument-keyword"),
+        pytest.param("    ${l${EMPTY}oc}=    Set Variable    id=heading\n", "", "", id="nested-assigned-name"),
+        pytest.param("    ${l$oc}=    Set Variable    id=heading\n", "", "", id="dollar-in-assigned-name"),
+        pytest.param("    ${loc}[0]=    Set Variable    id=heading\n", "", "", id="item-assignment"),
+        pytest.param(" ${loc}=    Set Variable    id=dropdown\n", "", "", id="one-space-line"),
+        pytest.param("    Log    x\n...    y\n", "", "", id="column-0-continuation"),
+        pytest.param("| | ${loc}= | Set Variable | id=heading |\n", "", "", id="pipe-separated-line"),
+        pytest.param("    [Template]    Log\n", "", "", id="template"),
+        pytest.param("", "", "\nTest Template    Log", id="test-template-setting"),
+    ])
+    def test_a_file_holding_what_the_rule_cannot_follow_reports_no_select_check(self, between, after, settings):
+        assert self.select_found(self.select_file(between, after=after, settings=settings)) == []
+
+    @pytest.mark.parametrize("name", ["T    ${loc}=    Set Variable    id=heading", "T\n    ...    No Operation"])
+    def test_a_step_on_the_name_line_reports_no_select_check(self, name):
+        assert self.select_found(self.select_file(name=name)) == []
+
+    def test_the_change_wait_pair_between_the_select_and_the_read_is_still_reported(self):
+        assert self.select_found(self.select_file(self.F1_PAIR)) == self.REPORTED
+
+    @pytest.mark.parametrize("line", [
+        "    Run Keyword And Ignore Error    Click    id=go\n",
+        "    Run Keyword And Ignore Error    Get Text    ${loc}    then    value\n",
+    ])
+    def test_another_run_keyword_and_ignore_error_reports_no_select_check(self, line):
+        assert self.select_found(self.select_file(line)) == []
+
+    # The reviewer's table (rr5 probe, section A): Robot reads id=heading after the re-point.
+    REPOINTED = "    ${loc}=    Set Variable    id=heading\n"
+
+    @pytest.mark.parametrize("junk, between, found", [
+        ("", REPOINTED, []),
+        ("not_a_var    a\n...    b\n", REPOINTED, []),
+        ("${x${EMPTY}}    a\n...    b\n", REPOINTED, []),
+        ("not_a_var    a\n...    b\n", "", REPORTED),
+    ])
+    def test_the_reviewers_table_reads_as_robot_reads_it(self, junk, between, found):
+        assert self.select_found(self.select_file(between, variables=self.VARIABLES + junk)) == found
+
+
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:
     """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
     `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with

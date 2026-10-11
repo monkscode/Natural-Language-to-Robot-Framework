@@ -423,8 +423,8 @@ _PRODUCTS_CHECK = "Should Contain    ${selected_option}    Products    ignore_ca
 _ANOTHER_ID_IN_ANOTHER_TEST = _two_tests(_PRODUCTS_CHECK, select="id=country", read="id=heading")
 _ANOTHER_ID_IN_ONE_TEST = _suite("Select Options By    id=country    label    India", _HEADING_READ, _HEADING_CHECK)
 
-# The comparison with the pass checker is the rule that acts here: the checker reads `${loc}` as declared (the
-# select's element), the rewrite follows the re-pointed value (another element).
+# Robot reads id=heading here. The pass checker follows the re-point too (fix round 6), so the rewrite acts and the
+# checker agrees; the refusal net below is driven by a patched checker instead.
 _REPOINTED = (
     "*** Settings ***\n"
     "Library    Browser    timeout=30s\n"
@@ -541,8 +541,10 @@ class TestTheSelectsOfTheWholeFile:
 
 class TestTheRewriteNeverChangesWhatThePassCheckerReports:
     def test_a_select_read_only_the_checker_sees_leaves_the_file_alone(self, caplog):
-        assert SELECT_CHECK_CANNOT_FAIL in hollow_shapes(_REPOINTED, QUERY)  # the precondition: the checker reports it
-        with caplog.at_level(logging.INFO, logger=LOGGER):
+        def checker(code, query):   # reports the select check on the input, nothing on the rewritten text
+            return [pass_quality.Finding(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")] if code == _REPOINTED else []
+        with patch.object(normalizer, "check_pass_quality", side_effect=checker), \
+                caplog.at_level(logging.INFO, logger=LOGGER):
             out = rewrite_text_checks_whole_word(_REPOINTED)
         assert out == _REPOINTED
         messages = _messages(caplog)
@@ -552,7 +554,10 @@ class TestTheRewriteNeverChangesWhatThePassCheckerReports:
         assert not any("rewrote" in m for m in messages)
 
     def test_one_info_line_says_what_would_have_changed(self, caplog):
-        with caplog.at_level(logging.INFO, logger=LOGGER):
+        def checker(code, query):   # reports the select check on the input, nothing on the rewritten text
+            return [pass_quality.Finding(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")] if code == _REPOINTED else []
+        with patch.object(normalizer, "check_pass_quality", side_effect=checker), \
+                caplog.at_level(logging.INFO, logger=LOGGER):
             rewrite_text_checks_whole_word(_REPOINTED)
         assert [r.getMessage() for r in caplog.records if r.name == LOGGER] == [
             "Text check normalizer: left 1 Should Contain line(s) unchanged — the rewrite would change what the "
@@ -560,10 +565,10 @@ class TestTheRewriteNeverChangesWhatThePassCheckerReports:
         ]
 
     def test_with_the_checker_silent_the_same_file_is_rewritten(self):
-        # The refusal above comes from the comparison, not from an earlier rule.
-        with patch.object(normalizer, "check_pass_quality", return_value=[]):
-            out = rewrite_text_checks_whole_word(_REPOINTED)
-        assert out == _REPOINTED.replace(_FLAGGED_CHECK, _OPTION_2_NEW)
+        # The refusal above comes from the comparison, not from an earlier rule. With the REAL checker: it follows the
+        # re-point (Robot reads id=heading), reports no select check, and the file is rewritten.
+        assert SELECT_CHECK_CANNOT_FAIL not in hollow_shapes(_REPOINTED, QUERY)
+        assert rewrite_text_checks_whole_word(_REPOINTED) == _REPOINTED.replace(_FLAGGED_CHECK, _OPTION_2_NEW)
 
     @pytest.mark.parametrize("query", [None, QUERY], ids=["no query", "the q08 query"])
     @pytest.mark.parametrize("source", [*_REWRITTEN_INPUTS, *_CHECKER_FILES])

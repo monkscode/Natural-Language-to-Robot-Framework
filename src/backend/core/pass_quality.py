@@ -32,7 +32,9 @@ reported and never hollow.
 - SELECT_CHECK_CANNOT_FAIL: `Select Options By  L  <attr>  V`, then `Get Text`
   on the same <select> checked with `Should Contain  <that text>  V` (or inline
   `contains V`). A whole <select>'s text lists every option, so the check passes
-  whatever is selected.
+  whatever is selected. Each locator and value is read where it is used, so a
+  locator re-pointed between the select and the read is followed; a file with a
+  step that may re-point where the checker cannot follow reports none.
 - READ_LOCATOR_IS_THE_ANSWER: a read query whose reader finds its element by a
   human-text literal (text=, has-text, aria-label, title, alt, role name) that
   the query does not contain, so the read returns the literal it searched for
@@ -231,6 +233,23 @@ _TYPE_NAMES = frozenset({
 _DICT_VARIABLE = re.compile(r"&\{[^{}]+\}(?:\[[^\[\]]*\])*")
 _REFERENCE = re.compile(r"[$@&%]\{[^{}]*\}(?:\[[^\[\]]*\])*")
 _UNESCAPED_EQUALS = re.compile(r"(?<!\\)(?:\\\\)*=")
+# The select rule (`_select_check_cannot_fail`) follows `${x}=  Set Variable  <one argument>`; any other assignment
+# leaves x a value the checker does not know, written with these private-use marks so it equals nothing else.
+_UNKNOWN = chr(0xE000)
+_REFERENCE_START = re.compile(r"[$@&%]\{")
+# Lines where the order written is not the order run (a branch may be skipped, a loop may run no time).
+_BLOCK_KEYWORDS = {"if", "else if", "else", "for", "while", "try", "except", "finally"}
+# Deny by default: what can re-point a variable or a selector where the select rule cannot follow it (Robot Framework
+# 7.4.2 BuiltIn and Browser). Compared squashed (case, spaces and `_` dropped) by the END of any cell, so a library
+# or BDD prefix (`BuiltIn.`, `Given`) and a setter behind any keyword that runs another are caught.
+_REPOINTING_KEYWORDS = ("settestvariable", "settaskvariable", "setsuitevariable", "setglobalvariable",
+                        "setlocalvariable", "importvariables", "importresource", "setselectorprefix")
+# Keywords that run a keyword named in their arguments, which may be a variable (any cell, an inline IF included).
+_RUNNING_KEYWORDS = ("repeatkeyword", "waituntilkeywordsucceeds", "registerkeywordtorunonfailure", "promiseto")
+# The keywords the select rule reads: a file's own keyword ending with one of these names (or an embedded-argument
+# name, which can match any) can change what they do.
+_SELECT_RULE_KEYWORDS = ("selectoptionsby", "gettext", "shouldcontain", "setvariable", "runkeywordandignoreerror",
+                         "waituntilkeywordsucceeds")
 
 
 @dataclass(frozen=True)
@@ -238,6 +257,8 @@ class _Statement:
     assigned: tuple[str, ...]
     keyword: str
     args: tuple[str, ...]
+    body: int = 0                   # the test or keyword body the statement is in, counted from 1
+    targets: tuple[str, ...] = ()   # the assigned cells as written (`${x: str}=`)
 
 
 def _var_key(text: str) -> str:
@@ -250,6 +271,11 @@ def _var_key(text: str) -> str:
 def _keyword_key(text: str) -> str:
     name = re.sub(r"\s+", " ", text.replace("_", " ").strip().lower())
     return _LIBRARY_PREFIX.sub("", name)
+
+
+def _squash(text: str) -> str:
+    """A name as Robot compares keyword names: case, spaces and underscores dropped."""
+    return re.sub(r"[\s_]", "", text.casefold())
 
 
 def _cells(line: str) -> list[str]:
@@ -315,13 +341,41 @@ def _declare(cells: list[str], variables: dict[str, str]) -> str | None:
     return key
 
 
-def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
-    """(variables, statements of every test case and user keyword body, in order)."""
+def _unfollowable_line(section: str, raw: str, cells: list[str], after_name: bool) -> str | None:
+    """The class of a test or keyword section line the select rule cannot follow (Robot Framework 7.4.2), or None."""
+    if raw.startswith("|"):
+        return "a pipe-separated line"
+    if re.match(r" \S", raw):
+        return "a line indented by one space"            # Robot starts a new test there
+    if raw[:1] not in (" ", "\t"):                       # a name line
+        if cells[0] == "...":
+            return "a `...` line at column 0"            # it continues the step above
+        if len(cells) > 1:
+            return "a step on a name line"               # it runs first
+        if section.startswith("keyword") and ("${" in cells[0] or _squash(cells[0]).endswith(_SELECT_RULE_KEYWORDS)):
+            return "an own keyword named like one the select rule reads"
+        return None
+    if cells[0] == "..." and after_name:
+        return "a step on a name line"                   # a `...` right below the name continues it
+    if _squash(cells[0]) == "[template]":
+        return "a template"                              # its rows are arguments, not steps
+    return None
+
+
+def _parse(code: str, unread: list[str] | None = None) -> tuple[dict[str, str], list[_Statement]]:
+    """(variables, statements of every test case and user keyword body, in order).
+
+    `unread`, when given, receives the class of each line the select rule cannot follow (`_unfollowable_line`, and a
+    `Test Template` / `Task Template` setting).
+    """
+    unread = [] if unread is None else unread
     variables: dict[str, str] = {}
-    statements: list[list[str]] = []
+    statements: list[tuple[int, list[str]]] = []
     section = ""
     last: list[str] | None = None
     last_var: str | None = None
+    body = 0
+    after_name = False
     for raw in (code or "").splitlines():
         if raw.startswith("*"):
             section = raw.strip().strip("*").strip().lower()
@@ -336,11 +390,19 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
             elif last_var is not None:
                 variables[last_var] = " ".join([variables[last_var], *cells[1:]]).strip()
             continue
+        if section.startswith("setting") and _squash(cells[0]) in ("testtemplate", "tasktemplate"):
+            unread.append("a template")
         if not section.startswith(("test case", "task", "keyword")):
             continue
+        shape = _unfollowable_line(section, raw, cells, after_name)
+        if shape is not None:
+            unread.append(shape)
         if raw[:1] not in (" ", "\t"):
             last = None          # a test or keyword NAME line, not a statement
+            if cells[0] != "...":
+                body, after_name = body + 1, True
             continue
+        after_name = False
         if cells[0] == "..." and last is not None:
             last.extend(cells[1:])
             continue
@@ -350,15 +412,17 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
                 continue
             cells = cells[1:]
         last = list(cells)
-        statements.append(last)
+        statements.append((body, last))
     parsed = []
-    for cells in statements:
+    for body, cells in statements:
         assigned: list[str] = []
         i = 0
         while i < len(cells) - 1 and _ASSIGN.match(cells[i]):
-            assigned.append(_var_key(cells[i]))
+            key = _name_key(cells[i])           # a typed name `${x: str}=` assigns `${x}`
+            assigned.append(_var_key(cells[i]) if key is None else key)
             i += 1
-        parsed.append(_Statement(tuple(assigned), _keyword_key(cells[i]), tuple(cells[i + 1:])))
+        parsed.append(_Statement(tuple(assigned), _keyword_key(cells[i]), tuple(cells[i + 1:]), body,
+                                 tuple(cells[:i])))
     return variables, parsed
 
 
@@ -425,36 +489,132 @@ def _is_assertion(stmt: _Statement) -> bool:
         a.strip().lower() in _OPERATORS for a in stmt.args[:4])
 
 
-def _select_check_cannot_fail(variables: dict[str, str], stmts: list[_Statement]) -> str | None:
-    """The <select> locator a cannot-fail check reads, or None."""
+def _targets(stmt: _Statement) -> tuple[str, ...]:
+    """The cells a statement assigns: its `${x}=` cells, a FOR loop's variables, a VAR's name, an `EXCEPT … AS` name."""
+    if stmt.keyword == "for":
+        names = []
+        for arg in stmt.args:
+            if arg.strip().upper().startswith("IN"):
+                break
+            names.append(arg)
+        return tuple(names)
+    if stmt.keyword == "var":
+        return stmt.args[:1]
+    if stmt.keyword == "except":
+        return tuple(arg for before, arg in zip(stmt.args, stmt.args[1:]) if before.strip().upper() == "AS")
+    return stmt.targets
+
+
+def _is_change_wait_line(stmt: _Statement) -> bool:
+    """True for exactly the two lines `insert_change_waits` writes: they read and wait, and re-point nothing."""
+    if stmt.keyword != "run keyword and ignore error":
+        return False
+    names = [_keyword_key(arg) for arg in stmt.args[:4]]
+    return ((len(stmt.args) == 2 and names[0] == "get text")
+            or (len(stmt.args) == 7 and names[0] == "wait until keyword succeeds" and names[3] == "get text"
+                and stmt.args[5].strip() == "!="))
+
+
+def _not_followed(stmt: _Statement) -> str | None:
+    """The class of a statement that may re-point what the select rule reads where it cannot follow, or None."""
+    cells = [_squash(cell) for cell in (stmt.keyword, *stmt.args)]
+    if any(cell.endswith(_REPOINTING_KEYWORDS) for cell in cells):
+        return "a variable setter, an import or a selector prefix"
+    if not _is_change_wait_line(stmt) and any("runkeyword" in cell or cell.endswith(_RUNNING_KEYWORDS)
+                                              for cell in cells):
+        return "a keyword that runs another keyword"
+    if stmt.keyword == "var" and any(arg.strip().lower().startswith("scope=") for arg in stmt.args):
+        return "a VAR with a scope"
+    keys = [_name_key(cell) for cell in _targets(stmt)]
+    if _REFERENCE_START.match(stmt.keyword) or any(key is None or "$" in key for key in keys):
+        return "an assignment the reader cannot key"   # a nested or `$` name, an item, an unknown type
+    return None
+
+
+class _BodyValues(dict):
+    """The values a cell of one body resolves with: what the body assigned so far, else the Variables-section value as
+    Robot holds it, resolved within the section (`${loc}  ${a}` keeps a's declared value when the body re-points
+    `${a}`). Each section value is resolved once per file, when a cell first names it."""
+
+    def __init__(self, variables: dict[str, str], start: dict[str, str]):
+        super().__init__()
+        self._variables, self._start = variables, start
+
+    def get(self, key, default=None):
+        if key in self:
+            return dict.get(self, key)
+        if key not in self._variables:
+            return default
+        if key not in self._start:
+            self._start[key] = _resolve(self._variables[key], self._variables)
+        return self._start[key]
+
+
+def _assigned_value(stmt: _Statement, n: int, j: int, values: dict[str, str], in_order: bool) -> str:
+    """What the select rule knows statement n assigns to its target j: the one argument of `Set Variable`, as the
+    values stand there, in a body whose lines run in the order written; otherwise a value equal to nothing else."""
+    unknown = f"{_UNKNOWN}{n}.{j}{_UNKNOWN}"
+    if not (in_order and stmt.keyword == "set variable" and len(stmt.args) == 1 and len(stmt.targets) == 1
+            and ": " not in stmt.targets[0] and "\\" not in stmt.args[0]
+            and not stmt.args[0].strip().startswith(("@{", "&{"))):
+        return unknown
+    text, stopped = _resolve_checked(stmt.args[0], values)
+    return unknown if stopped or _REFERENCE_START.search(text) else text
+
+
+def _is_a_selected_value(value: str, selected: set[str], options: tuple[str, ...]) -> bool:
+    """True when `Should Contain` checks one of the selected values. With `ignore_case=True` the check ignores letter
+    case, so a value in another case still cannot fail."""
+    if any(a.strip() == "ignore_case=True" for a in options):
+        return value.casefold() in {s.casefold() for s in selected}
+    return value in selected
+
+
+def _select_check_cannot_fail(variables: dict[str, str], stmts: list[_Statement],
+                              unread: list[str] | None = None) -> str | None:
+    """The <select> locator a cannot-fail check reads, or None.
+
+    Each locator and value is read as it stands where it is used: the select's locator and values at the select, the
+    read's locator at the read, the checked value at the check. Every body starts from the Variables section;
+    `${x}=    Set Variable    <one argument>` sets x to that argument, in a body without IF / FOR / WHILE / TRY; any
+    other assignment of x leaves it a value the checker does not know, equal to nothing else. So a re-point between
+    the select and the read, or between the read and the check, stops the report. Deny by default: a file holding a
+    step that may re-point where this cannot follow (`_not_followed`, `_parse`'s `unread`) reports nothing.
+    """
+    if unread or any(_not_followed(stmt) for stmt in stmts):
+        return None
+    in_order = {stmt.body for stmt in stmts} - {stmt.body for stmt in stmts if stmt.keyword in _BLOCK_KEYWORDS}
     selected: dict[str, set[str]] = {}
-    read_into: dict[str, str] = {}
-    for stmt in stmts:
+    shown: dict[str, str] = {}     # the locator a finding names: the select's own cell when its value is unknown
+    start: dict[str, str] = {}
+    body, values, read_into = None, _BodyValues(variables, start), {}
+    for n, stmt in enumerate(stmts):
+        if stmt.body != body:
+            body, values, read_into = stmt.body, _BodyValues(variables, start), {}
+        read = None
         if stmt.keyword == "select options by" and len(stmt.args) >= 3:
-            locator = norm_locator(_resolve(stmt.args[0], variables))
-            selected[locator] = {_resolve(v, variables) for v in stmt.args[2:]}
+            locator = norm_locator(_resolve(stmt.args[0], values))
+            selected[locator] = {_resolve(v, values) for v in stmt.args[2:]}
+            shown[locator] = stmt.args[0].strip() if _UNKNOWN in locator else locator
         elif stmt.keyword == "get text" and stmt.args:
-            locator = norm_locator(_resolve(stmt.args[0], variables))
-            if locator not in selected:
-                continue
-            if stmt.assigned:
-                read_into[stmt.assigned[-1]] = locator
-            if (len(stmt.args) >= 3 and stmt.args[1].strip().lower() in ("contains", "*=")
-                    and _resolve(stmt.args[2], variables) in selected[locator]):
-                return locator
-        elif stmt.keyword == "should contain" and len(stmt.args) >= 2:
-            if not _VARIABLE.fullmatch(stmt.args[0].strip()):
-                continue
+            locator = norm_locator(_resolve(stmt.args[0], values))
+            if locator in selected:
+                read = locator
+                if (len(stmt.args) >= 3 and stmt.args[1].strip().lower() in ("contains", "*=")
+                        and _resolve(stmt.args[2], values) in selected[locator]):
+                    return shown[locator]
+        elif stmt.keyword == "should contain" and len(stmt.args) >= 2 and _VARIABLE.fullmatch(stmt.args[0].strip()):
             locator = read_into.get(_var_key(stmt.args[0]))
-            if locator is None:
-                continue
-            value = _resolve(stmt.args[1], variables)
-            if any(a.strip() == "ignore_case=True" for a in stmt.args[2:]):
-                # The check ignores letter case, so a value in another case still cannot fail.
-                if value.casefold() in {s.casefold() for s in selected[locator]}:
-                    return locator
-            elif value in selected[locator]:
-                return locator
+            if locator is not None and _is_a_selected_value(_resolve(stmt.args[1], values), selected[locator],
+                                                            stmt.args[2:]):
+                return shown[locator]
+        targets = _targets(stmt)
+        for j, cell in enumerate(targets):
+            key = _name_key(cell)
+            values[key] = _assigned_value(stmt, n, j, values, body in in_order)
+            read_into.pop(key, None)
+        if read is not None and targets:
+            read_into[_name_key(targets[-1])] = read
     return None
 
 
@@ -667,7 +827,8 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
     """
     query = (user_query or "").strip()
     request = _request_words(query)   # the words that can be instructions; `query` keeps the rest
-    variables, stmts = _parse(robot_code)
+    unread: list[str] = []
+    variables, stmts = _parse(robot_code, unread)
     found: dict[str, str] = {}
     is_read = bool(query) and bool(_READ_Q.search(request))
     is_verify = bool(query) and bool(_verify_words(request))
@@ -677,7 +838,7 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
         found[READ_NOT_PERFORMED] = ""
     if is_verify and not any(_is_assertion(s) for s in stmts):
         found[VERIFY_WITHOUT_ASSERTION] = ""
-    select_locator = _select_check_cannot_fail(variables, stmts)
+    select_locator = _select_check_cannot_fail(variables, stmts, unread)
     if select_locator is not None:
         found[SELECT_CHECK_CANNOT_FAIL] = select_locator
     if is_read:
