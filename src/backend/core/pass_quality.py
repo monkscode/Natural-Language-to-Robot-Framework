@@ -197,7 +197,7 @@ _ID_FORMS = tuple(re.compile(p) for p in (
     r"xpath=//select\[@id=['\"]([\w-]+)['\"]\]",
 ))
 _ASSIGN = re.compile(r"^[$@&]\{[^}]+\}\s*=?$")
-_VARIABLE = re.compile(r"[$@&%]\{([^}]+)\}")
+_VARIABLE = re.compile(r"[$@&%]\{([^{}]+)\}")
 # Python's variable syntax inside an expression: `len($books) == 20`.
 _PYTHON_VARIABLE = re.compile(r"\$(\w+)")
 # A whole number: "== 20", "${20}" and "20." hold 20; "1920", "20.5", "20,000",
@@ -238,6 +238,13 @@ def _cells(line: str) -> list[str]:
     return cells
 
 
+def _declared_name(cell: str, variables: dict[str, str]) -> str:
+    """A Variables-section name with the variables inside it resolved from those declared above it, as Robot does:
+    with b = x, `${p${b}}` declares `${px}`; a name naming a variable not declared above declares nothing."""
+    m = re.fullmatch(r"([$@&%]\{)(.+)(\}\s*=?)", cell)
+    return m.group(1) + _resolve(m.group(2), variables) + m.group(3) if m else cell
+
+
 def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
     """(variables, statements of every test case and user keyword body, in order)."""
     variables: dict[str, str] = {}
@@ -256,8 +263,8 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
         if section.startswith("variable"):
             if cells[0] == "..." and last_var is not None:
                 variables[last_var] = " ".join([variables[last_var], *cells[1:]]).strip()
-            elif _VARIABLE.match(cells[0]):
-                last_var = _var_key(cells[0])
+            elif _VARIABLE.match(name := _declared_name(cells[0], variables)):
+                last_var = _var_key(name)
                 variables[last_var] = " ".join(cells[1:])
             continue
         if not section.startswith(("test case", "task", "keyword")):

@@ -936,6 +936,46 @@ class TestVariableExpansionIsBounded:
         assert len(found[0].detail) <= pass_quality._RESOLVE_LIMIT
 
 
+class TestTheVariableScanIsLinear:
+    """A run of `${` that never closes: the scan read on from every `${` to the next `}` or the end, so its time grew
+    with the square of the run. A name holds no `{` now, so each start stops at the next one.
+
+    Never more than 9,980 unclosed `${` in one value here. The values Robot gives were executed in the runner image
+    (Robot Framework 7.4.2).
+    """
+
+    @pytest.mark.parametrize("opened", [4_995, 9_980])
+    def test_an_unclosed_run_resolves_in_under_half_a_second(self, opened):
+        # 4,995: a 9,994-char value substituted on every pass (2.4 s with the old scan). 9,980: over the bound at once.
+        variables = {"a": "${a}" + "${" * opened}
+        start = time.perf_counter()
+        pass_quality._resolve("${a}", variables)
+        assert time.perf_counter() - start < 0.5
+
+    def test_a_nested_reference_resolves_from_the_inside_out(self):
+        # Robot resolves `${b}` first: with b = x, `${a${b}}` reads `${ax}`.
+        assert pass_quality._resolve("${a${b}}", {"b": "x", "ax": "Products"}) == "Products"
+
+    def test_a_nested_name_in_the_variables_section_is_declared_as_robot_resolves_it(self):
+        # Robot resolves a declared name with the variables declared above it; one declared below is an error.
+        variables, _ = pass_quality._parse("*** Variables ***\n${b}    x\n${p${b}}    v\n${q${c}}    w\n${c}    y\n")
+        assert variables == {"b": "x", "px": "v", "c": "y"}
+
+    def test_an_inline_python_cell_uses_the_variable_it_names(self):
+        # `${{ $count + 1 }}` is a Python expression that reads `${count}`, not a variable named `{ $count + 1 `.
+        assert pass_quality._used_variables(("${{ $count + 1 }}",)) == {"count"}
+
+    def test_an_item_access_uses_the_variable_before_the_brackets(self):
+        assert pass_quality._used_variables(("${books}[0]",)) == {"books"}
+
+    def test_an_environment_variable_names_one_element_for_both_steps(self):
+        # Robot reads %{DROPDOWN} from the environment for both steps: one element, so the check cannot fail.
+        code = robot("", "    Select Options By    %{DROPDOWN}    label    Option 2\n"
+                         "    Get Text    %{DROPDOWN}    contains    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "%{DROPDOWN}")]
+
+
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:
     """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
     `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with

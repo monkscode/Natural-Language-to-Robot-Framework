@@ -12,6 +12,7 @@ file (`_suite(_READ, _CHECK)`) IS rewritten, and the guard cases carry their own
 
 import logging
 import re
+import time
 import warnings
 from unittest.mock import patch
 
@@ -596,3 +597,18 @@ class TestTheRewriteNeverChangesWhatThePassCheckerReports:
             out = rewrite_text_checks_whole_word(code)
         assert "Should Match Regexp" in out  # no select: the checker was asked and reports nothing either way
         assert returned and max(len(value) for value in returned) <= pass_quality._RESOLVE_LIMIT
+
+    def test_an_unclosed_run_in_a_value_is_scanned_in_linear_time(self):
+        # The reviewer's 5,209-character file (one self-reference and 2,495 `${` that never close): the checker's
+        # scan read on from every `${` to the end of the text, 1.09 s on this path.
+        value = "${a}" + "${" * 2_495
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n*** Variables ***\n${a}    " + value + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${v}=    Get Text    ${a}\n"
+                "    Should Contain    ${v}    Example    ignore_case=True\n")
+        assert len(code) == 5_209
+        start = time.perf_counter()
+        out = rewrite_text_checks_whole_word(code)
+        assert time.perf_counter() - start < 0.5
+        assert "Should Match Regexp" in out

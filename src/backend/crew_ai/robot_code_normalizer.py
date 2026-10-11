@@ -1499,7 +1499,8 @@ def _text_check_rewrites(suite: _Suite) -> dict[int, str]:
 def _pass_checker_would_differ(robot_code: str, suite: _Suite, rewrites: dict[int, str]) -> bool:
     """True, with one INFO line, when the pass checker would report the rewritten file differently.
 
-    The checker pools the statements of every test and user-keyword body; the rewrite follows one test. A
+    The checker pools the statements of every test and user-keyword body and reads each variable as declared; the
+    rewrite reads the selects of the whole file but follows a read and its check inside one test. A
     cannot-fail select check the checker sees through a select elsewhere in the file would stop being reported
     once its `Should Contain` is gone. Compared without the query, which is not available here: the checker's
     query-free rules, the select check among them (its one rule keyed on the keyword name `should contain`).
@@ -1565,7 +1566,8 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     rewrite would change what the pass checker reports (a cannot-fail select check only the checker reports:
     it reads a variable as declared where the reader follows a `Set Variable`; one INFO
     line, `signal: text-check-refused`). Residual: a non-ASCII letter next to the words counts as a boundary
-    (`Active` matches inside `éActive`); a select and its read under two spellings neither rule equates.
+    (`Active` matches inside `éActive`); a select and its read under two spellings neither rule equates; a select
+    whose keyword name the file never spells (`Select${SPACE}Options${SPACE}By` built at run time, `ſ` for `s`).
     Idempotent: a rewritten line is no longer `Should Contain`.
     """
     if not robot_code:
