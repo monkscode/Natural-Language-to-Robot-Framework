@@ -421,6 +421,9 @@ class TestStateVerificationHandling:
         assert merged[0]["parent_classes"] == "form-group has-error"
 
 
+# The block's exact text is pinned on purpose. Every wording of it was measured with a
+# planner probe before it shipped (an earlier wording changed the plan of requests it
+# does not name), so an edit must fail here first and be probed again.
 NAMED_TEXT_CHECK_BLOCK = """
 --- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
 This rule is ONLY for the visibility words "is displayed / visible / shown /
