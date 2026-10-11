@@ -1019,6 +1019,82 @@ class TestAValueTheBoundStopsIsNotRead:
         assert pass_quality._resolve_checked("${b}", fan_out) == ("${a}" * 50, True)
 
 
+class TestTheVariablesSectionIsReadAsRobotReadsIt:
+    """The Variables section as Robot 7.4.2 reads it (executed in the runner image): a `...` line continues its own
+    declaration, never an earlier one; the FIRST declaration of a name wins, and a later one is skipped with its
+    continuation (no error is logged); a declared `${{ … }}` name returns its declared value, not the Python result.
+    """
+
+    COUNT_QUERY = "Go to https://x, get the titles of all books and verify there are 20 books"
+    READ_QUERY = "Go to https://x and get the page heading"
+    HEAD = "*** Settings ***\nLibrary    Browser    timeout=30s\n\n*** Variables ***\n"
+
+    @classmethod
+    def count_file(cls, variables: str, check: str) -> str:
+        return (cls.HEAD + variables + "\n*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    " + check + "\n")
+
+    @classmethod
+    def read_file(cls, variables: str, locator: str = "${title}") -> str:
+        return (cls.HEAD + variables + "\n*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${heading}=    Get Text    " + locator + "\n")
+
+    @pytest.mark.parametrize("variables", [
+        '${title}    css=h1\n${x${EMPTY}}    a\n...    text="Welcome back"\n',
+        '${title}    css=h1\n${q${later}}    a\n...    text="Welcome back"\n${later}    y\n',
+    ])
+    def test_a_continuation_after_a_name_the_checker_does_not_declare_joins_no_earlier_variable(self, variables):
+        # Robot: ${title} = css=h1. The checker declares neither nested name, so it drops their continuation.
+        assert check_pass_quality(self.read_file(variables), self.READ_QUERY) == []
+
+    def test_a_continuation_after_a_declared_name_still_joins_it(self):
+        # The control: Robot reads ${title} = css=h1 and ${x} = `a text="Welcome back"`.
+        code = self.read_file('${title}    css=h1\n${x}    a\n...    text="Welcome back"\n')
+        assert check_pass_quality(code, self.READ_QUERY) == []
+        assert pass_quality._parse(code)[0] == {"title": "css=h1", "x": 'a text="Welcome back"'}
+
+    def test_a_select_value_above_such_a_continuation_keeps_its_value(self):
+        code = (self.HEAD + "${opt}    Option 2\n${x${EMPTY}}    a\n...    b\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    id=dropdown    label    ${opt}\n"
+                "    ${v}=    Get Text    id=dropdown\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    @pytest.mark.parametrize("variables", [
+        "${ed}    ed\n${expected}    20\n${expect${ed}}    5\n",   # `${expect${ed}}` declares `${expected}` again
+        "${expected}    20\n${expected}    5\n",
+    ])
+    def test_the_first_declaration_of_a_name_wins(self, variables):
+        code = self.count_file(variables, "Should Be Equal As Integers    ${count}    ${expected}")
+        assert READ_NOT_PERFORMED not in shapes(code, self.COUNT_QUERY)
+
+    def test_a_later_declaration_is_skipped_with_its_continuation(self):
+        variables, _ = pass_quality._parse("*** Variables ***\n${expected}    20\n${expected}    5\n...    6\n")
+        assert variables == {"expected": "20"}
+
+    def test_a_declared_inline_python_name_in_the_count_assertion_is_not_read_as_python(self):
+        # Robot: the declared `${{ 1 + 1 }}` returns 20, so the count is compared with 20.
+        code = self.count_file("${{ 1 + 1 }}    20\n", "Should Be Equal As Integers    ${count}    ${{ 1 + 1 }}")
+        assert READ_NOT_PERFORMED not in shapes(code, self.COUNT_QUERY)
+
+    def test_a_declared_inline_python_name_in_a_read_locator_is_not_read_as_the_answer(self):
+        # Robot reads text="Welcome back", which the query names.
+        code = self.read_file("${{ 'w' }}    Welcome back\n", "text=\"${{ 'w' }}\"")
+        assert check_pass_quality(code, "Go to https://x and get the Welcome back heading") == []
+
+    @pytest.mark.parametrize("check, found", [
+        ("Should Be Equal As Integers    ${count}    ${{ 20 }}", []),             # Python's 20 is compared
+        ("Should Be True    ${{ $count > 0 }}", [READ_NOT_PERFORMED]),              # 20 is never compared
+    ])
+    def test_an_inline_python_cell_reads_as_before_in_a_file_that_declares_no_such_name(self, check, found):
+        # The same answers on develop (f84d713) and 574f060: only a file that declares a `${{ … }}` name changes.
+        assert [f.shape for f in check_pass_quality(self.count_file("", check), self.COUNT_QUERY)] == found
+
+
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:
     """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
     `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with

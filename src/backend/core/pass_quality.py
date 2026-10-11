@@ -208,6 +208,11 @@ _CELL_SPLIT = re.compile(r"\s{2,}|\t")
 _LIBRARY_PREFIX = re.compile(r"^(browser|builtin|collections|string)\.")
 _KEYWORD_SETTINGS = ("[setup]", "[teardown]")
 _RESOLVE_LIMIT = 10_000  # the most characters one pass of _resolve may substitute before it is abandoned
+# A Variables-section name in the inline-Python form: Robot returns its declared value for a later `${{ … }}` of that
+# name, so in such a file a `${{` left after resolution may be the name, not an expression. `_parse` records it under
+# a key no Robot name can produce (a declared name's key never holds a brace).
+_INLINE_PYTHON_DECLARATION = re.compile(r"[$@&%]\{\{.*\}\}\s*=?")
+_INLINE_PYTHON_NAME = "{{"
 
 
 @dataclass(frozen=True)
@@ -245,6 +250,25 @@ def _declared_name(cell: str, variables: dict[str, str]) -> str:
     return m.group(1) + _resolve(m.group(2), variables) + m.group(3) if m else cell
 
 
+def _declare(cells: list[str], variables: dict[str, str]) -> str | None:
+    """Record one Variables-section line as Robot does; return the key its `...` lines continue, or None.
+
+    The FIRST declaration of a name wins: a later one is skipped, and so are its `...` lines. A line that records no
+    name continues nothing (Robot keeps a `...` line with its own declaration). A `${{ … }}` name is recorded under
+    `_INLINE_PYTHON_NAME`.
+    """
+    name = _declared_name(cells[0], variables)
+    if _VARIABLE.match(name):
+        key = _var_key(name)
+        if key in variables:
+            return None
+        variables[key] = " ".join(cells[1:])
+        return key
+    if _INLINE_PYTHON_DECLARATION.fullmatch(name):
+        variables[_INLINE_PYTHON_NAME] = ""
+    return None
+
+
 def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
     """(variables, statements of every test case and user keyword body, in order)."""
     variables: dict[str, str] = {}
@@ -261,11 +285,10 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
         if not cells:
             continue
         if section.startswith("variable"):
-            if cells[0] == "..." and last_var is not None:
+            if cells[0] != "...":
+                last_var = _declare(cells, variables)
+            elif last_var is not None:
                 variables[last_var] = " ".join([variables[last_var], *cells[1:]]).strip()
-            elif _VARIABLE.match(name := _declared_name(cells[0], variables)):
-                last_var = _var_key(name)
-                variables[last_var] = " ".join(cells[1:])
             continue
         if not section.startswith(("test case", "task", "keyword")):
             continue
@@ -323,6 +346,12 @@ def _resolve(text: str, variables: dict[str, str]) -> str:
     copies, and the text-check rewrite runs this checker while a test is generated.
     """
     return _resolve_checked(text, variables)[0]
+
+
+def _not_read(text: str, stopped: bool, variables: dict[str, str]) -> bool:
+    """True when a resolved value is not read: the bound stopped it, or it keeps a `${{` in a file that declares a
+    `${{ … }}` name (that text may be the declared name, not a Python expression)."""
+    return stopped or (_INLINE_PYTHON_NAME in variables and "${{" in text)
 
 
 def norm_locator(locator: str) -> str:
@@ -540,8 +569,9 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
     (`Wait For Elements State  xpath=(//li)[20]  visible`) checks no count. A
     variable assigned in the test body is never replaced by its declared start
     value: `${n}    0` under Variables is not what `${n} < 5` compares. Each
-    argument is resolved on its own, and a value the bound stops is not read;
-    the rule reports nothing rather than guess.
+    argument is resolved on its own, and a value the bound stops is not read,
+    nor a `${{` left in a file that declares a `${{ … }}` name; the rule
+    reports nothing rather than guess.
     """
     if not _asks_for_a_whole_collection(query):
         return False
@@ -558,7 +588,7 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
         # A counting keyword's first argument is what it counts, never the number expected.
         if _is_assertion(stmt):
             resolved = [_resolve_checked(arg, declared) for arg in (stmt.args[1:] if counter else stmt.args)]
-            if (any(stopped for _, stopped in resolved)
+            if (any(_not_read(text, stopped, declared) for text, stopped in resolved)
                     or wanted & _whole_numbers("  ".join(text for text, _ in resolved))):
                 return True
         counts.update(stmt.assigned)
@@ -587,12 +617,13 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
     if select_locator is not None:
         found[SELECT_CHECK_CANNOT_FAIL] = select_locator
     if is_read:
-        # A value the bound stops is not read; the rule reports nothing rather than guess.
+        # A value the bound stops is not read (nor a `${{` that may be a declared name); the rule reports nothing
+        # rather than guess.
         for stmt in stmts:
             if stmt.keyword not in _LOCATOR_READERS or not stmt.args:
                 continue
             locator, stopped = _resolve_checked(stmt.args[0], variables)
-            if stopped:
+            if _not_read(locator, stopped, variables):
                 continue
             literals = _answer_literals(stmt, locator, query)
             if literals:
