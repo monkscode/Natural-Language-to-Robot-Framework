@@ -293,13 +293,8 @@ def _parse(code: str) -> tuple[dict[str, str], list[_Statement]]:
     return variables, parsed
 
 
-def _resolve(text: str, variables: dict[str, str]) -> str:
-    """`text`, stripped, with its variables replaced by their values in up to five passes (a value may name another).
-
-    A pass is abandoned as soon as the values it substitutes add up to more than `_RESOLVE_LIMIT` characters, and
-    the text as it stood before that pass is returned: a variable that names itself k times would grow to k**5
-    copies, and the text-check rewrite runs this checker while a test is generated.
-    """
+def _resolve_checked(text: str, variables: dict[str, str]) -> tuple[str, bool]:
+    """What `_resolve` returns, and True when the bound abandoned one of its passes."""
     for _ in range(5):
         parts: list[str] = []
         substituted = 0
@@ -310,14 +305,24 @@ def _resolve(text: str, variables: dict[str, str]) -> str:
                 continue
             substituted += len(value)
             if substituted > _RESOLVE_LIMIT:
-                return text.strip()
+                return text.strip(), True
             parts += [text[end:m.start()], value]
             end = m.end()
         new = "".join(parts) + text[end:]
         if new == text:
-            return new.strip()
+            return new.strip(), False
         text = new
-    return text.strip()
+    return text.strip(), False
+
+
+def _resolve(text: str, variables: dict[str, str]) -> str:
+    """`text`, stripped, with its variables replaced by their values in up to five passes (a value may name another).
+
+    A pass is abandoned as soon as the values it substitutes add up to more than `_RESOLVE_LIMIT` characters, and
+    the text as it stood before that pass is returned: a variable that names itself k times would grow to k**5
+    copies, and the text-check rewrite runs this checker while a test is generated.
+    """
+    return _resolve_checked(text, variables)[0]
 
 
 def norm_locator(locator: str) -> str:
@@ -534,7 +539,9 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
     through a keyword fed by one). An assertion that merely holds the number
     (`Wait For Elements State  xpath=(//li)[20]  visible`) checks no count. A
     variable assigned in the test body is never replaced by its declared start
-    value: `${n}    0` under Variables is not what `${n} < 5` compares.
+    value: `${n}    0` under Variables is not what `${n} < 5` compares. Each
+    argument is resolved on its own, and a value the bound stops is not read;
+    the rule reports nothing rather than guess.
     """
     if not _asks_for_a_whole_collection(query):
         return False
@@ -549,9 +556,11 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
         if not counter and not counts & _used_variables(stmt.args):
             continue
         # A counting keyword's first argument is what it counts, never the number expected.
-        compared = "  ".join(stmt.args[1:] if counter else stmt.args)
-        if _is_assertion(stmt) and wanted & _whole_numbers(_resolve(compared, declared)):
-            return True
+        if _is_assertion(stmt):
+            resolved = [_resolve_checked(arg, declared) for arg in (stmt.args[1:] if counter else stmt.args)]
+            if (any(stopped for _, stopped in resolved)
+                    or wanted & _whole_numbers("  ".join(text for text, _ in resolved))):
+                return True
         counts.update(stmt.assigned)
     return False
 
@@ -578,10 +587,13 @@ def check_pass_quality(robot_code: str, user_query: str | None) -> list[Finding]
     if select_locator is not None:
         found[SELECT_CHECK_CANNOT_FAIL] = select_locator
     if is_read:
+        # A value the bound stops is not read; the rule reports nothing rather than guess.
         for stmt in stmts:
             if stmt.keyword not in _LOCATOR_READERS or not stmt.args:
                 continue
-            locator = _resolve(stmt.args[0], variables)
+            locator, stopped = _resolve_checked(stmt.args[0], variables)
+            if stopped:
+                continue
             literals = _answer_literals(stmt, locator, query)
             if literals:
                 found.setdefault(READ_LOCATOR_IS_THE_ANSWER, literals[0][:40])

@@ -976,6 +976,49 @@ class TestTheVariableScanIsLinear:
         assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "%{DROPDOWN}")]
 
 
+class TestAValueTheBoundStopsIsNotRead:
+    """A resolution the bound stops returns text that still holds references. The count and read-locator rules do
+    not read that text as resolved: they report nothing rather than guess (the files of review_probes/rr3_probe.py).
+    """
+
+    COUNT_QUERY = "Go to https://x, get the titles of all books and verify there are 20 books"
+    READ_QUERY = "Go to https://x and get the page heading"
+
+    @staticmethod
+    def count_file(pad: int) -> str:
+        return ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${expected}    20\n${pad}    " + "x" * pad + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}\n")
+
+    @pytest.mark.parametrize("pad", [9_000, 10_001])
+    def test_a_long_sibling_argument_hides_no_count(self, pad):
+        assert check_pass_quality(self.count_file(pad), self.COUNT_QUERY) == []
+
+    def test_a_count_inside_a_value_the_bound_stops_is_not_reported_missing(self):
+        # Robot puts the value into the expression: `5 == 20 #xxx…` compares the count with 20 (`#` starts a comment).
+        code = books("    ${count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be True    ${count} == ${expected}\n",
+                     "${expected}    20 #" + "x" * 10_000 + "\n")
+        assert READ_NOT_PERFORMED not in shapes(code, Q10)
+
+    @pytest.mark.parametrize("size, flagged", [(9_000, True), (10_001, False)])
+    def test_a_read_locator_the_bound_stops_is_not_read_as_the_answer(self, size, flagged):
+        code = robot("${title}    " + "x" * size + "\n",
+                     "    New Page    https://x\n"
+                     "    ${heading}=    Get Text    text=\"${title}\"\n")
+        assert (READ_LOCATOR_IS_THE_ANSWER in shapes(code, self.READ_QUERY)) is flagged
+
+    def test_resolve_checked_says_when_the_bound_stopped_a_pass(self):
+        small = {"url": "https://example.com", "page": "${url}/login", "loc": "css=a[href='${page}']"}
+        for text in ("${loc}", "  css=h1  "):
+            assert pass_quality._resolve_checked(text, small) == (pass_quality._resolve(text, small), False)
+        fan_out = {"a": "x" * 6000, "b": "${a}" * 50}
+        assert pass_quality._resolve_checked("${b}", fan_out) == ("${a}" * 50, True)
+
+
 class TestTheChangeWaitPairDoesNotMoveTheAnswer:
     """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
     `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with
