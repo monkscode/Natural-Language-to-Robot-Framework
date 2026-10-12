@@ -48,6 +48,10 @@ WORKDIR /app
 # preceding action changed, so the generated test waits for that change before
 # reading (1.0.42 alone read a stale value after a background refresh, so it was
 # never deployed); runtime dependencies identical.
+# Bumped 1.0.43 -> 1.0.44 on 2026-10-12: a collection request the agent flags
+# but gives no expected text for now gets the item container, found by walking
+# up from the element the agent indexed (it got a one-item xpath, so a generated
+# count read 1 where the page holds 20); runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -80,7 +84,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.43 && \
+    browser-service==1.0.44 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
