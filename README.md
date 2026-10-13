@@ -96,8 +96,8 @@ cp .env.example .env                              # root: Docker image tags
 cp src/backend/.env.example src/backend/.env      # backend: Vertex AI + settings
 ```
 
-The **root `.env`** needs no edits — it already points all four image tags at the
-published `-develop` builds:
+The **root `.env`** needs one line — a database password (see **Database password**
+below). It already points all four image tags at the published `-develop` builds:
 
 ```env
 FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-develop
@@ -108,6 +108,28 @@ FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-develop
 
 If you do change them, change all four to the **same** suffix — a mixed set is the
 usual cause of odd boot and login errors after an update.
+
+**Database password.** Compose refuses to start without `POSTGRES_PASSWORD` in the
+root `.env`; there is no default, because a test a user pastes and runs can reach the
+database port from its container. Add one now (hex only — it sits inside a connection
+URL):
+
+```bash
+echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env
+```
+
+If you run the backend or the tests from the host, put the same value in the
+`DATABASE_URL` of `src/backend/.env`.
+
+*Existing install?* Postgres reads this variable only when its data volume is first
+created, so setting it now would not change the live password and the app would fail
+to log in. Change the live password first, then set the same value in the root `.env`
+(and in `DATABASE_URL` of `src/backend/.env` if the backend or the tests run from the
+host), then `docker compose up -d`:
+
+```bash
+docker exec nlrf-postgres psql -U nlrf -d nlrf -c "ALTER USER nlrf PASSWORD '<new>'"
+```
 
 In **`src/backend/.env`**, set the Vertex AI project and location, and add your own
 email as an admin:
@@ -120,7 +142,7 @@ ONLINE_MODEL=gemini-3.8-flash
 ADMIN_EMAILS=you@example.com
 ```
 
-Those three — project, location and admin email — are the only values you must change;
+Those three — project, location and admin email — are the only values you must change in this file;
 everything below is background on what they mean.
 
 - **`JWT_SECRET_KEY`** — leave it alone. It ships commented out, and on first start the
@@ -137,7 +159,7 @@ everything below is background on what they mean.
 - **`VERTEXAI_LOCATION`** — where Vertex AI serves requests. Use `global` (recommended) unless your data must stay in one region: Google routes each global request to a region with capacity, so fewer runs fail with 429, but global gives no data-residency guarantee. Otherwise pick a region that offers `ONLINE_MODEL`, such as `asia-south1` (Mumbai).
 - **`VERTEXAI_CREDENTIALS`** — already defaults to `credentials.json`; leave it as is. When running in Docker, `docker-compose.vertex.yml` rewrites it to the in-container path automatically.
 
-Everything else has sensible defaults. The database, internal service URLs, and inter-container networking are wired up automatically by Docker Compose — you don't need to touch them.
+Everything else has sensible defaults. The internal service URLs and inter-container networking are wired up automatically by Docker Compose — you don't need to touch them.
 
 ### 4. Start everything
 
