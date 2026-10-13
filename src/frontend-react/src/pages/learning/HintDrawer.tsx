@@ -202,7 +202,7 @@ export default function HintDrawer({ id, onChanged, onClose }: {
   })
   const lifecycle = (action: 'unflag' | 'retract' | 'reactivate') => {
     if (action === 'retract' && !window.confirm('Retract this hint? It will stop injecting into agent prompts.')) return
-    call('POST', `/api/learning/hints/${id}/${action}`, { actor, reason: 'via admin dashboard' })
+    void call('POST', `/api/learning/hints/${id}/${action}`, { actor, reason: 'via admin dashboard' })
   }
 
   const status = !h ? null

@@ -549,7 +549,7 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
   useEffect(() => {
     if (prevStatus.current !== listStatus) {
       prevStatus.current = listStatus
-      reload()
+      void reload()
     }
   }, [listStatus, reload])
 

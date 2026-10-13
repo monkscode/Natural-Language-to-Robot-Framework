@@ -76,7 +76,7 @@ export function useFetch<T = unknown>(path: string | null) {
   }, [path])
 
   useEffect(() => {
-    reload()
+    void reload()
   }, [reload])
 
   return { data, loading, error, reload }

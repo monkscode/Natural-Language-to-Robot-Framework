@@ -88,7 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
-    hydrate()
+    void hydrate()
   }, [])
 
   async function login(email: string, password: string) {

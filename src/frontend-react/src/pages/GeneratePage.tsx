@@ -1397,7 +1397,7 @@ export default function GeneratePage() {
                   // never gets anything to fire on.
                   onKeyDown={e => {
                     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && code.trim()) {
-                      e.preventDefault(); handleRun()
+                      e.preventDefault(); void handleRun()
                     }
                   }}
                 />
