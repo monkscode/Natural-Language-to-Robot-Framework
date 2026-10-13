@@ -7,6 +7,10 @@ Depends on: a live PostgreSQL container named nlrf-postgres, holding the app
             runs the role script via `docker exec nlrf-postgres psql`.
 
 The whole module skips when that container is absent, which is the case in CI.
+It also skips when GRAFANA_DB_PASSWORD is not exported: the role script runs
+`ALTER ROLE grafana_ro ... PASSWORD` on the live cluster, so the module never
+runs with a made-up password — that would reset the live role (and break
+Grafana's datasource) to whatever the test invented.
 Two things make the dependency unavoidable rather than lazy. The script uses
 `\\gexec`, a psql META-command that no driver can execute, so it has to run
 through a psql binary or not be under test at all. And it grants on seven app
@@ -45,10 +49,16 @@ def _stack_postgres_is_running() -> bool:
     return "nlrf-postgres" in result.stdout.split()
 
 
-pytestmark = pytest.mark.skipif(
-    not _stack_postgres_is_running(),
-    reason="needs the local stack: a running nlrf-postgres container holding the app schema",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not _stack_postgres_is_running(),
+        reason="needs the local stack: a running nlrf-postgres container holding the app schema",
+    ),
+    pytest.mark.skipif(
+        not os.environ.get("GRAFANA_DB_PASSWORD"),
+        reason="export GRAFANA_DB_PASSWORD (the value in the root .env) to run these: the role script sets the LIVE role's password",
+    ),
+]
 
 GRANTED_TABLES = (
     "workflow_metrics",
@@ -64,13 +74,13 @@ SCRIPT = "observability/postgres/create_readonly_role.sql"
 
 
 def _ro_dsn() -> str:
-    password = os.environ.get("GRAFANA_DB_PASSWORD", "grafana_ro")
+    password = os.environ["GRAFANA_DB_PASSWORD"]
     return f"postgresql://grafana_ro:{password}@127.0.0.1:5432/nlrf"
 
 
 def _apply_script() -> subprocess.CompletedProcess:
     """Run the role script through the postgres container, as the app user."""
-    password = os.environ.get("GRAFANA_DB_PASSWORD", "grafana_ro")
+    password = os.environ["GRAFANA_DB_PASSWORD"]
     with open(SCRIPT, encoding="utf-8") as fh:
         sql = fh.read()
     return subprocess.run(

@@ -403,6 +403,21 @@ def test_grafana_db_init_refuses_to_run_without_a_password():
     assert "grafana_password=${GRAFANA_DB_PASSWORD:-}" in str(service["command"])
 
 
+def test_the_live_role_test_names_no_fallback_password():
+    # test_readonly_role.py runs the role script, whose ALTER ROLE sets the LIVE
+    # role's password, against a running nlrf-postgres. With a default here, a
+    # plain local pytest run with the variable unset resets the role to that
+    # published value and breaks Grafana's datasource. It is skipped in CI, so
+    # this static guard is what runs there.
+    text = Path("tests/test_observability/test_readonly_role.py").read_text(encoding="utf-8")
+
+    defaults = re.findall(
+        r"""(?:environ\.get|getenv)\(\s*["']GRAFANA_DB_PASSWORD["']\s*,[^)]*\)""", text)
+    assert not defaults, (
+        f"{defaults} give the role a made-up password; the module must take "
+        f"GRAFANA_DB_PASSWORD from the environment only and skip when it is unset")
+
+
 def test_env_example_names_every_required_password():
     lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
     assert not any(line.startswith("POSTGRES_PASSWORD=") for line in lines), (
