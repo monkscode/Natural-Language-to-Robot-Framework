@@ -19,8 +19,12 @@ not the only one.
 > **Set two passwords first.** Put `GRAFANA_ADMIN_PASSWORD` and
 > `GRAFANA_DB_PASSWORD` in the root `.env`, next to `docker-compose.yml` (generate
 > each with `openssl rand -hex 24`). Nothing falls back to a default. With either
-> one empty the profile stops with a single line naming it, for example
-> `GRAFANA_ADMIN_PASSWORD is empty - set it in the root .env`. The read-only role
+> one empty the matching service does not start and prints one line naming the
+> variable, for example `GRAFANA_ADMIN_PASSWORD is empty - set it in the root .env`.
+> Read it with `docker logs nlrf-grafana-db-init` (the database password; `docker
+> compose up` itself only reports that the init service did not complete) or
+> `docker logs nlrf-grafana` (the admin password; that container restarts and prints
+> the line each time until the value is set). The read-only role
 > `grafana_ro` follows `GRAFANA_DB_PASSWORD` on the next profile start, so on an
 > existing install setting the variable is enough. A Grafana volume created earlier
 > keeps its OLD admin password; reset it with

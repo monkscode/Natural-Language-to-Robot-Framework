@@ -125,10 +125,23 @@ If you run the backend or the tests from the host, put the same value in the
 created, so setting it now would not change the live password and the app would fail
 to log in. Change the live password first, then set the same value in the root `.env`
 (and in `DATABASE_URL` of `src/backend/.env` if the backend or the tests run from the
-host), then `docker compose up -d`:
+host), then start the stack again with the same command you start it with (step 4):
 
 ```bash
 docker exec nlrf-postgres psql -U nlrf -d nlrf -c "ALTER USER nlrf PASSWORD '<new>'"
+```
+
+If the observability profile (Grafana) was ever started on this database, three old
+values are still live: the read-only role `grafana_ro` keeps its old published
+password, Grafana's `admin` keeps its old one, and a running Loki container keeps its
+host port. They change only when the profile is started again with its two passwords
+set — follow "Set two passwords first" in
+[docs/OBSERVABILITY_GRAFANA.md](docs/OBSERVABILITY_GRAFANA.md), then start the profile
+again. If you no longer use the profile, close the role instead (the profile's init job
+turns login back on with the new password if it is ever started again):
+
+```bash
+docker exec nlrf-postgres psql -U nlrf -d nlrf -c "ALTER ROLE grafana_ro NOLOGIN"
 ```
 
 In **`src/backend/.env`**, set the Vertex AI project and location, and add your own

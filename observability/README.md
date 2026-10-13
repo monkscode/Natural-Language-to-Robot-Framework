@@ -18,7 +18,9 @@ docker compose --profile observability up -d
 ```
 
 Grafana: <http://127.0.0.1:3001>, user `admin`, password whatever you set
-`GRAFANA_ADMIN_PASSWORD` to.
+`GRAFANA_ADMIN_PASSWORD` to. Grafana reads that variable only when it first creates
+its database, so a volume created earlier keeps its OLD admin password; reset it with
+`docker exec nlrf-grafana grafana cli admin reset-admin-password <new>`.
 
 If you also want the containerised `fastapi`/`browser-service` to be able to run a
 Vertex generation — so there is fresh data for these dashboards to show — read
