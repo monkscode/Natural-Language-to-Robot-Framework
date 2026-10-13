@@ -35,7 +35,8 @@ from src.backend.config.logging_config import (
 from src.backend.core.secret_redaction import SecretRedactingFilter
 
 ACCESS_LOGGER = "uvicorn.access"
-# uvicorn's default config gives these their own handler with propagate=False.
+# uvicorn's default config gives `uvicorn` its own handler with propagate=False;
+# `uvicorn.error` has none and propagates to it.
 UVICORN_OWN_HANDLER_LOGGERS = ("uvicorn", "uvicorn.error")
 # uvicorn's access format: '%s - "%s %s HTTP/%s" %d' with
 # (client_addr, method, path_with_query, http_version, status).
@@ -207,6 +208,31 @@ def test_a_secret_logged_on_uvicorn_error_arrives_redacted():
     assert fake_key not in out
     assert "[REDACTED]" in out
     assert "startup failed" in out
+
+
+def test_uvicorn_colour_formatter_still_fills_in_the_startup_values():
+    """On a terminal uvicorn re-renders `color_message` with the record's args.
+
+    The redaction filter drops the args after rendering, so a stale template
+    would print as 'Uvicorn running on %s://%s:%d'.
+    """
+    from uvicorn.logging import DefaultFormatter
+
+    setup_logging(log_dir=None)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(DefaultFormatter("%(levelprefix)s %(message)s", use_colors=True))
+    logger = logging.getLogger("uvicorn.error")
+    logger.addHandler(handler)
+    try:
+        template = "Uvicorn running on %s://%s:%d"
+        logger.info(template, "http", "127.0.0.1", 5000, extra={"color_message": template})
+    finally:
+        logger.removeHandler(handler)
+
+    out = stream.getvalue()
+    assert "127.0.0.1" in out
+    assert "%s" not in out
 
 
 def test_secret_redaction_still_reaches_the_only_handler():
