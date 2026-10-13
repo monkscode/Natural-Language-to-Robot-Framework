@@ -164,7 +164,7 @@ function NavUser() {
               onSelect={e => {
                 // Keep the menu open while the revoke request is in flight.
                 e.preventDefault()
-                handleLogoutAll()
+                void handleLogoutAll()
               }}
             >
               {signingOutAll ? (
