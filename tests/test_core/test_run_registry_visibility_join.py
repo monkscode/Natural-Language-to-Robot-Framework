@@ -747,13 +747,15 @@ def test_removing_one_result_from_a_folder_unfiles_every_result(reg, removed):
     tid = _test_id(admin, "run-1")
     assert _folder_of_test(admin, tid) is None
     folders = _own_folders(admin)
-    assert folders["run-1"] is None and folders["run-2"] is None
+    assert folders["run-1"] is None
+    assert folders["run-2"] is None
     assert folders["other"] == "g-1", "a different test must not move"
 
     # Through the reads a second org member uses, not only the column.
     rows, total = r.list_runs(user_id="bob", org_id="org-a",
                               folder_org_id="org-a")
-    assert [x["run_id"] for x in rows] == ["other"] and total == 1
+    assert [x["run_id"] for x in rows] == ["other"]
+    assert total == 1
     assert r.get_run_owner(sibling).group_id is None
 
 
@@ -813,8 +815,12 @@ def test_align_result_folders_repairs_only_rows_that_disagree(reg, caplog):
     logged = [x.getMessage() for x in caplog.records]
     clear = [m for m in logged if "stale-clear" in m]
     replace = [m for m in logged if "stale-replace" in m]
-    assert len(clear) == 1 and "g-1" in clear[0] and "g-2" not in clear[0]
-    assert len(replace) == 1 and "g-1" in replace[0] and "g-2" in replace[0]
+    assert len(clear) == 1
+    assert "g-1" in clear[0]
+    assert "g-2" not in clear[0]
+    assert len(replace) == 1
+    assert "g-1" in replace[0]
+    assert "g-2" in replace[0]
     assert not [m for m in logged if "own-null" in m or "no-test" in m]
     assert len([m for m in logged if "[RUN_REGISTRY]" in m]) == 2
 

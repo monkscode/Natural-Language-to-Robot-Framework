@@ -131,6 +131,9 @@ host), then start the stack again with the same command you start it with (step 
 docker exec nlrf-postgres psql -U nlrf -d nlrf -c "ALTER USER nlrf PASSWORD '<new>'"
 ```
 
+If you changed `POSTGRES_USER` or `POSTGRES_DB`, use your values in place of `nlrf` in
+these commands.
+
 If the observability profile (Grafana) was ever started on this database, three old
 values are still live: the read-only role `grafana_ro` keeps its old published
 password, Grafana's `admin` keeps its old one, and a running Loki container keeps its

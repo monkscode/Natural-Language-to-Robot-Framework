@@ -373,7 +373,8 @@ def test_postgres_password_is_required_by_compose():
     # DATABASE_URL, the postgres service and grafana-db-init's PGPASSWORD.
     assert text.count("${POSTGRES_PASSWORD:?") == 3, (
         "every use of POSTGRES_PASSWORD must refuse an empty value with a message")
-    assert "${POSTGRES_PASSWORD}" not in text and "${POSTGRES_PASSWORD:-" not in text
+    assert "${POSTGRES_PASSWORD}" not in text
+    assert "${POSTGRES_PASSWORD:-" not in text
 
 
 def test_loki_publishes_no_port_to_the_host():
@@ -386,7 +387,8 @@ def test_grafana_refuses_to_start_without_an_admin_password():
 
     assert "GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}" in service["environment"]
     wrapper = _entrypoint_text("grafana")
-    assert "GRAFANA_ADMIN_PASSWORD" in wrapper and "exit 1" in wrapper
+    assert "GRAFANA_ADMIN_PASSWORD" in wrapper
+    assert "exit 1" in wrapper
     assert "exec /run.sh" in wrapper, "the wrapper must hand over to the image's own entrypoint"
     assert "GRAFANA_DB_PASSWORD" not in wrapper, (
         "the database password is checked by grafana-db-init, which grafana waits for")
@@ -397,7 +399,8 @@ def test_grafana_db_init_refuses_to_run_without_a_password():
 
     assert "GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}" in service["environment"]
     wrapper = _entrypoint_text("grafana-db-init")
-    assert "GRAFANA_DB_PASSWORD" in wrapper and "exit 1" in wrapper
+    assert "GRAFANA_DB_PASSWORD" in wrapper
+    assert "exit 1" in wrapper
     assert "exec psql" in wrapper
     assert service["restart"] == "no"
     assert "grafana_password=${GRAFANA_DB_PASSWORD:-}" in str(service["command"])
