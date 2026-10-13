@@ -2041,9 +2041,10 @@ class RunRegistry:
 
         That SELECT reads membership through the TEST as well as off the
         run's own column, since 2026-09-07. A run whose own group_id is
-        NULL is still a member when its TEST is filed here — filing one
-        result of a test leaves its siblings in exactly that shape, and so
-        does the migration — and such a run IS returned to Ungrouped by
+        NULL is still a member when its TEST is filed here — the migration
+        leaves runs in exactly that shape, and so does every new result of
+        an already-filed test that is recorded without a folder of its own
+        (the Tests page's Run passes none) — and such a run IS returned to Ungrouped by
         this DELETE, so an audit blind to it understates the blast radius
         of a destructive org-admin action.
 
@@ -3305,8 +3306,10 @@ class RunRegistry:
         never reaches) would otherwise keep resolving through its own column
         once the test's folder is cleared, and stay published.
 
-        What keeps the cascade safe for a re-run with NO test (the only rows
-        the last statement does not reach) is ONE term: `c.group_id =
+        What keeps the cascade safe for a re-run of a named run that has NO
+        test (the only rows the last statement does not reach, since it is
+        keyed by the named runs' tests; such a re-run normally has a test of
+        its own, which record_start mints) is ONE term: `c.group_id =
         p.group_id`. Only a re-run sitting in the folder the test is leaving
         travels with it, so a re-run filed somewhere else stays there, and an
         ungrouped one stays ungrouped — SQL equality is NULL, not TRUE, when
@@ -3726,11 +3729,13 @@ class RunRegistry:
         Reads resolve a result's folder as COALESCE(test's, own column), so a
         result whose own column is set and differs from its test's names a
         folder no read shows -- or, when the test has none, a folder that
-        still PUBLISHES it. Three shapes leave that behind: rows assign_runs
+        still PUBLISHES it. Four shapes leave that behind: rows assign_runs
         wrote before it mirrored the folder onto every result of the test,
-        siblings the test-split collapse left with another folder, and a
+        siblings the test-split collapse left with another folder, a
         run filed into a folder while it was still generating, before its
-        test existed. That last one ends with the same columns as a leaked
+        test existed, and a "Run again" on a filed run that has no test (the
+        endpoint hands the re-run the folder, record_start mints it a test
+        with none). The last two end with the same columns as a leaked
         row (the test has no folder, the run's own column holds one), so
         column state cannot tell the two apart and it is un-filed too;
         un-publishing is the safe direction, and each rewritten run is

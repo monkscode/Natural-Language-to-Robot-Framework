@@ -110,4 +110,3 @@ def test_startup_aligns_result_folders_once_through_the_migration_marker():
     registry.align_result_folders.assert_not_called()  # the marker decides
     migrations["result_folder_alignment"]()
     registry.align_result_folders.assert_called_once_with()
-

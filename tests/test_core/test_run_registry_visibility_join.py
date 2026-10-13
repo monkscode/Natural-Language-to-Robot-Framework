@@ -558,8 +558,9 @@ def test_visible_tests_and_visible_runs_agree_across_a_cross_org_rerun(reg):
 def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
     """delete_group's audit list has to resolve membership the way every read
     now does. A run whose OWN group_id is NULL is still a member when its test
-    is filed — that is exactly what filing one result of a test produces, and
-    what the migration leaves on a test's other runs. ON DELETE SET NULL
+    is filed — the migration leaves that shape on a test's other runs, and so
+    does a new result of an already-filed test recorded without a folder of
+    its own (the Tests page's Run). ON DELETE SET NULL
     correctly returns such a run to Ungrouped, so an audit that cannot see it
     understates the blast radius of a destructive org-admin action."""
     r, admin = reg
