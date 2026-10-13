@@ -3297,6 +3297,13 @@ class RunRegistry:
         re-run is owned by whoever fired it, not by the test's author. That
         is deliberate: the test's owner governs the test's publication.
 
+        And the cascade is not the whole move. The last statement writes the
+        same folder onto EVERY result of the named runs' tests, whatever
+        folder each held, exactly as assign_tests does: a result the cascade
+        skipped (its own column named another folder, or none) would
+        otherwise keep resolving through its own column once the test's
+        folder is cleared, and stay published.
+
         What keeps it safe is ONE term: `c.group_id = p.group_id`. Only a
         re-run sitting in the folder the test is leaving travels with it, so
         a re-run filed somewhere else stays there, and an ungrouped one stays
@@ -3491,6 +3498,26 @@ class RunRegistry:
                     f"FROM test_runs r "
                     f"WHERE r.test_id = te.test_id "
                     f"  AND r.run_id = ANY(%s) AND r.org_id = %s AND r.{allowed}",
+                    params,
+                )
+                # The test moved, so EVERY result of it moves: reads resolve
+                # a result's folder as COALESCE(test's, own column), and a
+                # sibling whose own column kept the old folder stayed
+                # published to the org -- its /reports log included -- after
+                # History's "Remove from group" on another result (proven
+                # live 2026-10-13: the re-run removed, the original still
+                # listed and its log opened). This is the statement
+                # assign_tests runs last, keyed by the tests of the named
+                # runs and selected by the SAME terms as the UPDATE above, so
+                # it only reaches tests that statement just wrote. A named
+                # run with no test is not reached and keeps its own-column
+                # write above. Not in `cur`: these rows are not in run_ids.
+                conn.execute(
+                    f"UPDATE test_runs s SET group_id = %s "
+                    f"WHERE s.test_id IN ("
+                    f"  SELECT r.test_id FROM test_runs r"
+                    f"  WHERE r.run_id = ANY(%s) AND r.org_id = %s"
+                    f"    AND r.{allowed} AND r.test_id IS NOT NULL)",
                     params,
                 )
             except psycopg.errors.ForeignKeyViolation:
@@ -3688,6 +3715,43 @@ class RunRegistry:
                 conn.rollback()
                 return False
             return True
+
+    def align_result_folders(self) -> int:
+        """One-time repair: make every result's OWN folder column agree with
+        its test's folder. Returns the number of rows rewritten.
+
+        Reads resolve a result's folder as COALESCE(test's, own column), so a
+        result whose own column is set and differs from its test's names a
+        folder no read shows -- or, when the test has none, a folder that
+        still PUBLISHES it. Two shapes leave that behind: rows assign_runs
+        wrote before it mirrored the folder onto every result of the test,
+        and siblings the test-split collapse left with another folder.
+
+        Only a row whose own column is NOT NULL and differs is rewritten, so
+        the statement can only (a) clear a stale folder when the test has
+        none -- an un-publish -- or (b) replace a stale folder by the one
+        every read already shows. A NULL own column is left alone (reads
+        already resolve the test's folder for it and NULL publishes nothing),
+        and so is a run with no test (filed on its own column, by design).
+
+        Locks the affected `tests` rows the way both movers do (NO KEY
+        UPDATE, ORDER BY test_id) before the write, so a move running at the
+        same time orders against it instead of deadlocking."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "SELECT test_id FROM tests WHERE test_id IN"
+                "   (SELECT r.test_id FROM test_runs r"
+                "    JOIN tests te ON te.test_id = r.test_id"
+                "    WHERE r.group_id IS NOT NULL"
+                "      AND r.group_id IS DISTINCT FROM te.group_id)"
+                " ORDER BY test_id FOR NO KEY UPDATE"
+            )
+            return conn.execute(
+                "UPDATE test_runs r SET group_id = te.group_id"
+                " FROM tests te WHERE te.test_id = r.test_id"
+                "  AND r.group_id IS NOT NULL"
+                "  AND r.group_id IS DISTINCT FROM te.group_id"
+            ).rowcount
 
     @staticmethod
     def _group_join(

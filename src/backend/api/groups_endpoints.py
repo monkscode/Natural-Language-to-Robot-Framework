@@ -290,13 +290,14 @@ def assign_runs(
     Only the run's owner, or an org_admin, may file it. Being able to SEE a
     colleague's published test is not authority over where it lives.
 
-    One row may move that the caller did not name: a re-run sitting in the
-    SAME folder as a run being moved travels with it, because a re-run
-    belongs to the test it was cloned from (see assign_runs). It can only
-    ever REDUCE that re-run's exposure. The audit detail below records the
-    ids the CALLER gave, so a cascaded re-run leaves the folder without
-    appearing in the record — the same snapshot bound delete_group's
-    docstring states, and a known gap rather than an oversight.
+    Rows may move that the caller did not name: every other result of the
+    named run's test travels with it, because the folder belongs to the test
+    and a re-run belongs to the test it was cloned from (see assign_runs).
+    Moving a run OUT of a folder therefore un-publishes the whole test. The
+    audit detail below records the ids the CALLER gave, so a result moved
+    along leaves the folder without appearing in the record — the same
+    snapshot bound delete_group's docstring states, and a known gap rather
+    than an oversight.
     """
     user_id = _require_identity(user)
     org_id, is_org_admin = _require_org_scope(user)
