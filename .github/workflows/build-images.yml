@@ -543,6 +543,8 @@ jobs:
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
+    # Writes only the step summary, so the job's token gets no permission at all.
+    permissions: {}
     needs: [test, build-base-browser, build-fastapi, build-frontend, build-browser-service, build-test-runner]
     if: always()
 
