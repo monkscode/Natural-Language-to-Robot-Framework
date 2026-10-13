@@ -848,7 +848,7 @@ def _bench_grant_columns(sql: str) -> set[str] | None:
     absent rather than present."""
     sql = re.sub(r"--[^\n]*", "", sql)
     match = re.search(
-        r"\bGRANT\s+SELECT\s+ON\s+((?:bench\.[a-z_]+\s*,?\s*)+)TO\s+grafana_ro\b",
+        r"\bGRANT\s+SELECT\s+ON\s+(bench\.[a-z_]+(?:\s*,\s*bench\.[a-z_]+)*)\s+TO\s+grafana_ro\b",
         sql, re.IGNORECASE)
     if not match:
         return None
@@ -892,6 +892,14 @@ def test_bench_grant_guard_fires_on_a_commented_out_grant():
     assert mutated != sql, "fixture GRANT lines not found to comment out"
     assert _bench_grant_columns(mutated) is None
     assert not _bench_usage_grant_present(mutated)
+
+
+def test_bench_grant_reader_needs_a_comma_between_tables():
+    """Two tables with no comma between them are not a grant list; a real list split over two lines still reads."""
+    assert _bench_grant_columns("GRANT SELECT ON bench.runs bench.queries TO grafana_ro;") is None
+    assert _bench_grant_columns(
+        "GRANT SELECT ON bench.runs,\n    bench.queries TO grafana_ro;"
+    ) == {"bench.runs", "bench.queries"}
 
 
 @pytest.mark.parametrize("path", _dashboards(), ids=lambda p: p.name)
