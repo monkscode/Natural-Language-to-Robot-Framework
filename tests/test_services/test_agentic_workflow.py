@@ -550,6 +550,31 @@ class TestWorkflowCompletionPaths:
         assert complete["dryrun_status"] == "unverified"
         assert "no output.xml" in complete["dryrun_message"]
 
+    def test_gate_reason_is_redacted_before_it_reaches_the_client(self):
+        """The reason is runner/executor text; the execute path redacts the same
+        text, so the generation stream must too."""
+        fake_key = "AIzaSy" + "B" * 33  # shaped like a Google API key, not a real one
+
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": f"GEMINI_API_KEY={fake_key} rejected by the runner",
+                    "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert fake_key not in complete["dryrun_message"]
+        assert "[REDACTED]" in complete["dryrun_message"]
+        assert "rejected by the runner" in complete["dryrun_message"]
+
+    def test_plain_gate_reason_arrives_unchanged(self):
+        message = "dryrun produced no output.xml — treating as infrastructure failure"
+
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": message, "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["dryrun_message"] == message
+
     def test_passed_gate_carries_no_dryrun_message(self):
         """A clean run must not grow a warning field the UI would render."""
         events = _run_workflow()

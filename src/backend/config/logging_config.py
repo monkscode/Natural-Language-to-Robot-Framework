@@ -23,8 +23,9 @@ from src.backend.core.secret_redaction import SecretRedactingFilter, redact_proc
 
 # Loggers that ship their OWN handler and therefore never reach our formatter.
 # litellm logs the provider request URL, which for Google carries the API key.
+# uvicorn: own handler, propagate=False, so root's filter never sees it; a logger's filter skips child loggers.
 _THIRD_PARTY_LOGGERS_WITH_OWN_HANDLERS = (
-    "LiteLLM", "LiteLLM Router", "LiteLLM Proxy", "litellm",
+    "LiteLLM", "LiteLLM Router", "LiteLLM Proxy", "litellm", "uvicorn", "uvicorn.error",
 )
 
 
