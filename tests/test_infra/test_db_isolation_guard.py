@@ -278,3 +278,23 @@ def test_tier2_live_db_tests_skip_is_driven_by_opt_out_not_guard_success():
     # guard failure (e.g. Postgres up but CREATEDB denied) must never be
     # interpreted as permission to write to whatever database is live.
     assert _tier2_live_db_tests_should_skip(live_db_opt_out=False) is True
+
+
+def test_unreachable_postgres_warning_does_not_print_the_password(caplog):
+    """The warning when the admin connect fails used to carry the whole DSN,
+    password included, into pytest output that is pasted into reports and CI
+    logs. It must still be emitted, without the credential."""
+    from tests import conftest as c
+
+    secret = "made-up-pw-7f3a9c"
+    dsn = f"postgresql://nlrf:{secret}@localhost:5432/nlrf"
+    failure = psycopg.OperationalError("connection refused (localhost:5432)")
+
+    with patch("psycopg.connect", side_effect=failure):
+        with caplog.at_level(logging.INFO):
+            assert c._create_throwaway_database(dsn) is None
+
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    for record in caplog.records:
+        assert secret not in record.getMessage()
+        assert all(secret not in str(arg) for arg in (record.args or ()))
