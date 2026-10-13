@@ -91,6 +91,8 @@ class SecretRedactingFilter(logging.Filter):
             try:
                 record.msg = redact_secrets(record.getMessage())
                 record.args = ()
+                # uvicorn's colour formatter would re-render this un-redacted template with the args just dropped.
+                record.__dict__.pop("color_message", None)
             except (TypeError, ValueError):
                 # Pre-existing msg/args mismatch — leave it for the formatter to
                 # report rather than masking someone else's bug as ours.

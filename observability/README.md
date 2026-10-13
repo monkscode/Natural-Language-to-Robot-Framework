@@ -4,14 +4,13 @@ Four containers behind a Compose profile. A plain `docker compose up` does not
 start any of them.
 
 ```bash
-# Optional: set two passwords in the ROOT .env, next to docker-compose.yml —
+# Required: set two passwords in the ROOT .env, next to docker-compose.yml —
 # NOT src/backend/.env. Compose reads the root file for ${VAR} substitution
 # in docker-compose.yml; src/backend/.env is injected into containers by a
 # separate mechanism (env_file:) that neither of these two services uses, so
 # setting them there has no effect. See the ROOT .env.example, not
-# src/backend/.env.example. Skip this and compose falls back to
-# grafana_ro / admin — fine for a throwaway local look, not for anything
-# you'd leave running.
+# src/backend/.env.example. Nothing falls back: with either one empty the
+# matching service stops with a one-line message naming it.
 #   GRAFANA_DB_PASSWORD=...
 #   GRAFANA_ADMIN_PASSWORD=...
 
@@ -19,7 +18,9 @@ docker compose --profile observability up -d
 ```
 
 Grafana: <http://127.0.0.1:3001>, user `admin`, password whatever you set
-`GRAFANA_ADMIN_PASSWORD` to (`admin` if you didn't).
+`GRAFANA_ADMIN_PASSWORD` to. Grafana reads that variable only when it first creates
+its database, so a volume created earlier keeps its OLD admin password; reset it with
+`docker exec nlrf-grafana grafana cli admin reset-admin-password <new>`.
 
 If you also want the containerised `fastapi`/`browser-service` to be able to run a
 Vertex generation — so there is fresh data for these dashboards to show — read

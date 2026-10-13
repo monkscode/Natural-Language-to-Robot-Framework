@@ -19,6 +19,7 @@ on the API — not on the executor that prompted the work.
 Referenced by: nothing — pytest entry point.
 Depends on: src/backend/config/logging_config.py.
 """
+import io
 import logging
 import logging.handlers
 import sys
@@ -34,6 +35,9 @@ from src.backend.config.logging_config import (
 from src.backend.core.secret_redaction import SecretRedactingFilter
 
 ACCESS_LOGGER = "uvicorn.access"
+# uvicorn's default config gives `uvicorn` its own handler with propagate=False;
+# `uvicorn.error` has none and propagates to it.
+UVICORN_OWN_HANDLER_LOGGERS = ("uvicorn", "uvicorn.error")
 # uvicorn's access format: '%s - "%s %s HTTP/%s" %d' with
 # (client_addr, method, path_with_query, http_version, status).
 ACCESS_FORMAT = '%s - "%s %s HTTP/%s" %d'
@@ -49,11 +53,15 @@ def restore_global_logging():
     root = logging.getLogger()
     access = logging.getLogger(ACCESS_LOGGER)
     saved = (root.handlers[:], root.level, access.filters[:], structlog.get_config())
+    own_handler_filters = {
+        name: logging.getLogger(name).filters[:] for name in UVICORN_OWN_HANDLER_LOGGERS}
     yield
     root.handlers[:] = saved[0]
     root.setLevel(saved[1])
     access.filters[:] = saved[2]
     structlog.configure(**saved[3])
+    for name, filters in own_handler_filters.items():
+        logging.getLogger(name).filters[:] = filters
 
 
 def _access_record(path: str) -> logging.LogRecord:
@@ -170,6 +178,61 @@ def test_repeat_calls_do_not_stack_filters():
     access = logging.getLogger(ACCESS_LOGGER)
     health = [f for f in access.filters if isinstance(f, HealthCheckAccessFilter)]
     assert len(health) == 1
+
+
+def test_uvicorn_loggers_carry_the_redaction_filter_once():
+    """uvicorn's loggers have their own handler and propagate=False, so root's
+    handler filter never sees their records; the filter must sit on the loggers."""
+    setup_logging(log_dir=None)
+    setup_logging(log_dir=None)
+
+    for name in UVICORN_OWN_HANDLER_LOGGERS:
+        filters = [f for f in logging.getLogger(name).filters
+                   if isinstance(f, SecretRedactingFilter)]
+        assert len(filters) == 1, f"{name} carries {len(filters)} SecretRedactingFilter(s)"
+
+
+def test_a_secret_logged_on_uvicorn_error_arrives_redacted():
+    fake_key = "AIzaSy" + "B" * 33  # shaped like a Google API key, not a real one
+    setup_logging(log_dir=None)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("uvicorn.error")
+    logger.addHandler(handler)
+    try:
+        logger.error("startup failed: GEMINI_API_KEY=%s rejected", fake_key)
+    finally:
+        logger.removeHandler(handler)
+
+    out = stream.getvalue()
+    assert fake_key not in out
+    assert "[REDACTED]" in out
+    assert "startup failed" in out
+
+
+def test_uvicorn_colour_formatter_still_fills_in_the_startup_values():
+    """On a terminal uvicorn re-renders `color_message` with the record's args.
+
+    The redaction filter drops the args after rendering, so a stale template
+    would print as 'Uvicorn running on %s://%s:%d'.
+    """
+    from uvicorn.logging import DefaultFormatter
+
+    setup_logging(log_dir=None)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(DefaultFormatter("%(levelprefix)s %(message)s", use_colors=True))
+    logger = logging.getLogger("uvicorn.error")
+    logger.addHandler(handler)
+    try:
+        template = "Uvicorn running on %s://%s:%d"
+        logger.info(template, "http", "127.0.0.1", 5000, extra={"color_message": template})
+    finally:
+        logger.removeHandler(handler)
+
+    out = stream.getvalue()
+    assert "127.0.0.1" in out
+    assert "%s" not in out
 
 
 def test_secret_redaction_still_reaches_the_only_handler():

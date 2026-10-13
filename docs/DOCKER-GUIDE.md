@@ -106,6 +106,11 @@ Create it by copying the example:
 cp .env.example .env
 ```
 
+This file also needs a database password: Compose refuses to start without
+`POSTGRES_PASSWORD`. Add one with the same command the README gives
+(`echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env`). On an existing install,
+read the README's "Database password" note first.
+
 The file contains three variables — one per container image:
 
 ```env
@@ -140,7 +145,7 @@ Create it by copying the example:
 cp src/backend/.env.example src/backend/.env
 ```
 
-Now open `src/backend/.env` and set your Gemini API key — **this is the only thing you must change**:
+Now open `src/backend/.env` and set your Gemini API key — **this is the only thing you must change in this file**:
 
 ```env
 # src/backend/.env

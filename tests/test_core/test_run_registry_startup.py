@@ -19,17 +19,32 @@ Depends on: src/backend/core/run_registry.py (get_run_registry).
 """
 
 import asyncio
+import logging
 from unittest.mock import MagicMock, patch
 
 from src.backend import main
 
 
-def _run_startup(calls, registry_side_effect, sweeps=None):
+def _run_startup(calls, registry_side_effect, sweeps=None, migrations=None,
+                 outcomes=None):
     """Drive startup_event with every dependency but the registry stubbed.
+
+    outcomes maps a migration name to what run_migration_once returns for it
+    (an exception instance is raised instead); a name not in it returns False.
 
     Returns the task startup left on app.state.abandoned_run_sweeper, captured
     before asyncio.run closes the loop and cancels it."""
     sweeps = [] if sweeps is None else sweeps
+    migrations = {} if migrations is None else migrations
+    outcomes = {} if outcomes is None else outcomes
+
+    def stub_migration(name, fn, *a, **k):
+        calls.append(name)
+        migrations[name] = fn
+        outcome = outcomes.get(name, False)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     async def stub_sweeper():
         sweeps.append(1)
@@ -51,7 +66,7 @@ def _run_startup(calls, registry_side_effect, sweeps=None):
         patch("src.backend.core.org_backfill.backfill_data_org_ids"),
         patch(
             "src.backend.auth.migration_state.run_migration_once",
-            side_effect=lambda *a, **k: calls.append("org_backfill") or False,
+            side_effect=stub_migration,
         ),
         patch(
             "src.backend.core.run_registry.get_run_registry",
@@ -77,7 +92,8 @@ def test_startup_constructs_the_registry_after_the_org_backfill():
     """
     calls = []
     _run_startup(calls, lambda: calls.append("run_registry") or MagicMock())
-    assert calls == ["org_backfill", "run_registry", "temp_cleanup"]
+    assert calls == ["data_org_id_backfill", "run_registry",
+                     "result_folder_alignment", "temp_cleanup"]
 
 
 def test_startup_survives_a_registry_construction_failure():
@@ -85,11 +101,56 @@ def test_startup_survives_a_registry_construction_failure():
     carries on to the blocks after it."""
     calls = []
     _run_startup(calls, RuntimeError("postgres unreachable"))
-    assert calls == ["org_backfill", "temp_cleanup"]
+    assert calls == ["data_org_id_backfill", "result_folder_alignment",
+                     "temp_cleanup"]
 
 
 def test_startup_launches_the_abandoned_run_sweeper_as_a_task():
     sweeps = []
     task = _run_startup([], lambda: MagicMock(), sweeps)
+    assert sweeps == [1]
+    assert isinstance(task, asyncio.Task)
+
+
+def test_startup_aligns_result_folders_once_through_the_migration_marker():
+    """The alignment goes through run_migration_once under its own marker
+    name, after the registry is built, and its migrate callable is the
+    registry method -- so a boot that finds the marker set never runs it."""
+    calls, migrations = [], {}
+    registry = MagicMock()
+    _run_startup(calls, lambda: registry, migrations=migrations)
+    assert calls.count("result_folder_alignment") == 1
+    registry.align_result_folders.assert_not_called()  # the marker decides
+    migrations["result_folder_alignment"]()
+    registry.align_result_folders.assert_called_once_with()
+
+
+def test_startup_logs_the_alignment_as_applied_when_the_marker_was_unset(caplog):
+    """run_migration_once returns True only on the boot that ran the migration;
+    that boot says so, and does not claim the alignment was already applied."""
+    with caplog.at_level(logging.INFO):
+        _run_startup([], lambda: MagicMock(),
+                     outcomes={"result_folder_alignment": True})
+    messages = [r.getMessage() for r in caplog.records]
+    assert "[RUN_REGISTRY] result folder alignment applied" in messages
+    assert not any("result folder alignment already applied" in m
+                   for m in messages)
+
+
+def test_startup_survives_a_result_folder_alignment_failure(caplog):
+    """A failing alignment (marker left unset, the next boot retries) is
+    logged as a WARNING and never blocks the steps after it."""
+    calls = []
+    sweeps = []
+    with caplog.at_level(logging.INFO):
+        task = _run_startup(
+            calls, lambda: MagicMock(), sweeps,
+            outcomes={"result_folder_alignment": RuntimeError("postgres unreachable")})
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("result folder alignment skipped: postgres unreachable" in m
+               for m in warnings)
+    assert calls == ["data_org_id_backfill", "result_folder_alignment",
+                     "temp_cleanup"]
     assert sweeps == [1]
     assert isinstance(task, asyncio.Task)

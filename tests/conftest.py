@@ -319,9 +319,9 @@ def _create_throwaway_database(base_dsn: str) -> str | None:
         )
     except Exception as exc:  # noqa: BLE001 — graceful degrade, never fail collection
         logger.warning(
-            "DB isolation: Postgres unreachable at %s, tests will use DATABASE_URL as "
+            "DB isolation: Postgres unreachable, tests will use DATABASE_URL as "
             "configured; DB-backed fixtures will pytest.skip: %s",
-            admin_dsn, exc,
+            exc,
         )
         return None
 

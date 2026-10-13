@@ -2,6 +2,7 @@
 through tests. The predicate itself is unchanged, character for character —
 only which row's group_id the join reads.
 """
+import logging
 import uuid
 
 import psycopg
@@ -32,11 +33,11 @@ def reg():
         admin.close()
 
 
-def _folder(admin, folder_id, org="org-a"):
+def _folder(admin, folder_id, org="org-a", name="Regression"):
     admin.execute(
         "INSERT INTO run_groups (group_id, name, org_id, created_by)"
         " VALUES (%s, %s, %s, 'alice') ON CONFLICT DO NOTHING",
-        (folder_id, "Regression", org))
+        (folder_id, name, org))
 
 
 def _file_test_into_folder(admin, run_id, folder_id, org="org-a"):
@@ -557,16 +558,19 @@ def test_visible_tests_and_visible_runs_agree_across_a_cross_org_rerun(reg):
 def test_deleting_a_folder_audits_runs_filed_only_through_their_test(reg):
     """delete_group's audit list has to resolve membership the way every read
     now does. A run whose OWN group_id is NULL is still a member when its test
-    is filed — that is exactly what filing one result of a test produces, and
-    what the migration leaves on a test's other runs. ON DELETE SET NULL
+    is filed — the migration leaves that shape on a test's other runs, and so
+    does a new result of an already-filed test recorded without a folder of
+    its own (the Tests page's Run). ON DELETE SET NULL
     correctly returns such a run to Ungrouped, so an audit that cannot see it
     understates the blast radius of a destructive org-admin action."""
     r, admin = reg
     r.record_start("run-1", OWNER, "q", "generated", robot_code="c")
     r.record_start("run-2", OWNER, "q", "running", robot_code="c",
                    rerun_of="run-1")
-    _folder(admin, "g-1")
-    assert r.assign_runs("org-a", "alice", False, ["run-1"], "g-1") is True
+    # Seeded by SQL, not assign_runs: assign_runs now mirrors the folder onto
+    # every result's own column, so it no longer produces the test-only
+    # shape this test is about (the migration still does).
+    _file_test_into_folder(admin, "run-1", "g-1")
     assert admin.execute(
         "SELECT group_id FROM test_runs WHERE run_id = 'run-2'"
     ).fetchone()[0] is None, "run-2 must be a member through its TEST only"
@@ -702,3 +706,126 @@ def test_deleting_a_folder_does_not_audit_a_foreign_run_filed_directly(reg):
     assert admin.execute(
         "SELECT group_id FROM test_runs WHERE run_id = 'run-x'"
     ).fetchone()[0] is None
+
+
+def _own_folders(admin):
+    return dict(admin.execute(
+        "SELECT run_id, group_id FROM test_runs ORDER BY run_id").fetchall())
+
+
+def _two_results_in_g1_and_a_stranger(r, admin):
+    """The product's own route to a test whose two results both hold g-1 in
+    their OWN column: file the first, then 'Run again', which inherits the
+    folder. A result of a different test sits in g-1 beside them."""
+    _folder(admin, "g-1")
+    r.record_start("run-1", OWNER, "q", "generated", robot_code="c")
+    assert r.assign_runs("org-a", "alice", False, ["run-1"], "g-1") is True
+    r.record_start("run-2", OWNER, "q", "running", robot_code="c",
+                   rerun_of="run-1", group_id="g-1")
+    r.record_start("other", OWNER, "other q", "generated", robot_code="d")
+    assert r.assign_runs("org-a", "alice", False, ["other"], "g-1") is True
+    assert _test_id(admin, "run-1") == _test_id(admin, "run-2") != \
+        _test_id(admin, "other")
+    assert _own_folders(admin) == {
+        "run-1": "g-1", "run-2": "g-1", "other": "g-1"}, (
+        "premise: both results hold the folder in their own column")
+
+
+@pytest.mark.parametrize("removed", ["run-2", "run-1"])
+def test_removing_one_result_from_a_folder_unfiles_every_result(reg, removed):
+    """History 'Remove from group' on ONE result: the test leaves the folder,
+    so the test's other results must leave it too. Reads resolve a result's
+    folder as COALESCE(test's, own column) -- a sibling whose own column
+    still named g-1 stayed published to the org, its /reports log included
+    (live, 2026-10-13: the re-run was removed, the original stayed listed)."""
+    r, admin = reg
+    _two_results_in_g1_and_a_stranger(r, admin)
+    sibling = "run-1" if removed == "run-2" else "run-2"
+
+    assert r.assign_runs("org-a", "alice", False, [removed], None) is True
+
+    tid = _test_id(admin, "run-1")
+    assert _folder_of_test(admin, tid) is None
+    folders = _own_folders(admin)
+    assert folders["run-1"] is None
+    assert folders["run-2"] is None
+    assert folders["other"] == "g-1", "a different test must not move"
+
+    # Through the reads a second org member uses, not only the column.
+    rows, total = r.list_runs(user_id="bob", org_id="org-a",
+                              folder_org_id="org-a")
+    assert [x["run_id"] for x in rows] == ["other"]
+    assert total == 1
+    assert r.get_run_owner(sibling).group_id is None
+
+
+@pytest.mark.parametrize("moved", ["run-2", "run-1"])
+def test_moving_one_result_to_another_folder_moves_every_result(reg, moved):
+    r, admin = reg
+    _two_results_in_g1_and_a_stranger(r, admin)
+    _folder(admin, "g-2", name="Other")
+
+    assert r.assign_runs("org-a", "alice", False, [moved], "g-2") is True
+
+    assert _folder_of_test(admin, _test_id(admin, "run-1")) == "g-2"
+    assert _own_folders(admin) == {
+        "run-1": "g-2", "run-2": "g-2", "other": "g-1"}
+
+
+def _seed_stale_result(admin, run_id, test_id, own_folder):
+    admin.execute(
+        "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+        " status, org_id, test_id, group_id)"
+        " VALUES (%s, 'alice', 'a@x.com', 'q', 'generated', 'org-a', %s, %s)",
+        (run_id, test_id, own_folder))
+
+
+def test_align_result_folders_repairs_only_rows_that_disagree(reg, caplog):
+    """The one-time alignment: a result whose OWN column is set and differs
+    from its test's folder is rewritten to what every read already shows,
+    and each rewritten run is logged with its old folder."""
+    r, admin = reg
+    for rid in ("t1", "t2", "t3"):
+        r.record_start(f"seed-{rid}", OWNER, rid, "generated",
+                       robot_code=rid)
+    t1, t2, t3 = (_test_id(admin, f"seed-{rid}") for rid in ("t1", "t2", "t3"))
+    _folder(admin, "g-1")
+    _folder(admin, "g-2", name="Other")
+    admin.execute("UPDATE tests SET group_id = 'g-2' WHERE test_id IN (%s, %s)",
+                  (t2, t3))
+    _seed_stale_result(admin, "stale-clear", t1, "g-1")    # test has none
+    _seed_stale_result(admin, "stale-replace", t2, "g-1")  # test is in g-2
+    _seed_stale_result(admin, "own-null", t3, None)        # control
+    admin.execute(                                         # control: no test
+        "INSERT INTO test_runs (run_id, user_id, user_email, user_query,"
+        " status, org_id, group_id) VALUES ('no-test', 'alice', 'a@x.com',"
+        " 'q', 'generated', 'org-a', 'g-1')")
+
+    with caplog.at_level(logging.INFO, logger="src.backend.core.run_registry"):
+        assert r.align_result_folders() == 2
+
+    folders = _own_folders(admin)
+    assert folders["stale-clear"] is None
+    assert folders["stale-replace"] == "g-2"
+    assert folders["own-null"] is None
+    assert folders["no-test"] == "g-1"
+
+    # One line per rewritten row, the OLD folder in it; the controls are
+    # named nowhere.
+    logged = [x.getMessage() for x in caplog.records]
+    clear = [m for m in logged if "stale-clear" in m]
+    replace = [m for m in logged if "stale-replace" in m]
+    assert len(clear) == 1
+    assert "g-1" in clear[0]
+    assert "g-2" not in clear[0]
+    assert len(replace) == 1
+    assert "g-1" in replace[0]
+    assert "g-2" in replace[0]
+    assert not [m for m in logged if "own-null" in m or "no-test" in m]
+    assert len([m for m in logged if "[RUN_REGISTRY]" in m]) == 2
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="src.backend.core.run_registry"):
+        assert r.align_result_folders() == 0
+    assert not [x for x in caplog.records
+                if "stale-" in x.getMessage()]

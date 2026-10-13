@@ -2041,9 +2041,10 @@ class RunRegistry:
 
         That SELECT reads membership through the TEST as well as off the
         run's own column, since 2026-09-07. A run whose own group_id is
-        NULL is still a member when its TEST is filed here — filing one
-        result of a test leaves its siblings in exactly that shape, and so
-        does the migration — and such a run IS returned to Ungrouped by
+        NULL is still a member when its TEST is filed here — the migration
+        leaves runs in exactly that shape, and so does every new result of
+        an already-filed test that is recorded without a folder of its own
+        (the Tests page's Run passes none) — and such a run IS returned to Ungrouped by
         this DELETE, so an audit blind to it understates the blast radius
         of a destructive org-admin action.
 
@@ -3297,10 +3298,22 @@ class RunRegistry:
         re-run is owned by whoever fired it, not by the test's author. That
         is deliberate: the test's owner governs the test's publication.
 
-        What keeps it safe is ONE term: `c.group_id = p.group_id`. Only a
-        re-run sitting in the folder the test is leaving travels with it, so
-        a re-run filed somewhere else stays there, and an ungrouped one stays
-        ungrouped — SQL equality is NULL, not TRUE, when both sides are NULL,
+        And the cascade is not the whole move. The last statement writes the
+        same folder onto EVERY result of the named runs' tests, whatever
+        folder each held, exactly as assign_tests does: a result the cascade
+        skipped (the parent, or another re-run of the same original, sitting
+        in the SAME folder, which a cascade that only runs parent to child
+        never reaches) would otherwise keep resolving through its own column
+        once the test's folder is cleared, and stay published.
+
+        What keeps the cascade safe for a re-run of a named run that has NO
+        test (the only rows the last statement does not reach, since it is
+        keyed by the named runs' tests; such a re-run normally has a test of
+        its own, which record_start mints) is ONE term: `c.group_id =
+        p.group_id`. Only a re-run sitting in the folder the test is leaving
+        travels with it, so a re-run filed somewhere else stays there, and an
+        ungrouped one stays ungrouped — SQL equality is NULL, not TRUE, when
+        both sides are NULL,
         so a test being FILED (NULL -> a folder) matches no child at all and
         drags nothing into the org's view. The `p.group_id IS NOT NULL` term
         beside it is therefore REDUNDANT (verified: the whole suite passes
@@ -3491,6 +3504,26 @@ class RunRegistry:
                     f"FROM test_runs r "
                     f"WHERE r.test_id = te.test_id "
                     f"  AND r.run_id = ANY(%s) AND r.org_id = %s AND r.{allowed}",
+                    params,
+                )
+                # The test moved, so EVERY result of it moves: reads resolve
+                # a result's folder as COALESCE(test's, own column), and a
+                # sibling whose own column kept the old folder stayed
+                # published to the org -- its /reports log included -- after
+                # History's "Remove from group" on another result (proven
+                # live 2026-10-13: the re-run removed, the original still
+                # listed and its log opened). This is the statement
+                # assign_tests runs last, keyed by the tests of the named
+                # runs and selected by the SAME terms as the UPDATE above, so
+                # it only reaches tests that statement just wrote. A named
+                # run with no test is not reached and keeps its own-column
+                # write above. Not in `cur`: these rows are not in run_ids.
+                conn.execute(
+                    f"UPDATE test_runs s SET group_id = %s "
+                    f"WHERE s.test_id IN ("
+                    f"  SELECT r.test_id FROM test_runs r"
+                    f"  WHERE r.run_id = ANY(%s) AND r.org_id = %s"
+                    f"    AND r.{allowed} AND r.test_id IS NOT NULL)",
                     params,
                 )
             except psycopg.errors.ForeignKeyViolation:
@@ -3688,6 +3721,67 @@ class RunRegistry:
                 conn.rollback()
                 return False
             return True
+
+    def align_result_folders(self) -> int:
+        """One-time repair: make every result's OWN folder column agree with
+        its test's folder. Returns the number of rows rewritten.
+
+        Reads resolve a result's folder as COALESCE(test's, own column), so a
+        result whose own column is set and differs from its test's names a
+        folder no read shows -- or, when the test has none, a folder that
+        still PUBLISHES it. Four shapes leave that behind: rows assign_runs
+        wrote before it mirrored the folder onto every result of the test,
+        siblings the test-split collapse left with another folder, a
+        run filed into a folder while it was still generating, before its
+        test existed, and a "Run again" on a filed run that has no test (the
+        endpoint hands the re-run the folder, record_start mints it a test
+        with none). The last two end with the same columns as a leaked
+        row (the test has no folder, the run's own column holds one), so
+        column state cannot tell the two apart and it is un-filed too;
+        un-publishing is the safe direction, and each rewritten run is
+        logged with its old folder so it can be filed again.
+
+        Only a row whose own column is NOT NULL and differs is rewritten, so
+        the statement can only (a) clear a stale folder when the test has
+        none -- an un-publish -- or (b) replace a stale folder by the one
+        every read already shows. A NULL own column is left alone (reads
+        already resolve the test's folder for it and NULL publishes nothing),
+        and so is a run with no test (filed on its own column, by design).
+
+        Locks the affected `tests` rows the way both movers do (NO KEY
+        UPDATE, ORDER BY test_id) before the write, so a move running at the
+        same time orders against it instead of deadlocking."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "SELECT test_id FROM tests WHERE test_id IN"
+                "   (SELECT r.test_id FROM test_runs r"
+                "    JOIN tests te ON te.test_id = r.test_id"
+                "    WHERE r.group_id IS NOT NULL"
+                "      AND r.group_id IS DISTINCT FROM te.group_id)"
+                " ORDER BY test_id FOR NO KEY UPDATE"
+            )
+            # `o` is the same row read from the statement's snapshot, so
+            # o.group_id is the folder BEFORE the write (RETURNING alone sees
+            # only the new row); run_id is the primary key, so it is one row.
+            rewritten = conn.execute(
+                "UPDATE test_runs r SET group_id = te.group_id"
+                " FROM tests te, test_runs o WHERE te.test_id = r.test_id"
+                "  AND o.run_id = r.run_id"
+                "  AND r.group_id IS NOT NULL"
+                "  AND r.group_id IS DISTINCT FROM te.group_id"
+                " RETURNING r.run_id, o.group_id AS old_group,"
+                " r.group_id AS new_group"
+            ).fetchall()
+        # After the commit, so a failed commit never leaves a line claiming a
+        # rewrite that did not happen. One line per run: the rewrite cannot be
+        # undone, and the old folder is what lets an operator file it again.
+        for row in rewritten:
+            new_folder = row["new_group"]
+            logger.info(
+                "[RUN_REGISTRY] result folder alignment: run %s was filed in "
+                "folder %s, now %s", row["run_id"], row["old_group"],
+                f"folder {new_folder}" if new_folder else "no folder")
+        return len(rewritten)
 
     @staticmethod
     def _group_join(

@@ -268,6 +268,31 @@ async def startup_event():
     except Exception as e:
         logging.warning(f"[RUN_REGISTRY] startup construction skipped: {e}")
 
+    # Align each result's own folder column with its test's, once. History's
+    # "Remove from group" used to leave a test's OTHER results in the folder
+    # (assign_runs wrote only the named runs), and reads fall back to that
+    # column when the test has none, so those results stayed published to the
+    # org. A run filed into a folder while it was still generating (before
+    # its test existed) ends with the same columns (test: no folder, own
+    # column: the folder), cannot be told apart from a leaked row by column
+    # state, and is un-filed too; un-publishing is the safe direction, and
+    # each rewritten run is logged with its old folder so it can be filed
+    # again. Must stay AFTER the construction above (the test-split collapse
+    # that creates `tests` runs there). Best-effort: a failure leaves the
+    # marker unset and the next boot retries; it never blocks startup.
+    try:
+        from src.backend.auth.migration_state import run_migration_once
+        from src.backend.core.run_registry import get_run_registry
+        if run_migration_once(
+                "result_folder_alignment",
+                lambda: get_run_registry().align_result_folders()):
+            logging.info("[RUN_REGISTRY] result folder alignment applied")
+        else:
+            logging.info(
+                "[RUN_REGISTRY] result folder alignment already applied; skipping")
+    except Exception as e:
+        logging.warning(f"[RUN_REGISTRY] result folder alignment skipped: {e}")
+
     # Close runs a dead server left on 'running'. Best-effort: never blocks startup.
     try:
         import asyncio

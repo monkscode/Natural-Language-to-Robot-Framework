@@ -985,7 +985,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # the 'failed' exit sets that key. Without this the client had
             # nothing to show and had to assert one hard-coded cause.
             if gate.get("message"):
-                complete_event["dryrun_message"] = gate["message"]
+                complete_event["dryrun_message"] = redact_secrets(gate["message"])
         yield complete_event
 
     except (json.JSONDecodeError, AttributeError, ValueError) as e:

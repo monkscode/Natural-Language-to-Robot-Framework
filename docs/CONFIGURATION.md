@@ -454,13 +454,15 @@ production.**
 
 ### DATABASE_URL
 
-PostgreSQL connection string. Compose wires this up for you.
+PostgreSQL connection string. Compose wires this up for you, using the
+`POSTGRES_PASSWORD` from the root `.env` (required — there is no default).
 
 ```env
-DATABASE_URL=postgresql://nlrf:nlrf@postgres:5432/nlrf   # inside Compose
+DATABASE_URL=postgresql://nlrf:<POSTGRES_PASSWORD>@postgres:5432/nlrf   # inside Compose
 ```
 
-Outside Compose the host is `localhost` instead of the `postgres` service name.
+Outside Compose the host is `localhost` instead of the `postgres` service name,
+and the password must equal the root `.env`'s `POSTGRES_PASSWORD`.
 
 ### Google SSO (optional)
 

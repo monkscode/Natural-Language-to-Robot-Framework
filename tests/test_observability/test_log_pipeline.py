@@ -335,3 +335,105 @@ def test_loki_does_not_guess_levels_from_raw_text():
     assert limits["discover_log_levels"] is False, (
         f"discover_log_levels is {limits['discover_log_levels']!r}; it must "
         f"be false or Alloy's stamps are discarded for non-records")
+
+
+# --- Passwords: the compose file ships no published default -------------------
+# Measured live 2026-10-13: a test a member pastes and runs reaches the host's
+# published ports (Postgres 5432, Loki 3100, Grafana 3001) from its container
+# through host.docker.internal, and a loopback binding does not stop that on
+# Docker Desktop. The container needs the internet, so the password is the lock.
+
+ENV_EXAMPLE = Path(".env.example")
+
+
+def _compose_services() -> dict:
+    return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+
+
+def _entrypoint_text(service: str) -> str:
+    entrypoint = _compose_services()[service].get("entrypoint")
+    assert entrypoint, f"{service} has no entrypoint wrapper"
+    assert isinstance(entrypoint, list), f"{service}'s entrypoint must be a list"
+    return " ".join(str(part) for part in entrypoint)
+
+
+def test_compose_ships_no_default_for_any_password():
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    for name in ("POSTGRES_PASSWORD", "GRAFANA_DB_PASSWORD", "GRAFANA_ADMIN_PASSWORD"):
+        defaults = re.findall(r"\$\{" + name + r":-[^}]", text)
+        assert not defaults, (
+            f"{name} falls back to a published default ({defaults}); a pasted "
+            f"test can reach the port with it")
+
+
+def test_postgres_password_is_required_by_compose():
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    # DATABASE_URL, the postgres service and grafana-db-init's PGPASSWORD.
+    assert text.count("${POSTGRES_PASSWORD:?") == 3, (
+        "every use of POSTGRES_PASSWORD must refuse an empty value with a message")
+    assert "${POSTGRES_PASSWORD}" not in text
+    assert "${POSTGRES_PASSWORD:-" not in text
+
+
+def test_loki_publishes_no_port_to_the_host():
+    # Alloy and Grafana reach it by name on nlrf-network; Loki has no auth.
+    assert "ports" not in _compose_services()["loki"]
+
+
+def test_grafana_refuses_to_start_without_an_admin_password():
+    service = _compose_services()["grafana"]
+
+    assert "GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}" in service["environment"]
+    wrapper = _entrypoint_text("grafana")
+    assert "GRAFANA_ADMIN_PASSWORD" in wrapper
+    assert "exit 1" in wrapper
+    assert "exec /run.sh" in wrapper, "the wrapper must hand over to the image's own entrypoint"
+    assert "GRAFANA_DB_PASSWORD" not in wrapper, (
+        "the database password is checked by grafana-db-init, which grafana waits for")
+
+
+def test_grafana_db_init_refuses_to_run_without_a_password():
+    service = _compose_services()["grafana-db-init"]
+
+    assert "GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}" in service["environment"]
+    wrapper = _entrypoint_text("grafana-db-init")
+    assert "GRAFANA_DB_PASSWORD" in wrapper
+    assert "exit 1" in wrapper
+    assert "exec psql" in wrapper
+    assert service["restart"] == "no"
+    assert "grafana_password=${GRAFANA_DB_PASSWORD:-}" in str(service["command"])
+
+
+def test_the_live_role_test_names_no_fallback_password():
+    # test_readonly_role.py runs the role script, whose ALTER ROLE sets the LIVE
+    # role's password, against a running nlrf-postgres. With a default here, a
+    # plain local pytest run with the variable unset resets the role to that
+    # published value and breaks Grafana's datasource. It is skipped in CI, so
+    # this static guard is what runs there.
+    text = Path("tests/test_observability/test_readonly_role.py").read_text(encoding="utf-8")
+
+    defaults = re.findall(
+        r"""(?:environ\.get|getenv)\(\s*["']GRAFANA_DB_PASSWORD["']\s*,[^)]*\)""", text)
+    assert not defaults, (
+        f"{defaults} give the role a made-up password; the module must take "
+        f"GRAFANA_DB_PASSWORD from the environment only and skip when it is unset")
+
+
+def test_env_example_names_every_required_password():
+    lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith("POSTGRES_PASSWORD=") for line in lines), (
+        "the README appends the active line; an active one here would define it twice")
+
+    for name in ("POSTGRES_PASSWORD", "GRAFANA_DB_PASSWORD", "GRAFANA_ADMIN_PASSWORD"):
+        index = lines.index(f"#{name}=") if f"#{name}=" in lines else None
+        assert index is not None, f".env.example has no commented #{name}= line"
+        block = []
+        while index > 0 and lines[index - 1].startswith("#"):
+            index -= 1
+            block.append(lines[index])
+        assert "REQUIRED" in " ".join(block), f"the comment above #{name}= does not say it is required"
+
+    assert "grafana_ro / admin" not in "\n".join(lines), (
+        "nothing falls back to grafana_ro / admin any more")

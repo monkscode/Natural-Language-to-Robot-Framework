@@ -33,7 +33,7 @@ services:
       - ANONYMIZED_TELEMETRY=False
       # Auth/users Postgres DSN — in-container host is the 'postgres' service name
       # (overrides the localhost value in src/backend/.env for the Docker network)
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-nlrf}:${POSTGRES_PASSWORD:-nlrf}@postgres:5432/${POSTGRES_DB:-nlrf}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-nlrf}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env - see README "Database password"}@postgres:5432/${POSTGRES_DB:-nlrf}
       # In compose the SPA is the nginx container on :3000 — without this the
       # post-Google-login redirect lands on the dev-server URL (:5173) from
       # .env, which is dead in container mode. Override via shell env when
@@ -157,13 +157,17 @@ services:
     container_name: nlrf-postgres
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-nlrf}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-nlrf}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env - see README "Database password"}
       - POSTGRES_DB=${POSTGRES_DB:-nlrf}
     ports:
       # Loopback-only (IPv4 AND IPv6): the DB is never exposed on the network
-      # interface. Both binds are required — Windows resolves `localhost` to
-      # ::1 first, and Docker Desktop black-holes unbound IPv6 ports (hangs,
-      # not refused), which stalls every pooled connect by the full timeout.
+      # interface of the machine — other MACHINES cannot reach it. A container
+      # on Docker Desktop still can, through host.docker.internal (measured
+      # 2026-10-13: a pasted test connected to 5432), so the password is the
+      # lock, and it has no default. Both binds are required — Windows resolves
+      # `localhost` to ::1 first, and Docker Desktop black-holes unbound IPv6
+      # ports (hangs, not refused), which stalls every pooled connect by the
+      # full timeout.
       - "127.0.0.1:5432:5432"
       - "[::1]:5432:5432"
     volumes:
@@ -222,14 +226,23 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      - PGPASSWORD=${POSTGRES_PASSWORD:-nlrf}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env - see README "Database password"}
+      - GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}
     volumes:
       - ./observability/postgres:/sql:ro
-    entrypoint: ["psql"]
+    # Refuses before any SQL runs, so the role is never created or altered with
+    # an empty password. Not `${GRAFANA_DB_PASSWORD:?…}`: compose interpolates
+    # the whole file even with this profile off, which would stop every install
+    # that never uses Grafana.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'if [ -z "$$GRAFANA_DB_PASSWORD" ]; then echo "GRAFANA_DB_PASSWORD is empty - set it in the root .env (next to docker-compose.yml), see docs/OBSERVABILITY_GRAFANA.md" >&2; exit 1; fi; exec psql "$$@"'
+      - sh
     command: >-
       -h postgres -U ${POSTGRES_USER:-nlrf} -d ${POSTGRES_DB:-nlrf}
       -v ON_ERROR_STOP=1
-      -v grafana_password=${GRAFANA_DB_PASSWORD:-grafana_ro}
+      -v grafana_password=${GRAFANA_DB_PASSWORD:-}
       -f /sql/create_bench_schema.sql
       -f /sql/create_readonly_role.sql
     restart: "no"
@@ -253,15 +266,22 @@ services:
       # connect timeout instead of reaching Grafana.
       - "127.0.0.1:3001:3000"
       - "[::1]:3001:3000"
+    # Same refusal as grafana-db-init above, for the admin password (no `admin`
+    # default). `exec /run.sh` is the image's own entrypoint.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'if [ -z "$$GF_SECURITY_ADMIN_PASSWORD" ]; then echo "GRAFANA_ADMIN_PASSWORD is empty - set it in the root .env (next to docker-compose.yml), see docs/OBSERVABILITY_GRAFANA.md" >&2; exit 1; fi; exec /run.sh "$$@"'
+      - sh
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}
       - GF_USERS_ALLOW_SIGN_UP=false
       # Not embedded anywhere — see decision D2 in the spec.
       - GF_SECURITY_ALLOW_EMBEDDING=false
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
       - POSTGRES_DB=${POSTGRES_DB:-nlrf}
-      - GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-grafana_ro}
+      - GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -285,12 +305,8 @@ services:
     image: grafana/loki:3.4.2
     container_name: nlrf-loki
     profiles: ["observability"]
-    ports:
-      # Loopback-only (IPv4 AND IPv6): same rationale as fastapi/browser-service/
-      # postgres/grafana above — Windows resolves `localhost` to ::1 first, and
-      # Docker Desktop black-holes an unbound IPv6 port (hangs, not refused).
-      - "127.0.0.1:3100:3100"
-      - "[::1]:3100:3100"
+    # Deliberately NOT published: Loki has no authentication, and a container on
+    # Docker Desktop reaches any host port. Alloy and Grafana use it by name.
     command: -config.file=/etc/loki/loki-config.yml
     volumes:
       - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
