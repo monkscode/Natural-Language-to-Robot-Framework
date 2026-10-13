@@ -2,6 +2,7 @@
 through tests. The predicate itself is unchanged, character for character —
 only which row's group_id the join reads.
 """
+import logging
 import uuid
 
 import psycopg
@@ -776,9 +777,10 @@ def _seed_stale_result(admin, run_id, test_id, own_folder):
         (run_id, test_id, own_folder))
 
 
-def test_align_result_folders_repairs_only_rows_that_disagree(reg):
+def test_align_result_folders_repairs_only_rows_that_disagree(reg, caplog):
     """The one-time alignment: a result whose OWN column is set and differs
-    from its test's folder is rewritten to what every read already shows."""
+    from its test's folder is rewritten to what every read already shows,
+    and each rewritten run is logged with its old folder."""
     r, admin = reg
     for rid in ("t1", "t2", "t3"):
         r.record_start(f"seed-{rid}", OWNER, rid, "generated",
@@ -796,11 +798,27 @@ def test_align_result_folders_repairs_only_rows_that_disagree(reg):
         " status, org_id, group_id) VALUES ('no-test', 'alice', 'a@x.com',"
         " 'q', 'generated', 'org-a', 'g-1')")
 
-    assert r.align_result_folders() == 2
+    with caplog.at_level(logging.INFO, logger="src.backend.core.run_registry"):
+        assert r.align_result_folders() == 2
 
     folders = _own_folders(admin)
     assert folders["stale-clear"] is None
     assert folders["stale-replace"] == "g-2"
     assert folders["own-null"] is None
     assert folders["no-test"] == "g-1"
-    assert r.align_result_folders() == 0
+
+    # One line per rewritten row, the OLD folder in it; the controls are
+    # named nowhere.
+    logged = [x.getMessage() for x in caplog.records]
+    clear = [m for m in logged if "stale-clear" in m]
+    replace = [m for m in logged if "stale-replace" in m]
+    assert len(clear) == 1 and "g-1" in clear[0] and "g-2" not in clear[0]
+    assert len(replace) == 1 and "g-1" in replace[0] and "g-2" in replace[0]
+    assert not [m for m in logged if "own-null" in m or "no-test" in m]
+    assert len([m for m in logged if "[RUN_REGISTRY]" in m]) == 2
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="src.backend.core.run_registry"):
+        assert r.align_result_folders() == 0
+    assert not [x for x in caplog.records
+                if "stale-" in x.getMessage()]

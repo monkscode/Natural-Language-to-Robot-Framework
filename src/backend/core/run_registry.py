@@ -3300,14 +3300,17 @@ class RunRegistry:
         And the cascade is not the whole move. The last statement writes the
         same folder onto EVERY result of the named runs' tests, whatever
         folder each held, exactly as assign_tests does: a result the cascade
-        skipped (its own column named another folder, or none) would
-        otherwise keep resolving through its own column once the test's
-        folder is cleared, and stay published.
+        skipped (the parent, or another re-run of the same original, sitting
+        in the SAME folder, which a cascade that only runs parent to child
+        never reaches) would otherwise keep resolving through its own column
+        once the test's folder is cleared, and stay published.
 
-        What keeps it safe is ONE term: `c.group_id = p.group_id`. Only a
-        re-run sitting in the folder the test is leaving travels with it, so
-        a re-run filed somewhere else stays there, and an ungrouped one stays
-        ungrouped — SQL equality is NULL, not TRUE, when both sides are NULL,
+        What keeps the cascade safe for a re-run with NO test (the only rows
+        the last statement does not reach) is ONE term: `c.group_id =
+        p.group_id`. Only a re-run sitting in the folder the test is leaving
+        travels with it, so a re-run filed somewhere else stays there, and an
+        ungrouped one stays ungrouped — SQL equality is NULL, not TRUE, when
+        both sides are NULL,
         so a test being FILED (NULL -> a folder) matches no child at all and
         drags nothing into the org's view. The `p.group_id IS NOT NULL` term
         beside it is therefore REDUNDANT (verified: the whole suite passes
@@ -3723,9 +3726,15 @@ class RunRegistry:
         Reads resolve a result's folder as COALESCE(test's, own column), so a
         result whose own column is set and differs from its test's names a
         folder no read shows -- or, when the test has none, a folder that
-        still PUBLISHES it. Two shapes leave that behind: rows assign_runs
+        still PUBLISHES it. Three shapes leave that behind: rows assign_runs
         wrote before it mirrored the folder onto every result of the test,
-        and siblings the test-split collapse left with another folder.
+        siblings the test-split collapse left with another folder, and a
+        run filed into a folder while it was still generating, before its
+        test existed. That last one ends with the same columns as a leaked
+        row (the test has no folder, the run's own column holds one), so
+        column state cannot tell the two apart and it is un-filed too;
+        un-publishing is the safe direction, and each rewritten run is
+        logged with its old folder so it can be filed again.
 
         Only a row whose own column is NOT NULL and differs is rewritten, so
         the statement can only (a) clear a stale folder when the test has
@@ -3746,12 +3755,28 @@ class RunRegistry:
                 "      AND r.group_id IS DISTINCT FROM te.group_id)"
                 " ORDER BY test_id FOR NO KEY UPDATE"
             )
-            return conn.execute(
+            # `o` is the same row read from the statement's snapshot, so
+            # o.group_id is the folder BEFORE the write (RETURNING alone sees
+            # only the new row); run_id is the primary key, so it is one row.
+            rewritten = conn.execute(
                 "UPDATE test_runs r SET group_id = te.group_id"
-                " FROM tests te WHERE te.test_id = r.test_id"
+                " FROM tests te, test_runs o WHERE te.test_id = r.test_id"
+                "  AND o.run_id = r.run_id"
                 "  AND r.group_id IS NOT NULL"
                 "  AND r.group_id IS DISTINCT FROM te.group_id"
-            ).rowcount
+                " RETURNING r.run_id, o.group_id AS old_group,"
+                " r.group_id AS new_group"
+            ).fetchall()
+        # After the commit, so a failed commit never leaves a line claiming a
+        # rewrite that did not happen. One line per run: the rewrite cannot be
+        # undone, and the old folder is what lets an operator file it again.
+        for row in rewritten:
+            new_folder = row["new_group"]
+            logger.info(
+                "[RUN_REGISTRY] result folder alignment: run %s was filed in "
+                "folder %s, now %s", row["run_id"], row["old_group"],
+                f"folder {new_folder}" if new_folder else "no folder")
+        return len(rewritten)
 
     @staticmethod
     def _group_join(
