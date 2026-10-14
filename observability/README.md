@@ -46,8 +46,10 @@ granted every table that exists by then on the first start; Grafana waits for `g
 starting the profile also starts the app containers. To start Grafana beside an
 API that is already running, or one run from source (Postgres must be up), skip
 the dependencies:
-`docker compose --profile observability up -d --no-deps grafana-db-init grafana loki alloy`
-(on production, with the overlay `-f` flags).
+`docker compose --profile observability run --rm --no-deps grafana-db-init && docker compose --profile observability up -d --no-deps grafana loki alloy`
+(on production, with the overlay `-f` flags on both). The init runs first and the
+second command starts only if it exited 0, because `--no-deps` is not trusted to
+keep Grafana waiting for it.
 
 `grafana_ro` can `SELECT` on at most seven tables — `workflow_metrics`,
 `test_runs`, `llm_traces`, `execution_records`, `learning_metrics`,
