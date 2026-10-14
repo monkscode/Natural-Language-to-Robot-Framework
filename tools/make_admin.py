@@ -41,6 +41,7 @@ def main() -> None:
 
     repo = UserRepository()
     row = repo.get_by_email(email)
+    existed = row is not None
     if row is None:
         try:
             row = repo.create_user(email, prompt_new_password())
@@ -57,8 +58,11 @@ def main() -> None:
 
     user_id = str(row["id"])
     repo.set_platform_role(user_id, "admin")
-    repo.set_status(user_id, "active")
-    detail = {"email": email, "from_role": row["role"], "from_status": row["status"],
+    # bump_token revokes tokens minted while the account was pending (org_id None, role user).
+    repo.set_status(user_id, "active", bump_token=True)
+    # A row the command just created had no earlier role or status.
+    was_role, was_status = (row["role"], row["status"]) if existed else (None, None)
+    detail = {"email": email, "from_role": was_role, "from_status": was_status,
               "to_role": "admin", "to_status": "active", "password": password}
     try:
         write_audit_log(actor_email="host-operator", actor_user_id=None, org_id=None,
@@ -66,8 +70,9 @@ def main() -> None:
                         request_id=None, source="cli", detail=json.dumps(detail))
     except Exception as exc:  # noqa: BLE001 — the grant is done; the record is best-effort
         print(f"warning: admin granted but the audit row was not written: {exc}")
-    print(f"{email} is now an active platform admin (id={user_id}; was "
-          f"{row['role']}/{row['status']}; password {password}). Sign in at the web app.")
+    was = f"was {row['role']}/{row['status']}" if existed else "was: new account"
+    print(f"{email} is now an active platform admin (id={user_id}; {was}; "
+          f"password {password}). Sign in at the web app.")
 
 
 if __name__ == "__main__":

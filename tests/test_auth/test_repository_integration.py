@@ -179,3 +179,18 @@ def test_google_listed_address_signup_lands_pending_user(repo, monkeypatch):
     assert full["role"] == "user"
     assert full["status"] == "pending"
     assert full["is_active"] is False
+
+
+def test_google_signin_of_existing_account_with_listed_address_stays_pending_user(repo, monkeypatch):
+    """Signing in again with a listed address never promotes an existing Google account."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    sub = f"google-{uuid.uuid4().hex}"
+    r.get_or_create_google_user(sub, email, "G Admin")
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    row, was_created = r.get_or_create_google_user(sub, email, "G Admin")
+    assert was_created is False
+    assert (row["role"], row["status"]) == ("user", "pending")
+    full = r.get_by_email(email)
+    assert (full["role"], full["status"]) == ("user", "pending")

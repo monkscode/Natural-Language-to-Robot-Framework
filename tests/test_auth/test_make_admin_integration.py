@@ -4,6 +4,7 @@ Drives main() with sys.argv and getpass patched, on the auth isolated schema.
 Skipped automatically when Postgres is unreachable.
 """
 
+import json
 import uuid
 from unittest.mock import patch
 
@@ -45,7 +46,7 @@ def _run(email, passwords=()):
 def _audit_rows(email):
     with auth_db.get_pool().connection() as conn:
         return conn.execute(
-            "SELECT source FROM audit_log WHERE path = 'tools.make_admin' AND detail LIKE %s",
+            "SELECT source, detail FROM audit_log WHERE path = 'tools.make_admin' AND detail LIKE %s",
             (f"%{email}%",),
         ).fetchall()
 
@@ -57,7 +58,10 @@ def test_creates_a_missing_account_as_active_admin():
         row = repo.get_by_email(email)
         assert (row["role"], row["status"], row["is_active"]) == ("admin", "active", True)
         assert repo.verify_credentials(email, "password-one") is not None
-        assert [r["source"] for r in _audit_rows(email)] == ["cli"]
+        rows = _audit_rows(email)
+        assert [r["source"] for r in rows] == ["cli"]
+        detail = json.loads(rows[0]["detail"])
+        assert detail["from_role"] is None and detail["from_status"] is None
     finally:
         _cleanup(email)
 
@@ -82,10 +86,12 @@ def test_promotes_a_google_account_without_asking_a_password():
     repo, email = UserRepository(), _email()
     try:
         repo.get_or_create_google_user(f"sub-{uuid.uuid4().hex}", email, "G")
+        before = repo.get_by_email(email)["token_version"]
         gp = _run(email)
         gp.assert_not_called()
         row = repo.get_by_email(email)
         assert (row["role"], row["status"]) == ("admin", "active")
+        assert row["token_version"] >= before + 1  # the old pending token is revoked
         assert row["hashed_password"] is None
         assert len(_audit_rows(email)) == 1
     finally:

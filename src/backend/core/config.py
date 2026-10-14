@@ -179,8 +179,7 @@ class Settings(BaseSettings):
     # request (require_user / require_admin / report access).
     JWT_EXPIRY_HOURS: int = Field(default=12, description="Access token lifetime in hours")
     # No longer used: an address is not proof the caller owns it, so this grants
-    # nothing. Kept only so a .env that still holds the line loads (unknown keys
-    # are refused); a non-empty value triggers a startup warning.
+    # nothing. Kept only so startup can warn an operator who still sets it.
     ADMIN_EMAILS: str = Field(
         default="",
         description="Unused; no longer makes anyone an admin (only triggers a startup warning)",

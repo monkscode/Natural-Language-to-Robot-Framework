@@ -232,7 +232,7 @@ async def startup_event():
         logging.warning(
             "[AUTH] ADMIN_EMAILS is set but no longer makes anyone an admin; remove it from "
             "src/backend/.env. Make an admin with: docker exec -it nlrf-fastapi python -m "
-            "tools.make_admin <email>"
+            "tools.make_admin <email> (from a source checkout: python -m tools.make_admin <email>)"
         )
 
     # Backfill org_id on pre-tenancy data rows (Phase 1b/1c) — a one-time
