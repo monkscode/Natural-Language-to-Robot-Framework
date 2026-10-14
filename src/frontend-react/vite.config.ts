@@ -26,7 +26,7 @@ export default defineConfig({
       '/generate-and-run': { target: 'http://localhost:5000', changeOrigin: true },
       '/docker-status': { target: 'http://localhost:5000', changeOrigin: true },
       '/rebuild-docker-image': { target: 'http://localhost:5000', changeOrigin: true },
-      '/test': { target: 'http://localhost:5000', changeOrigin: true },
+      '/test/': { target: 'http://localhost:5000', changeOrigin: true },
     },
   },
   // Unit tests for the pieces whose bugs are invisible in a type check: the
