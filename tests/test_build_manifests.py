@@ -139,6 +139,29 @@ def _build_images_workflow() -> dict:
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("event", ["pull_request", "push"])
+def test_every_dockerfile_copy_source_triggers_the_image_build(event):
+    """A path an image COPYs but the `paths:` filter omits ships no image when
+    only that path changes (scripts/ and clients/ were both missing)."""
+    wf = _build_images_workflow()
+    listed = (wf.get("on") or wf[True])[event]["paths"]  # PyYAML reads `on:` as True
+    prefixes = tuple(p[:-2] for p in listed if p.endswith("/**"))  # "src/**" -> "src/"
+    uncovered = []
+    for dockerfile in sorted(REPO_ROOT.glob("Dockerfile.*")):
+        for line in dockerfile.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if not parts or parts[0].upper() not in ("COPY", "ADD"):
+                continue
+            if any(p.startswith("--from") for p in parts):
+                continue
+            for src in (p for p in parts[1:-1] if not p.startswith("--")):
+                src = src.removeprefix("./")
+                if src not in listed and not src.startswith(prefixes):
+                    uncovered.append(f"{dockerfile.name}: {src}")
+    assert not uncovered, (
+        f"build-images.yml `{event}.paths` misses COPY sources: {uncovered}")
+
+
 def test_the_publish_gate_job_exists_and_runs_the_suite():
     wf = _build_images_workflow()
     assert GATE_JOB in wf["jobs"], (
