@@ -28,7 +28,7 @@ Describe what you want to test, and Mark 1's AI agents generate a working
 
 - 🗣️ **No coding required** — write tests in plain English, not Python or JavaScript.
 - 🌐 **Works on any website** — e-commerce, SaaS, internal tools, anything with a UI.
-- ⚡ **Fast** — go from idea to a working test in ~20–30 seconds.
+- ⚡ **Fast** — go from idea to a working test in about 30–40 seconds.
 - ♻️ **Write once, run infinitely** — reuse generated tests across dev, staging, and prod.
 - 🧠 **Gets smarter over time** — learns your app's patterns and uses fewer tokens per test.
 - 👀 **Readable output** — clean Robot Framework code that even manual QAs can maintain.
@@ -37,7 +37,7 @@ Describe what you want to test, and Mark 1's AI agents generate a working
 
 ## 🚀 Quick Start (Docker)
 
-You need **three** things — all free, and none of them Python or Node:
+You need **three** things — none of them Python or Node:
 
 | Requirement | Get it |
 |---|---|
@@ -59,6 +59,13 @@ No Python. No Node.js. No manual dependency installs.
 git clone -b main https://github.com/monkscode/Natural-Language-to-Robot-Framework.git
 cd Natural-Language-to-Robot-Framework
 ```
+
+> 💳 **Vertex AI needs a billing account.** Google enables the Vertex AI API only on a
+> project linked to a Cloud Billing account — the free trial included (signing up for it
+> creates one, and its credit pays for Vertex AI calls). No billing account? Use a free
+> Google AI Studio key instead: skip step 2, in step 3 set `MODEL_PROVIDER=gemini` and
+> `GEMINI_API_KEY` (from https://aistudio.google.com/apikey) in `src/backend/.env`, and
+> in step 4 start with plain `docker compose up -d`.
 
 ### 2. Create your Vertex AI credentials
 
@@ -113,7 +120,9 @@ To run the newest unreleased work instead, clone with `-b develop` and set all f
 
 **Database password.** Compose refuses to start without `POSTGRES_PASSWORD` in the
 root `.env`; there is no default, because a test a user pastes and runs can reach the
-database port from its container. Add one now (hex only — it sits inside a connection
+database port from its container. Every compose command reads it, not only `up`:
+`docker compose down`, `ps`, `logs` and `pull`, and `./run.sh`, stop with the same line
+until the root `.env` holds it. Add one now (hex only — it sits inside a connection
 URL):
 
 ```bash
@@ -133,8 +142,8 @@ host), then start the stack again with the same command you start it with (step 
 docker exec nlrf-postgres psql -U nlrf -d nlrf -c "ALTER USER nlrf PASSWORD '<new>'"
 ```
 
-If you changed `POSTGRES_USER` or `POSTGRES_DB`, use your values in place of `nlrf` in
-these commands.
+If you changed `POSTGRES_USER` or `POSTGRES_DB`, use your values in place of the user and database name
+`nlrf` in these commands.
 
 If the observability profile (Grafana) was ever started on this database, three old
 values are still live: the read-only role `grafana_ro` keeps its old published
@@ -142,7 +151,9 @@ password, Grafana's `admin` keeps its old one, and a running Loki container keep
 host port. They change only when the profile is started again with its two passwords
 set — follow "Set two passwords first" in
 [docs/OBSERVABILITY_GRAFANA.md](docs/OBSERVABILITY_GRAFANA.md), then start the profile
-again. If you no longer use the profile, close the role instead (the profile's init job
+again. A Grafana volume created earlier also keeps its old `admin` password until you
+reset it: `docker exec nlrf-grafana grafana cli admin reset-admin-password <new>`.
+If you no longer use the profile, close the role instead (the profile's init job
 turns login back on with the new password if it is ever started again):
 
 ```bash
@@ -207,7 +218,7 @@ docker compose ps
 
 > ⏳ The **browser service can take up to ~2 minutes** to report `healthy` on first start (it's initialising Playwright). This is normal — its healthcheck grants a 120s `start_period` for exactly this reason.
 
-Your generated tests, logs, and database live in local folders (`./robot_tests`, `./logs`, `./data`) and are **preserved** across restarts. For everyday commands (`up`, `down`, `ps`, `logs`, `pull`), see the [Docker Compose CLI reference](https://docs.docker.com/reference/cli/docker/compose/).
+Your generated tests and logs live in local folders (`./robot_tests`, `./logs`, `./data`) and the database in the Docker volume `pgdata`; all of them are **preserved** across restarts and `docker compose down`. `docker compose down -v` deletes the volume, and with it every account, test and result. For everyday commands (`up`, `down`, `ps`, `logs`, `pull`), see the [Docker Compose CLI reference](https://docs.docker.com/reference/cli/docker/compose/).
 
 ### 5. Open the app & generate your first test
 
@@ -221,7 +232,7 @@ Then:
    Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project
    ```
 2. Click **Generate Test** and watch the agents work — planning, finding the real
-   elements on the live page, then writing the code. Takes ~20–30 seconds. ✨
+   elements on the live page, then writing the code. Takes about 30–40 seconds. ✨
 3. The generated `.robot` code appears on the right, and it's editable. Click
    **Run Test** to execute it in a clean container.
 4. When it finishes, open **View Report** or **Detailed Log** for the full
