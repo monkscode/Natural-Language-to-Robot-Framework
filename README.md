@@ -148,11 +148,11 @@ If you changed `POSTGRES_USER` or `POSTGRES_DB`, use your values in place of the
 If the observability profile (Grafana) was ever started on this database, three old
 values are still live: the read-only role `grafana_ro` keeps its old published
 password, Grafana's `admin` keeps its old one, and a running Loki container keeps its
-host port. They change only when the profile is started again with its two passwords
-set — follow "Set two passwords first" in
+host port. The role's password and the Loki port change only when the profile is
+started again with its two passwords set — follow "Set two passwords first" in
 [docs/OBSERVABILITY_GRAFANA.md](docs/OBSERVABILITY_GRAFANA.md), then start the profile
-again. A Grafana volume created earlier also keeps its old `admin` password until you
-reset it: `docker exec nlrf-grafana grafana cli admin reset-admin-password <new>`.
+again. Grafana's `admin` keeps its old password even then, until you reset it:
+`docker exec nlrf-grafana grafana cli admin reset-admin-password <new>`.
 If you no longer use the profile, close the role instead (the profile's init job
 turns login back on with the new password if it is ever started again):
 
