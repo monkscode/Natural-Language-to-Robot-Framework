@@ -6,7 +6,7 @@ bcrypt 5.x). Every method borrows a short-lived pooled connection. Keeping all
 user SQL behind this one class means a future storage swap is localized here.
 
 Referenced by: auth/endpoints.py, tests/test_auth.
-Depends on: auth/db.py (pool), bcrypt, src/backend/core/config.py (admin list).
+Depends on: auth/db.py (pool), bcrypt.
 """
 
 import logging
@@ -15,7 +15,6 @@ import bcrypt
 import psycopg
 
 from src.backend.auth.db import get_pool
-from src.backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +66,6 @@ def verify_password(password: str, hashed: str | None) -> bool:
         return False
 
 
-def role_for_email(email: str) -> str:
-    """'admin' if the email is in settings.ADMIN_EMAILS, else 'user'."""
-    return "admin" if email.strip().lower() in settings.admin_emails_list else "user"
-
-
 class UserRepository:
     """CRUD for the users table. Stateless — safe to instantiate once and share."""
 
@@ -115,21 +109,18 @@ class UserRepository:
     def create_user(self, email: str, password: str, display_name: str = "") -> dict:
         """Insert a password user. Raises EmailAlreadyExists on duplicate email."""
         email = email.strip().lower()
-        role = role_for_email(email)
-        # Allowlisted (owner) signups are usable immediately; everyone else lands
-        # pending until approved. status='active' is authoritative; is_active mirrors it.
-        is_admin = role == "admin"
-        status = "active" if is_admin else "pending"
+        # A signup is always a pending user; an address is not proof the caller
+        # owns it. status stays explicit (the table default is 'active').
         try:
             with get_pool().connection() as conn:
                 row = conn.execute(
                     """
                     INSERT INTO users (email, hashed_password, display_name, role,
                                        auth_provider, status, is_active)
-                    VALUES (%s, %s, %s, %s, 'password', %s, %s)
+                    VALUES (%s, %s, %s, 'user', 'password', 'pending', FALSE)
                     RETURNING id, email, display_name, role, status
                     """,
-                    (email, hash_password(password), display_name, role, status, is_admin),
+                    (email, hash_password(password), display_name),
                 ).fetchone()
                 conn.commit()
                 return row
@@ -152,8 +143,8 @@ class UserRepository:
 
     def set_platform_role(self, user_id: str, role: str) -> dict | None:
         """Grant/revoke platform-admin. role in {'admin','user'}. The DB is the
-        source of truth for platform-admin (ADMIN_EMAILS only seeds the first one
-        at startup). Returns the updated public row plus 'old_role' (the prior
+        source of truth for platform-admin (the first one is made with
+        tools.make_admin on the host). Returns the updated public row plus 'old_role' (the prior
         role, captured atomically for the audit floor's from/to detail), or None
         if no user matched."""
         if role not in ("admin", "user"):
@@ -174,36 +165,12 @@ class UserRepository:
             conn.commit()
         return row
 
-    def _sync_role_to_allowlist(self, row: dict) -> dict:
-        """Promote an allowlisted signer-in to platform-admin AND force them active.
-        PROMOTE-ONLY on role (removing an email never demotes; the DB is the source
-        of truth for platform-admin — revoke via set_platform_role). Also self-heals
-        any admin row still marked non-active, so the owner can never be stuck
-        pending (defence in depth for a legacy/raced bootstrap row)."""
-        if role_for_email(row["email"]) != "admin":
-            return row
-        if row.get("role") == "admin" and row.get("status") == "active":
-            return row  # already fully bootstrapped — no write
-        with get_pool().connection() as conn:
-            conn.execute(
-                "UPDATE users SET role = 'admin', status = 'active', is_active = TRUE "
-                "WHERE id = %s",
-                (row["id"],),
-            )
-            conn.commit()
-        logger.info("[AUTH] normalised %s to active platform-admin (ADMIN_EMAILS seed)", row["email"])
-        row = dict(row)
-        row["role"] = "admin"
-        row["status"] = "active"
-        row["is_active"] = True
-        return row
-
     def verify_credentials(self, email: str, password: str) -> dict | None:
         """Return the user row if email+password match and the account is active.
 
         Returns None for: unknown email, inactive account, google-only account
-        (no password set), or a wrong password. Touches last_login and syncs
-        the role to ADMIN_EMAILS on success.
+        (no password set), or a wrong password. Touches last_login on success;
+        it never changes the role or status.
         """
         user = self.get_by_email(email)
         can_login = user and user.get("status") in ("pending", "active")
@@ -218,7 +185,7 @@ class UserRepository:
         if not verify_password(password, user["hashed_password"]):
             return None
         self.touch_last_login(user["id"])
-        return self._sync_role_to_allowlist(user)
+        return user
 
     def get_or_create_google_user(
         self, google_sub: str, email: str, display_name: str = ""
@@ -229,7 +196,7 @@ class UserRepository:
         account ownership, so an existing account with the same email is never
         auto-linked (raises EmailAlreadyExists; the owner signs in with their
         password instead). Disabled accounts raise AccountInactive. Updates
-        last_login and syncs the role to ADMIN_EMAILS on success.
+        last_login on success; a new user is always a pending 'user'.
 
         Returns (row, created) where created is True only when a brand-new
         user row was inserted (not on an existing-user match or a raced
@@ -254,20 +221,17 @@ class UserRepository:
                     "SELECT 1 FROM users WHERE email = %s", (email,)
                 ).fetchone():
                     raise EmailAlreadyExists(email)
-                # Allowlisted (owner) Google signups are usable immediately; everyone
-                # else lands pending until approved. Mirror is_active off status.
-                role = role_for_email(email)
-                is_admin = role == "admin"
-                status = "active" if is_admin else "pending"
+                # Always a pending user until approved (status stays explicit: the
+                # table default is 'active').
                 try:
                     new_row = conn.execute(
                         """
                         INSERT INTO users (email, display_name, role, auth_provider,
                                            google_sub, last_login, status, is_active)
-                        VALUES (%s, %s, %s, 'google', %s, now(), %s, %s)
+                        VALUES (%s, %s, 'user', 'google', %s, now(), 'pending', FALSE)
                         RETURNING id, email, display_name, role, status
                         """,
-                        (email, display_name, role, google_sub, status, is_admin),
+                        (email, display_name, google_sub),
                     ).fetchone()
                 except psycopg.errors.UniqueViolation as exc:
                     conn.rollback()
@@ -284,12 +248,7 @@ class UserRepository:
                     raise EmailAlreadyExists(email) from exc
                 conn.commit()
                 return new_row, True
-        # Existing-user path, AFTER the pool borrow above is released:
-        # _sync_role_to_allowlist takes its own connection, and nesting two
-        # borrows can deadlock a saturated pool. Sync against the stored email
-        # (Google may report a different one than we keep — ownership was
-        # proven for the stored row).
-        return self._sync_role_to_allowlist(row), False
+        return row, False
 
     def touch_last_login(self, user_id) -> None:
         with get_pool().connection() as conn:

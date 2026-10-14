@@ -228,11 +228,12 @@ async def startup_event():
     except Exception as e:
         logging.warning(f"[AUDIT] init_audit_log skipped — audit floor degraded: {e}")
 
-    try:
-        from src.backend.auth.admin_seed import seed_platform_admins
-        seed_platform_admins()
-    except Exception as e:
-        logging.warning(f"[AUTH] platform-admin seed skipped: {e}")
+    if settings.ADMIN_EMAILS.strip():
+        logging.warning(
+            "[AUTH] ADMIN_EMAILS is set but no longer makes anyone an admin; remove it from "
+            "src/backend/.env. Make an admin with: docker exec -it nlrf-fastapi python -m "
+            "tools.make_admin <email> (from a source checkout: python -m tools.make_admin <email>)"
+        )
 
     # Backfill org_id on pre-tenancy data rows (Phase 1b/1c) — a one-time
     # migration, gated so it does NOT re-run every boot. Re-running is not just

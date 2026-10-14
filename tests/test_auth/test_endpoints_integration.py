@@ -219,9 +219,9 @@ def test_login_and_me_flow(client_and_emails):
 def test_login_self_heals_org_for_active_membershipless_user(client_and_emails):
     """An active user with zero memberships must never mint an org-less token.
 
-    The state is reachable outside the approve flow: a pending signup's email is
-    added to ADMIN_EMAILS and _sync_role_to_allowlist force-flips them active at
-    login WITHOUT provisioning. An org-less token would run workflows unscoped —
+    The state is reachable outside the approve flow: a pending signup is flipped
+    active by a path that does not provision (a host-command admin, a raw status
+    change). An org-less token would run workflows unscoped —
     hints from every org injected, learning writes unattributed. Login must
     self-heal by provisioning the personal org before minting."""
     from src.backend.auth.jwt_utils import decode_token
@@ -235,7 +235,7 @@ def test_login_self_heals_org_for_active_membershipless_user(client_and_emails):
     uid = reg.json()["user"]["id"]
     # Pending signup: no membership yet, token carries org_id=None (by design).
     assert decode_token(reg.json()["access_token"])["org_id"] is None
-    # Flip to active OUTSIDE approve (the _sync/allowlist path — no provisioning).
+    # Flip to active OUTSIDE approve (no provisioning).
     UserRepository().set_status(uid, "active")
     assert OrgRepository().get_orgs_for_user(uid) == []
 
@@ -482,29 +482,24 @@ def test_google_callback_does_not_consume_invite_for_existing_active_user(client
     assert still_open["status"] == "open"
 
 
-def test_allowlisted_admin_signup_gets_personal_org(client_and_emails, monkeypatch):
-    """An ADMIN_EMAILS signup lands instantly active and never passes through the
-    Approve step — the only other place orgs are provisioned — so register itself
-    must provision the personal org. The first token must already carry it."""
+def test_listed_address_signup_is_pending_user_with_no_org(client_and_emails, monkeypatch):
+    """A listed address signing up over HTTP is a pending user with no org: an
+    address is not proof the caller owns it, so a signup never grants admin."""
     from src.backend.core.config import settings
     from src.backend.auth.org_repository import OrgRepository
-    from src.backend.auth.jwt_utils import decode_token
     client, created = client_and_emails
     email = _unique_email()
     created.append(email)
     monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
     resp = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
     assert resp.status_code == 201
-    assert resp.json()["user"]["role"] == "admin"
-    memberships = OrgRepository().get_orgs_for_user(resp.json()["user"]["id"])
-    assert len(memberships) == 1
-    assert memberships[0]["kind"] == "personal"
-    assert decode_token(resp.json()["access_token"])["org_id"] == memberships[0]["org_id"]
+    assert resp.json()["user"]["role"] == "user"
+    assert resp.json()["user"]["status"] == "pending"
+    assert OrgRepository().get_orgs_for_user(resp.json()["user"]["id"]) == []
 
 
 def test_non_admin_signup_still_gets_no_org_until_approval(client_and_emails):
-    """The signup-time provisioning applies ONLY to instantly-active (allowlisted)
-    accounts; a normal signup stays pending and org-less until Approve."""
+    """A normal signup stays pending and org-less until Approve."""
     from src.backend.auth.org_repository import OrgRepository
     client, created = client_and_emails
     email = _unique_email()
@@ -515,9 +510,9 @@ def test_non_admin_signup_still_gets_no_org_until_approval(client_and_emails):
     assert OrgRepository().get_orgs_for_user(resp.json()["user"]["id"]) == []
 
 
-def test_allowlisted_admin_google_signup_gets_personal_org(client_and_emails, monkeypatch):
-    """Same hole on the Google path: an allowlisted Google signup is instantly
-    active, so the callback must provision the personal org."""
+def test_listed_address_google_signup_is_pending_with_no_org(client_and_emails, monkeypatch):
+    """Same on the Google path: the callback of a listed, verified address lands
+    a pending user with no org."""
     from src.backend.core.config import settings
     from src.backend.auth.repository import UserRepository
     from src.backend.auth.org_repository import OrgRepository
@@ -531,6 +526,6 @@ def test_allowlisted_admin_google_signup_gets_personal_org(client_and_emails, mo
     resp = _callback_with_profile(client, profile)
     assert "#token=" in resp.headers["location"]
     user = UserRepository().get_by_email(email)
-    memberships = OrgRepository().get_orgs_for_user(str(user["id"]))
-    assert len(memberships) == 1
-    assert memberships[0]["kind"] == "personal"
+    assert user["role"] == "user"
+    assert user["status"] == "pending"
+    assert OrgRepository().get_orgs_for_user(str(user["id"])) == []
