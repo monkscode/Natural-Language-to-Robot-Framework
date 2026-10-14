@@ -1279,6 +1279,11 @@ export default function HistoryPage() {
                             type="button"
                             className="min-w-0 rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             title={row.user_query ?? undefined}
+                            disabled={selectMode && !row.can_move}
+                            /* Same reason as the checkbox above: N re-runs of
+                               one query, and every pasted run, would share one
+                               name. No verb — in select mode it toggles. */
+                            aria-label={`${row.user_query || 'Pasted code run'} (${row.run_id})`}
                             onClick={e => { e.stopPropagation(); activateRow(row) }}
                           >
                             <span className="line-clamp-1 text-sm">

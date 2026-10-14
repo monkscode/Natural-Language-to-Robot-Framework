@@ -1497,7 +1497,7 @@ describe('HistoryPage — a row from the keyboard', () => {
     setupList([RUN_A])
     withDetail('run-A')
     renderPage()
-    const button = await screen.findByRole('button', { name: 'search flipkart for shoes' })
+    const button = await screen.findByRole('button', { name: 'search flipkart for shoes (run-A)' })
 
     button.focus()
     expect(button).toHaveFocus()
@@ -1512,11 +1512,34 @@ describe('HistoryPage — a row from the keyboard', () => {
     await screen.findByText('search flipkart for shoes')
     fireEvent.click(screen.getByRole('button', { name: 'Select' }))
 
-    fireEvent.click(screen.getByRole('button', { name: 'search flipkart for shoes' }))
-    fireEvent.click(screen.getByRole('button', { name: 'checkout flow' }))
+    fireEvent.click(screen.getByRole('button', { name: 'search flipkart for shoes (run-A)' }))
+    fireEvent.click(screen.getByRole('button', { name: 'checkout flow (run-B)' }))
 
     expect(screen.getByLabelText('Select run search flipkart for shoes (run-A)')).toBeChecked()
     expect(screen.getByLabelText('Select run checkout flow (run-B)')).not.toBeChecked()
     expect(screen.queryByTitle('Copy code')).toBeNull()
+  })
+
+  it('names two re-runs of one query apart by the full run id, and a pasted run by it too', async () => {
+    const RE_RUN = { ...RUN_A, run_id: 'run-A2' }
+    const PASTED = { ...RUN_A, run_id: 'run-P', user_query: null }
+    setupList([RUN_A, RE_RUN, PASTED])
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: 'search flipkart for shoes (run-A)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'search flipkart for shoes (run-A2)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pasted code run (run-P)' })).toBeInTheDocument()
+  })
+
+  it('disables the description button in select mode for a run the caller cannot move, like its checkbox', async () => {
+    setupList([RUN_A, RUN_B])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+    expect(screen.getByRole('button', { name: 'checkout flow (run-B)' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+
+    expect(screen.getByRole('button', { name: 'checkout flow (run-B)' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'search flipkart for shoes (run-A)' })).toBeEnabled()
   })
 })
