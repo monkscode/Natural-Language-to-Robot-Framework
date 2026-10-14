@@ -1488,3 +1488,35 @@ describe('HistoryPage — the drawer’s remaining actions', () => {
     expect(await screen.findByText(/Couldn.t load groups — network down/)).toBeInTheDocument()
   })
 })
+
+describe('HistoryPage — a row from the keyboard', () => {
+  // The row's own onClick is a mouse convenience; a <tr> takes no focus, so the
+  // description is a real button (as on the Tests page). A native button turns
+  // Enter and Space into a click, which is what these tests send.
+  it('puts a focusable button on the description, and activating it opens the drawer', async () => {
+    setupList([RUN_A])
+    withDetail('run-A')
+    renderPage()
+    const button = await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    button.focus()
+    expect(button).toHaveFocus()
+    fireEvent.click(button)
+
+    expect(await screen.findByTitle('Copy code')).toBeInTheDocument()
+  })
+
+  it('toggles the checkbox in select mode when the caller may move the run, and does nothing when not', async () => {
+    setupList([RUN_A, RUN_B])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'search flipkart for shoes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'checkout flow' }))
+
+    expect(screen.getByLabelText('Select run search flipkart for shoes (run-A)')).toBeChecked()
+    expect(screen.getByLabelText('Select run checkout flow (run-B)')).not.toBeChecked()
+    expect(screen.queryByTitle('Copy code')).toBeNull()
+  })
+})
