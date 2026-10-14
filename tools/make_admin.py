@@ -29,6 +29,13 @@ from src.backend.core.audit_log import write_audit_log
 from tools.reset_user_password import prompt_new_password
 
 
+def _exit_if_gone(email: str, gone: bool) -> None:
+    """A repository call returns None when its row was deleted mid-run; never report a grant then."""
+    if gone:
+        print(f"{email} disappeared while this ran; nothing was granted. Run the command again.")
+        sys.exit(1)
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         print("usage: python -m tools.make_admin <email>")
@@ -53,13 +60,14 @@ def main() -> None:
         password = "unchanged (Google account)"
     else:
         # Whoever registered this address first loses it: the reset revokes every token.
-        repo.reset_password(email, prompt_new_password())
+        gone = repo.reset_password(email, prompt_new_password()) is None
         password = "reset, every session revoked"
+        _exit_if_gone(email, gone)
 
     user_id = str(row["id"])
-    repo.set_platform_role(user_id, "admin")
+    _exit_if_gone(email, repo.set_platform_role(user_id, "admin") is None)
     # bump_token revokes tokens minted while the account was pending (org_id None, role user).
-    repo.set_status(user_id, "active", bump_token=True)
+    _exit_if_gone(email, repo.set_status(user_id, "active", bump_token=True) is None)
     # A row the command just created had no earlier role or status.
     was_role, was_status = (row["role"], row["status"]) if existed else (None, None)
     detail = {"email": email, "from_role": was_role, "from_status": was_status,

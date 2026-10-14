@@ -61,7 +61,8 @@ def test_creates_a_missing_account_as_active_admin():
         rows = _audit_rows(email)
         assert [r["source"] for r in rows] == ["cli"]
         detail = json.loads(rows[0]["detail"])
-        assert detail["from_role"] is None and detail["from_status"] is None
+        assert detail["from_role"] is None
+        assert detail["from_status"] is None
     finally:
         _cleanup(email)
 
@@ -106,6 +107,20 @@ def test_reactivates_a_suspended_account():
         _run(email, ["password-B2", "password-B2"])
         row = repo.get_by_email(email)
         assert (row["role"], row["status"], row["is_active"]) == ("admin", "active", True)
+    finally:
+        _cleanup(email)
+
+
+def test_a_row_deleted_mid_run_exits_1_and_grants_nothing():
+    repo, email = UserRepository(), _email()
+    try:
+        repo.create_user(email, "password-A1")  # user/pending
+        with patch.object(UserRepository, "set_platform_role", return_value=None), \
+                pytest.raises(SystemExit) as exc:
+            _run(email, ["password-B2", "password-B2"])
+        assert exc.value.code == 1
+        assert _audit_rows(email) == []
+        assert repo.get_by_email(email)["role"] == "user"
     finally:
         _cleanup(email)
 
