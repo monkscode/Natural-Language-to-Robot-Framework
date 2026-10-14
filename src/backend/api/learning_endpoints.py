@@ -61,7 +61,8 @@ def _normalise_hint_domain(value: str | None) -> str | None:
     if not v:
         return None
     domain = extract_domain(v if "://" in v else "//" + v)
-    if domain == "unknown":
+    # extract_domain keeps `user:pw@` from the netloc; that is a credential, not a host.
+    if domain == "unknown" or "@" in domain:
         raise HTTPException(
             status_code=400, detail="domain must be a host name, such as example.com"
         )

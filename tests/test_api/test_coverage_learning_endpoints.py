@@ -807,6 +807,22 @@ class TestHintDomainIsStoredAsTheEngineMatchesIt:
         assert resp.status_code == 400
         assert "host name" in resp.json()["detail"]
 
+    def test_create_refuses_a_domain_holding_userinfo_and_stores_nothing(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            domain="https://user:pw@Example.com/a"))
+        assert resp.status_code == 400
+        assert "host name" in resp.json()["detail"]
+        assert client.get("/hints").json()["hints"] == []
+
+    def test_patch_refuses_a_domain_holding_userinfo(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "domain": "user@example.com"})
+        assert resp.status_code == 400
+        assert "host name" in resp.json()["detail"]
+
     def test_patch_stores_a_typed_host_in_engine_form(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, scope="domain", domain="shop.test")
