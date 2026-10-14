@@ -51,7 +51,7 @@ import { useAuth } from '@/auth/AuthContext'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
 import { useFetch } from '@/lib/useFetch'
 import { api } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import HistoryPage from './HistoryPage'
 
 const mockUseAuth = vi.mocked(useAuth)
@@ -1309,6 +1309,23 @@ describe('HistoryPage — running a row again', () => {
 
     await screen.findByText('✓ Re-run passed')
     await waitFor(() => expect(mockApi.mock.calls.length).toBeGreaterThan(callsBefore))
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('keeps the pass note and shows no dropped sentence when the stream drops after its final event', async () => {
+    setupList([RUN_A])
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', test_status: 'passed' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+    const rowA = (await screen.findByText('search flipkart for shoes')).closest('tr')!
+
+    fireEvent.click(within(rowA).getByTitle(RUN_AGAIN_TITLE))
+
+    await screen.findByText('✓ Re-run passed')
+    await waitFor(() => expect(within(rowA).getByTitle(RUN_AGAIN_TITLE)).not.toBeDisabled())
+    expect(screen.getByText('✓ Re-run passed')).toBeInTheDocument()
     expect(screen.queryByText(DROPPED)).toBeNull()
   })
 

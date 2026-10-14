@@ -1213,7 +1213,12 @@ export default function TestsPage() {
       })
       if (!ended) throw new StreamDroppedError()
     } catch (e) {
-      setRunError(`Couldn’t run “${label}” — ${e instanceof Error ? e.message : 'the request failed'}`)
+      // A drop after the final event leaves nothing to report: the result is
+      // shown and the run is recorded. A drop before it came after a 200, so
+      // the run DID start — never say it could not.
+      if (ended && e instanceof StreamDroppedError) return
+      const reason = e instanceof Error ? e.message : 'the request failed'
+      setRunError(e instanceof StreamDroppedError ? `Run of “${label}”: ${reason}` : `Couldn’t run “${label}” — ${reason}`)
       // Only a test the caller can no longer see may leave the list — see
       // isAccessLoss for why a 409 is not that.
       refused = isAccessLoss(e)
@@ -1259,7 +1264,11 @@ export default function TestsPage() {
       })
       if (!ended) throw new StreamDroppedError()
     } catch (e) {
-      setRunError(`${what} was saved, but the run could not start — ${e instanceof Error ? e.message : 'the request failed'}`)
+      // As in runTest: nothing to report after the final event; before it the
+      // run had started, so only the dropped sentence follows "was saved".
+      if (ended && e instanceof StreamDroppedError) return
+      const reason = e instanceof Error ? e.message : 'the request failed'
+      setRunError(e instanceof StreamDroppedError ? `${what} was saved. ${reason}` : `${what} was saved, but the run could not start — ${reason}`)
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(id); return next })
       void reloadAll()

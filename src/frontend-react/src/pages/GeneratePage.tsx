@@ -1234,6 +1234,8 @@ export default function GeneratePage() {
       })
       if (!ended) throw new StreamDroppedError()
     } catch (e) {
+      // A drop after the final event must not paint an error over the result.
+      if (ended && e instanceof StreamDroppedError) return
       const msg = e instanceof Error ? e.message : 'Generation failed'
       addGen('error', msg); setError(msg)
     } finally {
@@ -1285,6 +1287,7 @@ export default function GeneratePage() {
       })
       if (!ended) throw new StreamDroppedError()
     } catch (e) {
+      if (ended && e instanceof StreamDroppedError) return // as in handleGenerate
       const msg = e instanceof Error ? e.message : 'Execution failed'
       addExec('error', msg); setError(msg)
     } finally {

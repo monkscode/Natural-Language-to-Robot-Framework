@@ -26,7 +26,7 @@ vi.mock('@/lib/api', async importOriginal => ({
   api: vi.fn(),
 }))
 
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { api } from '@/lib/api'
 import GeneratePage from './GeneratePage'
 
@@ -1022,6 +1022,40 @@ describe('GeneratePage — a stream that ends without a final event', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
     await screen.findByText('Test passed! 🎉')
 
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('keeps the generated code and shows no error when the stream drops after its complete event', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    await screen.findByRole('button', { name: /^Run Test/ })
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('keeps "Test passed!" and shows no error when the execution stream drops after its complete event', async () => {
+    allowFeedbackMount()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({
+        status: 'complete',
+        result: { report_html: '/reports/RUN-1/log.html', logs: 'Results: 1 passed, 0 failed' },
+        test_status: 'passed',
+      })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+    pasteCode()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    await screen.findByText('Test passed! 🎉')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Run Test/ })).not.toBeDisabled())
     expect(screen.queryByText(DROPPED)).toBeNull()
   })
 

@@ -1091,6 +1091,8 @@ export default function HistoryPage() {
       })
       if (!ended) throw new StreamDroppedError()
     } catch (e) {
+      // A drop after the final event must not replace the result already noted.
+      if (ended && e instanceof StreamDroppedError) return
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
       // Only a run the caller can no longer READ may be dropped below — see
       // isAccessLoss for why a 409 is not that. The row-level Run again
