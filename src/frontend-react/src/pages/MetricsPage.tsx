@@ -122,7 +122,7 @@ export default function MetricsPage() {
   const windowRows = (recent.data ?? []).filter(r => !cutoff || new Date(r.timestamp).getTime() >= cutoff)
 
   function reloadAll() {
-    summary.reload(); learning.reload(); recent.reload()
+    void summary.reload(); void learning.reload(); void recent.reload()
   }
 
   return (

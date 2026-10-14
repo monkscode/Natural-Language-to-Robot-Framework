@@ -19,7 +19,7 @@ export default function TeamPage() {
       setError(e instanceof ApiError ? e.message : 'Failed to load team')
     }
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => { void load() }, [])
 
   async function invite() {
     setError(null)
