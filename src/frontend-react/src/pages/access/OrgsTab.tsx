@@ -55,7 +55,7 @@ export default function OrgsTab() {
       setError(e instanceof ApiError ? e.message : 'Failed to load orgs')
     }
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => { void load() }, [])
 
   async function createOrg() {
     if (!name.trim() || !ownerId) {
@@ -243,7 +243,7 @@ export default function OrgsTab() {
                       )}
                       {otherTeamOrgs.length > 0 && (
                         <select value="" aria-label="Move to another team org"
-                          onChange={(e) => { if (e.target.value) moveMember(m.user_id, o.id, e.target.value) }}
+                          onChange={(e) => { if (e.target.value) void moveMember(m.user_id, o.id, e.target.value) }}
                           className="rounded-md border px-1 py-0.5 text-xs">
                           <option value="">Move to…</option>
                           {otherTeamOrgs.map((t) => (
