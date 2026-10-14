@@ -93,6 +93,7 @@ function NavUser() {
   const navigate = useNavigate()
   const { user, logout, logoutAll } = useAuth()
   const [signingOutAll, setSigningOutAll] = useState(false)
+  const [signOutAllError, setSignOutAllError] = useState('')
 
   const label = user?.display_name?.trim() || user?.email || 'User'
   const initials = label
@@ -109,9 +110,12 @@ function NavUser() {
 
   async function handleLogoutAll() {
     setSigningOutAll(true)
+    setSignOutAllError('')
     try {
       await logoutAll()
       navigate('/login', { replace: true })
+    } catch (e) {
+      setSignOutAllError(e instanceof Error ? e.message : 'Request failed')
     } finally {
       setSigningOutAll(false)
     }
@@ -176,9 +180,15 @@ function NavUser() {
                 <span className="text-sm">
                   {signingOutAll ? 'Signing out…' : 'Sign out of all devices'}
                 </span>
-                <span className="text-[11px] text-muted-foreground">
-                  Ends every active session
-                </span>
+                {signOutAllError ? (
+                  <span className="text-[11px] text-destructive">
+                    Could not sign out everywhere: {signOutAllError}
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground">
+                    Ends every active session
+                  </span>
+                )}
               </div>
             </DropdownMenuItem>
           </DropdownMenuContent>

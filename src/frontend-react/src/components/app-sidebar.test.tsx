@@ -15,7 +15,7 @@
  * component, table-driven over every nav item x every role, so the DOM output
  * itself is what gets checked, not just the data feeding it.
  */
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -63,11 +63,13 @@ function renderSidebar(
   flags: GateFlags,
   runGroups: Partial<ReturnType<typeof useRunGroups>> = {},
   path = '/',
+  auth: Partial<ReturnType<typeof useAuth>> = {},
 ) {
   mockUseAuth.mockReturnValue({
     isAdmin: flags.isAdmin, isOrgAdmin: flags.isOrgAdmin, canViewLearning: flags.canViewLearning,
     user: null, loading: false, isAuthenticated: true, status: 'active',
     login: vi.fn(), signup: vi.fn(), loginWithToken: vi.fn(), logout: vi.fn(), logoutAll: vi.fn(),
+    ...auth,
   } as unknown as ReturnType<typeof useAuth>)
   mockUseRunGroups.mockReturnValue({
     groups: [], ungroupedCount: 0, error: '', loaded: true,
@@ -258,5 +260,40 @@ describe('AppSidebar — the logo', () => {
     renderSidebar(PLAIN)
 
     expect(screen.getByText('Mark 1').closest('a')).toHaveAttribute('href', '/')
+  })
+})
+
+describe('AppSidebar — Sign out of all devices', () => {
+  beforeEach(() => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: false, media: query, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+    }))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }))
+  })
+  afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks() })
+
+  // Radix opens the user menu on pointerdown, which jsdom needs a typed
+  // MouseEvent to deliver (see MoveToGroupMenu.test.tsx for the full reason).
+  const openUserMenu = () =>
+    fireEvent(screen.getByText('Someone'), new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }))
+  const USER = { display_name: 'Someone', email: 'someone@test.local' }
+
+  it('shows the failure in place of the hint, stays on the page, and clears it on the next attempt', async () => {
+    const logoutAll = vi.fn().mockRejectedValueOnce(new Error('server down')).mockResolvedValueOnce(undefined)
+    renderSidebar(PLAIN, {}, '/', { user: USER, logoutAll } as never)
+    openUserMenu()
+
+    fireEvent.click(await screen.findByText('Sign out of all devices'))
+
+    expect(await screen.findByText('Could not sign out everywhere: server down')).toBeInTheDocument()
+    expect(screen.queryByText('Ends every active session')).not.toBeInTheDocument()
+    expect(screen.getByTestId('where').textContent).toBe('/')
+
+    fireEvent.click(screen.getByText('Sign out of all devices'))
+
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/login'))
+    expect(screen.queryByText(/Could not sign out everywhere/)).not.toBeInTheDocument()
   })
 })
