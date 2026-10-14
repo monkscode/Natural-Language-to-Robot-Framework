@@ -1205,7 +1205,7 @@ export default function GeneratePage() {
     setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setCode('')
     setGenProgress(0); setGenStage('Starting test generation…')
     workflowId.current = null
-    generatedQuery.current = query
+    generatedQuery.current = ''
     setPhase('generating')
     try {
       await streamSSE('/generate-test', { query }, (data) => {
@@ -1220,6 +1220,7 @@ export default function GeneratePage() {
         } else if (data.status === 'complete' && data.robot_code) {
           setGenProgress(100)
           setCode(data.robot_code)
+          generatedQuery.current = query
           workflowId.current = data.workflow_id || null
           generationCompleteLogs(data).forEach(line => addGen(line.kind, line.msg))
         } else if (data.status === 'error') {

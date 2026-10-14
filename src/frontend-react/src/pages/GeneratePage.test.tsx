@@ -725,6 +725,48 @@ describe('GeneratePage — a completed execution', () => {
   })
 })
 
+describe('GeneratePage — the query a run is attributed to', () => {
+  it('is not set by a generation that errored — code pasted afterwards runs with user_query: null', async () => {
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'error', message: 'The planner produced no usable steps' })
+      else onEvent({ status: 'complete', result: { logs: 'Results: 1 passed, 0 failed' }, test_status: 'passed' })
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await waitFor(() => expect(screen.getAllByText('The planner produced no usable steps')).toHaveLength(2))
+    pasteCode()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalledWith(
+      '/execute-test',
+      expect.objectContaining({ user_query: null }),
+      expect.any(Function),
+    ))
+  })
+
+  it('is the query that started a generation which completed with code', async () => {
+    allowFeedbackMount()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else onEvent({ status: 'complete', result: { logs: 'Results: 1 passed, 0 failed' }, test_status: 'passed' })
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalledWith(
+      '/execute-test',
+      expect.objectContaining({ user_query: QUERY }),
+      expect.any(Function),
+    ))
+  })
+})
+
 describe('GeneratePage — which run a correction or download is attributed to', () => {
   it('attributes feedback to the EXECUTED run’s id from the report URL, not the generation’s internal workflow id', async () => {
     // The two ids are different on purpose: workflow_id is CrewAI's
