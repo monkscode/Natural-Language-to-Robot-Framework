@@ -124,7 +124,7 @@ function NavUser() {
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <DropdownMenu>
+        <DropdownMenu onOpenChange={open => { if (!open) setSignOutAllError('') }}>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton
               size="lg"

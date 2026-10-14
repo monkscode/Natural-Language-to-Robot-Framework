@@ -296,4 +296,20 @@ describe('AppSidebar — Sign out of all devices', () => {
     await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/login'))
     expect(screen.queryByText(/Could not sign out everywhere/)).not.toBeInTheDocument()
   })
+
+  it('forgets a failure when the menu closes, so a later opening shows the hint again', async () => {
+    const logoutAll = vi.fn().mockRejectedValueOnce(new Error('server down'))
+    renderSidebar(PLAIN, {}, '/', { user: USER, logoutAll } as never)
+    openUserMenu()
+    fireEvent.click(await screen.findByText('Sign out of all devices'))
+    expect(await screen.findByText('Could not sign out everywhere: server down')).toBeInTheDocument()
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByText('Sign out of all devices')).not.toBeInTheDocument())
+
+    openUserMenu()
+
+    expect(await screen.findByText('Ends every active session')).toBeInTheDocument()
+    expect(screen.queryByText(/Could not sign out everywhere/)).not.toBeInTheDocument()
+  })
 })
