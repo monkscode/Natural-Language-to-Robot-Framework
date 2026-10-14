@@ -336,6 +336,19 @@ class TestListHints:
         assert data["total"] == 1
         assert data["hints"][0]["domain"] == "example.com"
 
+    def test_domain_filter_finds_an_old_row_stored_as_typed(self, learning_client):
+        """Admin hints made before domains were normalised keep their typed form
+        (`www.Example.com`); typing that form in the filter must still find them."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="www.Example.com", feedback_text="old row")
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="new row")
+        _insert_hint(db_path, scope="domain", domain="other.com", feedback_text="other row")
+
+        resp = client.get("/hints", params={"domain": "www.Example.com"})
+        assert resp.status_code == 200
+        texts = sorted(h["feedback_text"] for h in resp.json()["hints"])
+        assert texts == ["new row", "old row"]
+
     def test_pagination(self, learning_client):
         client, _, _, db_path = learning_client
         for i in range(5):
@@ -716,6 +729,191 @@ class TestCreateHintDomainUrlNormalisation:
         assert resp.status_code == 201, resp.json()
         assert resp.json()["hint"]["domain"] is None
         assert resp.json()["hint"]["url"] is None
+
+
+class TestHintDomainIsStoredAsTheEngineMatchesIt:
+    """The engine matches a domain hint by exact equality with
+    extract_domain(<the test's url>) — lower-cased, no `www.`. A domain typed
+    as `WWW.Example.com` or pasted as a URL must be stored in that form, or the
+    hint never applies."""
+
+    def _valid_payload(self, **overrides):
+        base = {
+            "feedback_text": "Use xpath for stable selectors",
+            "anchor_query": "click the login button",
+            "scope": "domain",
+            "actor": "alice",
+            "org_id": "org-admin",
+        }
+        base.update(overrides)
+        return base
+
+    def test_create_stores_a_typed_host_in_engine_form(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(domain="WWW.Example.com"))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] == "example.com"
+
+    def test_create_stores_a_pasted_url_as_its_host(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            domain="https://www.Example.com/a/b"))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] == "example.com"
+
+    def test_create_keeps_the_port_as_extract_domain_does_for_a_test_url(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            domain="https://Example.com:8080/x"))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] == "example.com:8080"
+
+    def test_create_with_the_same_host_typed_differently_is_a_duplicate(self, learning_client):
+        client, _, _, db_path = learning_client
+        first = client.post("/hints", json=self._valid_payload(domain="example.com"))
+        assert first.status_code == 201, first.json()
+        assert first.json()["created"] is True
+        second = client.post("/hints", json=self._valid_payload(domain="WWW.Example.com"))
+        assert second.status_code == 201, second.json()
+        assert second.json()["created"] is False
+        conn = _pg_conn(db_path)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM nl_feedback_corrections WHERE feedback_text = ?",
+            ("Use xpath for stable selectors",)).fetchone()[0]
+        conn.close()
+        assert n == 1
+        assert second.json()["hint"]["evidence_count"] == 2
+
+    def test_list_filter_finds_a_stored_host_by_a_www_or_url_form(self, learning_client):
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="hint a")
+        _insert_hint(db_path, scope="domain", domain="other.test", feedback_text="hint b")
+        for typed in ("www.Example.com", "https://www.Example.com/a"):
+            resp = client.get("/hints", params={"domain": typed})
+            assert resp.status_code == 200, resp.json()
+            hints = resp.json()["hints"]
+            assert [h["domain"] for h in hints] == ["example.com"], typed
+
+    def test_list_filter_never_400s_on_text_with_no_host(self, learning_client):
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="hint a")
+        resp = client.get("/hints", params={"domain": "http://"})
+        assert resp.status_code == 200
+        assert resp.json()["hints"] == []
+
+    def test_create_refuses_a_domain_with_no_host(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(domain="http://"))
+        assert resp.status_code == 400
+        assert "host name" in resp.json()["detail"]
+
+    def test_create_refuses_a_domain_holding_userinfo_and_stores_nothing(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            domain="https://user:pw@Example.com/a"))
+        assert resp.status_code == 400
+        assert "host name" in resp.json()["detail"]
+        assert client.get("/hints").json()["hints"] == []
+
+    def test_patch_refuses_a_domain_holding_userinfo(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "domain": "user@example.com"})
+        assert resp.status_code == 400
+        assert "host name" in resp.json()["detail"]
+
+    def test_patch_stores_a_typed_host_in_engine_form(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "domain": "WWW.Foo.com"})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["domain"] == "foo.com"
+
+    def test_patch_refuses_a_domain_with_no_host(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="domain", domain="shop.test")
+        resp = client.patch(f"/hints/{hint_id}", json={
+            "actor": "alice", "domain": "http://"})
+        assert resp.status_code == 400
+        assert "host name" in resp.json()["detail"]
+
+    def test_patch_with_an_empty_domain_still_clears_it(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(db_path, scope="global", domain="shop.test")
+        resp = client.patch(f"/hints/{hint_id}", json={"actor": "alice", "domain": ""})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["hint"]["domain"] is None
+
+
+class TestCreateOnAnExistingHintReactivatesOrReinforces:
+    def _valid_payload(self, **overrides):
+        base = {
+            "feedback_text": "Use xpath for stable selectors",
+            "anchor_query": "click the login button",
+            "scope": "global",
+            "actor": "alice",
+            "org_id": "org-admin",
+        }
+        base.update(overrides)
+        return base
+
+    @staticmethod
+    def _state(db_path, hint_id):
+        conn = _pg_conn(db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT is_active, unused_count, disabled_at FROM nl_feedback_corrections "
+            "WHERE id = ?", (hint_id,)).fetchone()
+        actions = [r[0] for r in conn.execute(
+            "SELECT action FROM hint_audit WHERE hint_id = ? ORDER BY id",
+            (hint_id,)).fetchall()]
+        conn.close()
+        return row, actions
+
+    def _set_unused(self, db_path, hint_id, unused):
+        conn = _pg_conn(db_path)
+        conn.execute("UPDATE nl_feedback_corrections SET unused_count = ? WHERE id = ?",
+                     (unused, hint_id))
+        conn.commit()
+        conn.close()
+
+    def test_a_retired_hint_is_reactivated_with_a_fresh_unused_count(self, learning_client):
+        client, _, _, db_path = learning_client
+        hint_id = _insert_hint(
+            db_path, feedback_text="Use xpath for stable selectors", is_active=0,
+            disabled_at=datetime.now(timezone.utc).isoformat())
+        self._set_unused(db_path, hint_id, 5)
+
+        resp = client.post("/hints", json=self._valid_payload())
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["created"] is False
+
+        row, actions = self._state(db_path, hint_id)
+        assert row["is_active"] == 1
+        assert row["unused_count"] == 0
+        assert row["disabled_at"] is None
+        assert "reactivate" in actions, actions
+        assert "reinforce" not in actions, actions
+
+    def test_an_active_hint_is_reinforced_and_gets_a_fresh_unused_count(self, learning_client):
+        client, _, _, db_path = learning_client
+        # An active row that still carries disabled_at is what a user re-submit of
+        # a retired hint leaves behind; the reset must clear it.
+        hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
+                               disabled_at=datetime.now(timezone.utc).isoformat())
+        self._set_unused(db_path, hint_id, 5)
+
+        resp = client.post("/hints", json=self._valid_payload())
+        assert resp.status_code == 201, resp.json()
+
+        row, actions = self._state(db_path, hint_id)
+        assert row["is_active"] == 1
+        assert row["unused_count"] == 0
+        assert row["disabled_at"] is None
+        assert "reinforce" in actions, actions
+        assert "reactivate" not in actions, actions
 
 
 # ---------------------------------------------------------------------------

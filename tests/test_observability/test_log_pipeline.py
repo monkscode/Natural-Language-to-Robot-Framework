@@ -437,3 +437,12 @@ def test_env_example_names_every_required_password():
 
     assert "grafana_ro / admin" not in "\n".join(lines), (
         "nothing falls back to grafana_ro / admin any more")
+
+
+def test_grafana_db_init_waits_for_the_api_to_be_healthy():
+    # The role script grants SELECT on tables the API creates at its own start.
+    # Without this the init job can run on a fresh volume before they exist and
+    # the role is left without the grants.
+    depends_on = _compose_services()["grafana-db-init"]["depends_on"]
+    assert depends_on["postgres"]["condition"] == "service_healthy"
+    assert depends_on["fastapi"]["condition"] == "service_healthy"

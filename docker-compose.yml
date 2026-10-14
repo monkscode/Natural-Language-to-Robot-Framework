@@ -225,6 +225,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # On a fresh volume the API creates test_runs, llm_traces and
+      # workflow_metrics while it starts (the four learning tables only with
+      # OPTIMIZATION_ENABLED=true). Waiting for it means the role is granted
+      # them on the first start. Grafana waits on this job, so starting the
+      # profile also starts the app containers; to start it beside an API that
+      # is already running, or runs from source, see observability/README.md.
+      fastapi:
+        condition: service_healthy
     environment:
       - PGPASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env - see README "Database password"}
       - GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}

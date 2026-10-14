@@ -1181,6 +1181,48 @@ class TestGroupAssignmentAndFilter:
         assert reg.get_run(child)["group_id"] == a, (
             "the cascade wrote through a batch the authority check refused")
 
+    def test_a_refused_move_leaves_every_result_of_the_test_in_its_folder(self, reg):
+        """The sibling-wide write (every result of the named runs' tests) runs
+        BEFORE the rowcount refusal gate, so only the rollback keeps a refused
+        move from re-foldering a result the batch never named. Read the rows
+        raw: get_run resolves COALESCE(test's folder, own column), which would
+        mask a sibling whose own column was rewritten."""
+        first, second, theirs = (str(uuid.uuid4()) for _ in range(3))
+        user = {"user_id": "u1", "org_id": ORG_A, "email": "u1@e.com"}
+        # robot_code on both is what makes the re-run a second result of the
+        # SAME test (without it the re-run mints a test of its own).
+        reg.record_start(first, user, "q", "generated", robot_code="c")
+        reg.record_start(second, user, "q", "running", robot_code="c",
+                         rerun_of=first)
+        self._seed(reg, theirs, "u9", org_id=ORG_B)
+        x = reg.create_group(ORG_A, "u1", "X")["group_id"]
+        y = reg.create_group(ORG_A, "u1", "Y")["group_id"]
+        assert reg.assign_runs(ORG_A, "u1", False, [first], x) is True
+
+        # Names ONE of the test's two results plus a run u1 may not file.
+        assert reg.assign_runs(ORG_A, "u1", False, [first, theirs], y) is False
+
+        with reg._pool.connection() as conn:
+            own = {r["run_id"]: r["group_id"] for r in conn.execute(
+                "SELECT run_id, group_id FROM test_runs WHERE run_id = ANY(%s)",
+                [[first, second]]).fetchall()}
+            tests = conn.execute(
+                "SELECT DISTINCT te.test_id, te.group_id FROM tests te"
+                " JOIN test_runs r ON r.test_id = te.test_id"
+                " WHERE r.run_id = ANY(%s)", [[first, second]]).fetchall()
+            # _seed passes no robot_code, so theirs has no test: that is what
+            # lets the refusal reach the late rowcount gate, after the
+            # sibling-wide write, instead of an earlier check.
+            theirs_test = conn.execute(
+                "SELECT test_id FROM test_runs WHERE run_id = %s",
+                [theirs]).fetchone()["test_id"]
+        assert theirs_test is None, "theirs must have no test (precondition)"
+        assert len(tests) == 1, "the two results must belong to ONE test"
+        test_folders = [t["group_id"] for t in tests]
+        assert own == {first: x, second: x}, (
+            "a refused move rewrote the own folder column of a result")
+        assert test_folders == [x], "a refused move changed the test's folder"
+
     def test_get_run_carries_group_name(self, reg):
         r1 = str(uuid.uuid4())
         self._seed(reg, r1, "u1")

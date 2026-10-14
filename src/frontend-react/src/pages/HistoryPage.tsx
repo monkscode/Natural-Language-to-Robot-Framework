@@ -27,7 +27,7 @@ import {
   Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
 import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { useFetch } from '@/lib/useFetch'
@@ -1018,6 +1018,17 @@ export default function HistoryPage() {
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
 
+  // What a click on a row does, shared by the row and its description button
+  // (the button is how the keyboard reaches it): in select mode toggle the
+  // checkbox, when the caller may move the run; otherwise open the drawer.
+  function activateRow(row: Run) {
+    if (selectMode) {
+      if (row.can_move) toggleChecked(row.run_id)
+    } else {
+      setSelected(row.run_id)
+    }
+  }
+
   const subtitle = historySubtitle(isAdminScope, isAdmin)
 
   // Who ran each test. A group is shared, so a member's table now contains
@@ -1066,8 +1077,10 @@ export default function HistoryPage() {
     note('Starting re-run of the stored code…')
     let listRefreshed = false
     let refused = false
+    let ended = false // no complete / error event = the stream was cut short
     try {
       await streamSSE('/execute-test', { rerun_of: sourceId }, ev => {
+        if (ev.status === 'complete' || ev.status === 'error') ended = true
         // First event = the new run row exists; surface it at the top
         // (the table is populated and the stream is still going).
         if (!listRefreshed) { listRefreshed = true; void reloadAll() }
@@ -1076,7 +1089,10 @@ export default function HistoryPage() {
         else if (ev.status === 'error') note(`Error: ${ev.message || 'execution failed'}`)
         else if (typeof ev.message === 'string' && ev.message) note(ev.message)
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
+      // A drop after the final event must not replace the result already noted.
+      if (ended && e instanceof StreamDroppedError) return
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
       // Only a run the caller can no longer READ may be dropped below — see
       // isAccessLoss for why a 409 is not that. The row-level Run again
@@ -1231,11 +1247,7 @@ export default function HistoryPage() {
                     <tr
                       key={row.run_id}
                       className="group cursor-pointer border-b last:border-0 hover:bg-muted/30 transition-colors"
-                      onClick={() => (
-                        selectMode
-                          ? (row.can_move && toggleChecked(row.run_id))
-                          : setSelected(row.run_id)
-                      )}
+                      onClick={() => activateRow(row)}
                     >
                       {selectMode && (
                         <td className="py-3 pl-4" onClick={e => e.stopPropagation()}>
@@ -1265,9 +1277,24 @@ export default function HistoryPage() {
                               drawer still shows `rerun_of` in full, and P3
                               drops that column and the trail together. */}
                           <ResultTestChip run={row} />
-                          <span className="line-clamp-1 text-sm" title={row.user_query ?? undefined}>
-                            {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
-                          </span>
+                          {/* A real button, so Tab reaches the row and Enter or
+                              Space opens it — the row's own click is a mouse
+                              convenience on top (same as the Tests page). */}
+                          <button
+                            type="button"
+                            className="min-w-0 rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            title={row.user_query ?? undefined}
+                            disabled={selectMode && !row.can_move}
+                            /* Same reason as the checkbox above: N re-runs of
+                               one query, and every pasted run, would share one
+                               name. No verb — in select mode it toggles. */
+                            aria-label={`${row.user_query || 'Pasted code run'} (${row.run_id})`}
+                            onClick={e => { e.stopPropagation(); activateRow(row) }}
+                          >
+                            <span className="line-clamp-1 text-sm">
+                              {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
+                            </span>
+                          </button>
                           {!groupFilter && row.group_name && (
                             <span
                               className="hidden shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground lg:inline-flex"

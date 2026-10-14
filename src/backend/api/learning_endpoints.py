@@ -36,6 +36,7 @@ from src.backend.auth.ownership import is_dashboard_viewer, hint_mutation_verdic
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
 from src.backend.crew_ai.optimization import pg_compat
 from src.backend.core.config import settings
+from src.backend.core.url_utils import extract_domain
 from src.backend.crew_ai.optimization.learning_config import (
     MAX_FEEDBACK_TEXT_CHARS,
     _get_conflict_detection_model,
@@ -46,6 +47,26 @@ from src.backend.crew_ai.optimization.learning_config import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _normalise_hint_domain(value: str | None) -> str | None:
+    """Return the domain in the form the hint engine matches, or None if blank.
+
+    get_hints_with_ids compares a domain hint by exact equality with
+    extract_domain(<the test's url>) (lower-cased host, no `www.`), so a hint
+    saved as `WWW.Example.com` would never apply. extract_domain reads a URL
+    and puts a bare host in `path`, hence the `//` prefix for a typed host.
+    """
+    v = (value or "").strip()
+    if not v:
+        return None
+    domain = extract_domain(v if "://" in v else "//" + v)
+    # extract_domain keeps `user:pw@` from the netloc; that is a credential, not a host.
+    if domain == "unknown" or "@" in domain:
+        raise HTTPException(
+            status_code=400, detail="domain must be a host name, such as example.com"
+        )
+    return domain
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -389,8 +410,17 @@ def list_hints(
         if domain:
             # Domains are stored lowercased (extract_domain), but admin-created
             # hints may predate that — compare case-insensitively on both sides.
-            conditions.append("LOWER(domain) = LOWER(?)")
-            params.append(domain)
+            # Match the typed text AND the stored form: an old admin row can
+            # still read "www.Example.com", a new one reads "example.com".
+            conditions.append("LOWER(domain) IN (LOWER(?), LOWER(?))")
+            typed = domain
+            try:
+                # Same form the hints are now stored in; a filter never 400s,
+                # so text with no host is searched as typed.
+                domain = _normalise_hint_domain(domain) or domain
+            except HTTPException:
+                pass
+            params += [typed, domain]
 
         if search:
             # ILIKE: SQLite LIKE was case-insensitive; keep that behaviour on Postgres.
@@ -598,7 +628,7 @@ def create_hint(
     # so `not request.domain`/`not request.url` alone let "   " through, and
     # scope='url' never validated domain at all, so domain='' passed
     # straight to storage unnormalised.
-    domain = (request.domain or "").strip() or None
+    domain = _normalise_hint_domain(request.domain)
     url = (request.url or "").strip() or None
     if request.scope == "url" and not url:
         raise HTTPException(status_code=400, detail="url is required when scope is 'url'")
@@ -672,11 +702,15 @@ def create_hint(
             # re-submit (which also clears conflict_flagged). If the LLM was right about
             # the flag, the next Trigger 1/2 will re-flag with fresh evidence.
             was_flagged = existing["conflict_flagged"] == 1
+            was_retired = existing["is_active"] == 0
+            # A re-submission is a fresh chance (as a user re-submit in
+            # nl_feedback_engine.py and POST /reactivate do): a kept
+            # unused_count would retire the hint again at once.
             conn.execute(
                 "UPDATE nl_feedback_corrections "
                 "SET evidence_count = evidence_count + 1, last_seen = ?, is_active = 1, "
                 "    conflict_flagged = 0, conflict_flagged_at = NULL, "
-                "    conflict_flag_reason = NULL "
+                "    conflict_flag_reason = NULL, unused_count = 0, disabled_at = NULL "
                 "WHERE id = ?",
                 (now, existing["id"]),
             )
@@ -686,11 +720,19 @@ def create_hint(
                     "Admin re-submitted existing hint — implicit unflag",
                     {"conflict_flagged": 1}, {"conflict_flagged": 0},
                 )
-            _write_hint_audit(
-                conn, existing["id"], "reinforce", actor,
-                "Admin re-submitted existing hint — evidence incremented",
-                None, {"evidence_count": existing["evidence_count"] + 1},
-            )
+            if was_retired:
+                _write_hint_audit(
+                    conn, existing["id"], "reactivate", actor,
+                    "Admin re-submitted a retired hint — reactivated",
+                    {"is_active": 0},
+                    {"is_active": 1, "evidence_count": existing["evidence_count"] + 1},
+                )
+            else:
+                _write_hint_audit(
+                    conn, existing["id"], "reinforce", actor,
+                    "Admin re-submitted existing hint — evidence incremented",
+                    None, {"evidence_count": existing["evidence_count"] + 1},
+                )
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM nl_feedback_corrections WHERE id = ?", (existing["id"],)
@@ -818,7 +860,7 @@ def patch_hint(
         # instead of falling through to it.
         norm_domain = None
         if request.domain is not None:
-            norm_domain = (request.domain or "").strip() or None
+            norm_domain = _normalise_hint_domain(request.domain)
         norm_url = None
         if request.url is not None:
             norm_url = (request.url or "").strip() or None

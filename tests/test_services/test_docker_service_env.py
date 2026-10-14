@@ -99,7 +99,7 @@ class TestImportTimeEnvReads:
         # The pulled image is tagged locally AS IMAGE_TAG, so a REMOTE_IMAGE that
         # does not match silently substitutes different content under the name the
         # user configured. Shipping -latest as the remote default meant a user who
-        # set the tag to -develop (as the README instructs) got the main-branch
+        # set the tag to -develop got the main-branch
         # image labelled -develop. With no explicit override, remote must track the
         # tag the user actually asked for.
         with _fresh_import_with_env_file(

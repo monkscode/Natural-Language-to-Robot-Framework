@@ -35,12 +35,17 @@ vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: vi.fn(),
 }))
-vi.mock('@/lib/sse', () => ({ streamSSE: vi.fn() }))
+// The real StreamDroppedError stays: the page throws it when a stream ends
+// without a final event.
+vi.mock('@/lib/sse', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/sse')>()),
+  streamSSE: vi.fn(),
+}))
 
 import { useAuth } from '@/auth/AuthContext'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
 import { ApiError, api } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import TestsPage from './TestsPage'
 
 const mockUseAuth = vi.mocked(useAuth)
@@ -409,6 +414,56 @@ describe('TestsPage — Run', () => {
 
     finish()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Run search flipkart for shoes' })).not.toBeDisabled())
+  })
+
+  it('says the connection dropped when the run stream ends after only running events', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'running', run_id: 'run-new', progress: 100 })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    expect(await screen.findByText(
+      'Run of “search flipkart for shoes”: Connection dropped; the result will appear in History.',
+    )).toBeInTheDocument()
+    // The run DID start, so nothing may say it could not.
+    expect(screen.queryByText(/Couldn’t run/)).toBeNull()
+  })
+
+  it('shows no error when the stream drops after its final event, and the run stays recorded as passed', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'complete', run_id: 'run-new', test_status: 'passed' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run search flipkart for shoes' })).not.toBeDisabled())
+    expect(screen.queryByText(/Connection dropped/)).toBeNull()
+    expect(screen.queryByText(/Couldn’t run/)).toBeNull()
+  })
+
+  it('shows no dropped-connection sentence when the run stream ends with a complete event', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ stage: 'execution', status: 'running', run_id: 'run-new' })
+      onEvent({ stage: 'execution', status: 'complete', run_id: 'run-new', test_status: 'passed' })
+    })
+    renderPage()
+    await screen.findByRole('button', { name: 'search flipkart for shoes' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run search flipkart for shoes' }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run search flipkart for shoes' })).not.toBeDisabled())
+    expect(screen.queryByText(/Connection dropped/)).toBeNull()
   })
 
   it('says which run failed, with its full id, when execution errors', async () => {
@@ -1218,6 +1273,57 @@ describe('TestsPage — the Update dialog', () => {
     )).toBeInTheDocument()
   })
 
+  it('points at the list, not History, when the stream drops before the version event', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText(
+      'The connection dropped before the server said whether a version was written. Reload the list to see whether it is there.',
+    )).toBeInTheDocument()
+    expect(within(dialog).queryByText(/History/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the server’s error when the stream drops after it', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'error', message: 'The model refused the request' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText('The model refused the request')).toBeInTheDocument()
+    expect(within(dialog).queryByText(/connection dropped/i)).not.toBeInTheDocument()
+  })
+
+  it('stays quiet when the stream drops after the version event', async () => {
+    const spies = setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(spies.refresh).toHaveBeenCalled()
+  })
+
   it('shows the server’s own refusal, and asks the list for nothing', async () => {
     setup()
     mockStreamSSE.mockRejectedValue(new ApiError(404, 'Test not found'))
@@ -1276,6 +1382,65 @@ describe('TestsPage — the Update dialog’s first run', () => {
     expect(calls[1]).toEqual(['/execute-test', {
       robot_code: 'NEW CODE', workflow_id: 'wf-1', user_query: 'search flipkart for shoes',
     }])
+  })
+
+  it('says the connection dropped when the first run stream ends after only running events', async () => {
+    setup()
+    updateStream({ testId: 't-pass', n: 3, runId: 'wf-1' }) // its execution stream sends one running event
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await screen.findByText(
+      'Version 3 of “search flipkart for shoes” was saved. Connection dropped; the result will appear in History.',
+    )).toBeInTheDocument()
+    expect(screen.queryByText(/could not start/)).toBeNull()
+  })
+
+  it('shows no error when the first run stream drops after its final event', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (String(path).endsWith('/versions')) {
+        onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+        onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+        return
+      }
+      onEvent({ stage: 'execution', status: 'complete', run_id: 'wf-1', test_status: 'passed' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(screen.queryByText(/Connection dropped/)).toBeNull()
+    expect(screen.queryByText(/could not start/)).toBeNull()
+  })
+
+  it('shows no dropped-connection sentence when the first run stream ends with a complete event', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      if (String(path).endsWith('/versions')) {
+        onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+        onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+        return
+      }
+      onEvent({ stage: 'execution', status: 'complete', run_id: 'wf-1', test_status: 'passed' })
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(mockStreamSSE).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(screen.queryByText(/Connection dropped/)).toBeNull()
   })
 
   it('runs nothing when the reader unticks it', async () => {
