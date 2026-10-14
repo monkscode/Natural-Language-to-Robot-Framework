@@ -1210,6 +1210,13 @@ class TestGroupAssignmentAndFilter:
                 "SELECT DISTINCT te.test_id, te.group_id FROM tests te"
                 " JOIN test_runs r ON r.test_id = te.test_id"
                 " WHERE r.run_id = ANY(%s)", [[first, second]]).fetchall()
+            # _seed passes no robot_code, so theirs has no test: that is what
+            # lets the refusal reach the late rowcount gate, after the
+            # sibling-wide write, instead of an earlier check.
+            theirs_test = conn.execute(
+                "SELECT test_id FROM test_runs WHERE run_id = %s",
+                [theirs]).fetchone()["test_id"]
+        assert theirs_test is None, "theirs must have no test (precondition)"
         assert len(tests) == 1, "the two results must belong to ONE test"
         test_folders = [t["group_id"] for t in tests]
         assert own == {first: x, second: x}, (

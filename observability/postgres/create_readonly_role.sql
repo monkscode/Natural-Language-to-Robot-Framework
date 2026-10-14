@@ -33,8 +33,9 @@ GRANT USAGE ON SCHEMA public TO grafana_ro;
 --
 -- These tables are created by the API at its own start, not by this script.
 -- grafana-db-init waits for the API to be healthy, but a table can still be
--- missing (a fresh install whose API failed before creating it, a table
--- renamed later). A bare GRANT on a missing table would fail under
+-- missing (learning is off, so the four learning tables are never created
+-- and every profile start prints four notices that a restart does not clear;
+-- a fresh install whose API failed before creating it, a table renamed later). A bare GRANT on a missing table would fail under
 -- ON_ERROR_STOP=1 and keep Grafana from starting, so a missing table is
 -- skipped with a notice and granted on the next run, once the table exists.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_ro;

@@ -42,7 +42,7 @@ step every time you bring the profile up, so changing `GRAFANA_DB_PASSWORD`
 between runs re-syncs the role instead of leaving it stale.
 
 `grafana-db-init` waits for the `fastapi` container to be healthy, so the role is
-granted every table on the first start; Grafana waits for `grafana-db-init`, so
+granted every table that exists by then on the first start; Grafana waits for `grafana-db-init`, so
 starting the profile also starts the app containers. To start Grafana beside an
 API that is already running, or one run from source (Postgres must be up), skip
 the dependencies:

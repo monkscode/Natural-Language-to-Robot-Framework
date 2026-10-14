@@ -794,7 +794,14 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
         setError('The server ended the stream without saying whether a version was written. Reload the list to see whether it is there.')
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The update request failed')
+      if (e instanceof StreamDroppedError) {
+        // The version lands in the Tests list, not History, so the error's own
+        // sentence would send them to the wrong page. After the version event
+        // there is nothing to report, as in the other stream handlers.
+        if (!out.saved) setError('The connection dropped before the server said whether a version was written. Reload the list to see whether it is there.')
+      } else {
+        setError(e instanceof Error ? e.message : 'The update request failed')
+      }
     } finally {
       setBusy(false)
       // Any event at all means record_start wrote a run against this test —

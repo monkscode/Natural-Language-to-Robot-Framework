@@ -1273,6 +1273,41 @@ describe('TestsPage — the Update dialog', () => {
     )).toBeInTheDocument()
   })
 
+  it('points at the list, not History, when the stream drops before the version event', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText(
+      'The connection dropped before the server said whether a version was written. Reload the list to see whether it is there.',
+    )).toBeInTheDocument()
+    expect(within(dialog).queryByText(/History/)).not.toBeInTheDocument()
+  })
+
+  it('stays quiet when the stream drops after the version event', async () => {
+    const spies = setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', robot_code: 'NEW CODE', workflow_id: 'wf-1' })
+      onEvent({ stage: 'version', status: 'complete', test_id: 't-pass', n: 3, run_id: 'wf-1' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update test' })).not.toBeInTheDocument())
+    expect(spies.refresh).toHaveBeenCalled()
+  })
+
   it('shows the server’s own refusal, and asks the list for nothing', async () => {
     setup()
     mockStreamSSE.mockRejectedValue(new ApiError(404, 'Test not found'))
