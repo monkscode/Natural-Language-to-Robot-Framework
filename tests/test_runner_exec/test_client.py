@@ -78,6 +78,20 @@ def test_malformed_success_body_surfaces_as_unavailable():
             rc.execute("abc123", "test.robot")
 
 
+def test_ensure_image_allows_time_for_a_cold_image_pull():
+    # ensure-image is the FIRST-RUN path: on a machine that has never run a test
+    # the runner image is absent and this call downloads ~1.9 GB. Measured cold:
+    # ~94s even with most layers already local. The 30s quick timeout made every
+    # new user's first "Run Test" fail with "runner-exec unreachable", which reads
+    # as a network fault rather than a download in progress. It must get the same
+    # generous budget as the rebuild path, which does the same kind of work.
+    with patch.object(rc.requests, "post", return_value=_resp({"status": "ready"})) as p:
+        rc.ensure_image()
+    _, kwargs = p.call_args
+    assert kwargs["timeout"][1] >= rc._IMAGE_PROVISION_READ_TIMEOUT_S
+    assert rc._IMAGE_PROVISION_READ_TIMEOUT_S > rc._QUICK_READ_TIMEOUT_S
+
+
 def test_malformed_timeout_env_falls_back_without_raising(monkeypatch):
     # A non-integer TEST_EXECUTION_TIMEOUT must not raise at import time:
     # runner_exec.client is imported by workflow_service/dryrun_service/endpoints,

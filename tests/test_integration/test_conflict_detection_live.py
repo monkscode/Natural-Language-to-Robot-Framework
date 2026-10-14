@@ -64,7 +64,7 @@ Library    Browser
 Login Test
     New Browser    chromium    headless=True
     New Context    viewport=None
-    New Page    https://sujal.astppbilling.org/
+    New Page    https://example.org/
     Fill Text    //input[@name="username"]    admin
     Fill Text    //input[@name="password"]    secret
     Click    //button[@type="submit"]
@@ -80,7 +80,7 @@ Library    Browser
 Login Test
     New Browser    chromium    headless=True
     New Context
-    New Page    https://sujal.astppbilling.org/
+    New Page    https://example.org/
     Fill Text    css=input[name="username"]    admin
     Fill Text    css=input[name="password"]    secret
     Click    css=button[type="submit"]

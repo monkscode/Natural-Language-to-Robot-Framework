@@ -105,7 +105,7 @@ function SettingsSection({ section }: { section: Section }) {
           <div key={field.id} className="grid gap-1.5">
             <Label htmlFor={field.id} className="text-sm">{field.label}</Label>
             {field.type === 'select' ? (
-              <Select defaultValue={field.defaultValue}>
+              <Select defaultValue={field.defaultValue} disabled>
                 <SelectTrigger id={field.id} className="h-9 text-sm">
                   <SelectValue />
                 </SelectTrigger>
@@ -124,6 +124,7 @@ function SettingsSection({ section }: { section: Section }) {
                 placeholder={field.placeholder}
                 defaultValue={field.defaultValue}
                 className="h-9 text-sm"
+                disabled
               />
             )}
           </div>
@@ -144,6 +145,26 @@ export default function SettingsPage() {
       </div>
 
       <div className="space-y-4">
+        {/* This page is a mockup of a feature that does not exist. There is no
+            settings route and no settings table in src/backend/: MODEL_PROVIDER,
+            GEMINI_API_KEY and the rest are process-level .env values read once
+            at startup. Every control below is therefore disabled rather than
+            wired — wiring them up means persistence, auth scoping and a
+            hot-reload story for boot-time values, which is a feature, not a fix.
+            The API Key field is the one that could do real damage: it invites a
+            platform admin to paste a live secret and then swallows it. */}
+        <div
+          role="status"
+          className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          <p className="font-medium">This page is not active yet.</p>
+          <p className="mt-0.5 text-xs">
+            Nothing here is saved and nothing is read back from the server — the values shown are
+            placeholders. Change these settings in <code>src/backend/.env</code> and restart the
+            backend; they are read once at startup.
+          </p>
+        </div>
+
         {SECTIONS.map(section => (
           <SettingsSection key={section.title} section={section} />
         ))}
@@ -151,8 +172,8 @@ export default function SettingsPage() {
         <Separator />
 
         <div className="flex justify-end gap-3 pb-6">
-          <Button variant="outline">Discard changes</Button>
-          <Button>Save settings</Button>
+          <Button variant="outline" disabled>Discard changes</Button>
+          <Button disabled>Save settings</Button>
         </div>
       </div>
     </div>

@@ -3,6 +3,8 @@ import uuid
 import logging
 import json
 import asyncio
+import functools
+import time
 from queue import Queue, Empty
 from threading import Thread
 import threading
@@ -10,6 +12,8 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
+from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits
+from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
 from src.backend.config.logging_config import EMOJI, bind_workflow_context
@@ -22,6 +26,9 @@ from src.backend.core.workflow_metrics import (
 )
 from src.backend.core.run_registry import get_run_registry
 from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.provider_errors import friendly_provider_error, friendly_setup_error
+from src.backend.core.failure_sentences import failure_sentence, first_failure_message
+from src.backend.core.secret_redaction import redact_secrets
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
 
@@ -31,9 +38,11 @@ from src.backend.core.config import settings
 # ---------------------------------------------------------------------------
 
 from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop
+from src.backend.crew_ai.optimization.execution_memory import ExecutionRecord
 
 # Hint metadata cache — bridges generation phase (crew.py) and execution phase
-# (_process_learning). Keyed by workflow_id, consumed via .pop() in _process_learning().
+# (_process_learning_record). Keyed by workflow_id, consumed via .pop() in
+# _process_learning_record().
 #
 # Leak mitigation: entries are timestamped on write. _store_hint_metadata() evicts
 # entries older than _HINT_CACHE_TTL_SECONDS and caps total size at _HINT_CACHE_MAX_SIZE
@@ -48,6 +57,27 @@ _HINT_CACHE_MAX_SIZE = 500       # hard ceiling independent of TTL
 # in the finally block when it ends (regardless of success/failure/exception).
 _active_workflow_count = 0
 _active_workflow_lock = threading.Lock()
+
+# Run ids with an execution in flight in THIS process. A job outlives its
+# response (_detached), so a client whose stream dropped can re-post the same
+# id while the first run is still going; the second container would
+# force-remove the first one's. Per-process, like the slot counter.
+_executing_run_ids: set[str] = set()
+_executing_run_ids_lock = threading.Lock()
+
+
+def _try_claim_run_id(run_id: str) -> bool:
+    """Claim run_id for one execution; False when one is already in flight."""
+    with _executing_run_ids_lock:
+        if run_id in _executing_run_ids:
+            return False
+        _executing_run_ids.add(run_id)
+        return True
+
+
+def _release_run_id(run_id: str) -> None:
+    with _executing_run_ids_lock:
+        _executing_run_ids.discard(run_id)
 
 # Belt-and-suspenders lock for _hint_metadata_cache.
 # Individual dict operations are atomic under CPython's GIL, but explicit locking
@@ -129,11 +159,11 @@ def _safe_evict_hint_metadata(workflow_id: str) -> None:
     """Remove the hint metadata cache entry for a workflow, swallowing all errors.
 
     Called from every error exit path in run_agentic_workflow() where
-    _process_learning() will NOT be called (validation failure, parse error,
+    _process_learning_record() will NOT be called (validation failure, parse error,
     unexpected exception). Without this call the entry leaks indefinitely because
-    _process_learning() is the only other consumer that pops it.
+    _process_learning_record() is the only other consumer that pops it.
 
-    On the success path _process_learning() pops the entry itself — do NOT
+    On the success path _process_learning_record() pops the entry itself — do NOT
     call this function there to avoid a redundant double-pop.
     """
     try:
@@ -150,7 +180,7 @@ def _store_hint_metadata(workflow_id: str, hint_metadata: dict) -> None:
     _HINT_CACHE_TTL_SECONDS are purged, and if the cache still exceeds
     _HINT_CACHE_MAX_SIZE the oldest entries are removed until it fits.
     This prevents unbounded growth from generate-only flows that never
-    reach _process_learning() or _safe_evict_hint_metadata().
+    reach _process_learning_record() or _safe_evict_hint_metadata().
     """
     try:
         now = datetime.now(tz=timezone.utc).timestamp()
@@ -346,15 +376,29 @@ def _build_merged_attribution_prompt(
     )
 
 
-def _process_learning(run_id: str, user_query: str, robot_code: str, result: dict):
-    """Feed execution results into the adaptive learning system.
+def _process_learning_record(
+    run_id: str, user_query: str, robot_code: str, result: dict
+) -> tuple[ExecutionRecord | None, str] | None:
+    """Store this run's execution record and route it to the learning engines.
+
+    The fast half of learning. Runs the moment the result SSE has been sent, so
+    the record is queued for the writer thread while the artifacts are still
+    being written — a feedback POST arriving milliseconds after the result then
+    finds the row instead of racing it.
 
     Non-blocking: failures are logged and swallowed so the main
     pipeline is never affected.
 
     Guard: skips learning when user_query is empty (paste-and-execute).
-    Empty queries pollute ChromaDB embeddings and break SQLite
-    deduplication — garbage in, garbage out.
+    Empty queries pollute the execution embeddings and give hint retrieval
+    nothing to match on — garbage in, garbage out.
+
+    Returns (pre_run_record, injected_hint_ids_json) for
+    _process_learning_attribution, or None when nothing was recorded — in which
+    case the attribution half must not run. Both values are handed on rather
+    than re-read there because neither survives: the hint metadata cache is
+    consumed with a destructive .pop(), and pre_run_record is the state of the
+    row BEFORE this run's own store overwrote it.
     """
     try:
         feedback_loop = get_feedback_loop()
@@ -397,7 +441,8 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         # for is_first_attempt. pre_run_record is None when this is the first
         # execution of this workflow_id.
         # DEPENDENCY: failed re-runs do not overwrite the DB record (IntegrityError
-        # re-raise in _store_sqlite). Do not remove that behaviour without revisiting this.
+        # re-raise in _store_relational). Do not remove that behaviour without
+        # revisiting this.
         pre_run_record = None
         try:
             pre_run_record = feedback_loop.execution_memory.get(run_id)
@@ -410,7 +455,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
         is_first_attempt = (pre_run_record is None)
 
         # Re-run after edit: _hint_metadata_cache was consumed by the v1
-        # _process_learning call (.pop is destructive), so nl_injected_ids
+        # _process_learning_record call (.pop is destructive), so nl_injected_ids
         # defaulted to []. Recover the original generation-time hint IDs from
         # the DB — Schema v10 preserves execution_records.injected_hint_ids
         # across _update_to_passing_state. Without this, the re-run pass would
@@ -430,7 +475,7 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
 
         try:
             from src.backend.core.run_registry import get_run_registry
-            _, _run_org_id = get_run_registry().get_run_owner(run_id)
+            _run_org_id = get_run_registry().get_run_owner(run_id).org_id
         except Exception:
             _run_org_id = None
 
@@ -462,6 +507,47 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
                 feedback_loop.execution_memory.store_hint_workflow_trace,
                 run_id, selection_trace,
             )
+
+        logging.info(f"✅ Learning system processed execution {run_id}")
+        return (pre_run_record, injected_hint_ids_json)
+    except Exception as e:
+        logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
+        return None
+
+
+def _process_learning_attribution(
+    run_id: str,
+    user_query: str,
+    robot_code: str,
+    result: dict,
+    pre_run_record,
+    injected_hint_ids_json: str,
+) -> None:
+    """Credit the hints this run actually used — the slow half of learning.
+
+    Runs after persist_run: fire_usage_attribution makes a 5-30s LLM call on the
+    calling thread, and putting it ahead of persistence would delay a durable
+    report by that long. A client disconnect no longer stops this (the job is
+    detached); only the server stopping between the two halves loses the
+    credits but keeps the record — hint_attribution_done stays 0, so a later
+    re-execution can still credit them.
+
+    pre_run_record and injected_hint_ids_json come from
+    _process_learning_record and must NOT be re-read here. By the time this runs
+    the writer thread may already have stored this run's own record, so a fresh
+    execution_memory.get() would return the row this run just wrote rather than
+    the one that preceded it — and the hint metadata cache has been popped.
+
+    Non-blocking: failures are logged and swallowed so the main
+    pipeline is never affected.
+    """
+    try:
+        feedback_loop = get_feedback_loop()
+        if feedback_loop is None:
+            return
+
+        test_status = result.get('test_status', 'unknown')
+        url = extract_url_from_query(user_query) if user_query else None
 
         # NL-hint usage attribution (Part 2): on a passing run with NL hints
         # injected, credit only the hints actually used in the code via one LLM
@@ -528,9 +614,8 @@ def _process_learning(run_id: str, user_query: str, robot_code: str, result: dic
                 prompt_builder=prompt_builder,
             )
 
-        logging.info(f"✅ Learning system processed execution {run_id}")
     except Exception as e:
-        logging.warning(f"⚠️ Learning system error (non-blocking): {e}")
+        logging.warning(f"⚠️ Learning attribution error (non-blocking): {e}")
 
 
 def run_agentic_workflow(natural_language_query: str, model_provider: str, model_name: str, progress_queue: Queue = None, org_id: str | None = None, user_id: str | None = None) -> Generator[Dict[str, Any], None, None]:
@@ -556,6 +641,11 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
     workflow_id = str(uuid.uuid4())
     logging.info(f"🆔 Workflow ID: {workflow_id}")
 
+    # Wall clock for the whole run. Deliberately NOT execution_time, which is
+    # browser_metrics['execution_time'] — the browser-use figure this function
+    # passes straight through and which excludes both crew kickoffs and the gate.
+    _t0 = time.monotonic()
+
     # Bind workflow context so all subsequent log entries include workflow_id
     # without modifying any individual log call sites.
     bind_workflow_context(
@@ -567,8 +657,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         user_id=user_id,
     )
 
-    # Start with welcome message
-    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...", "progress": 0}
+    # Start with welcome message. Carries workflow_id so the caller can open a
+    # history row immediately: this is the only event guaranteed to be emitted
+    # before anything can fail, so a run that dies mid-flight is still
+    # attributable to an id.
+    yield {"status": "running", "message": f"{EMOJI['start']} Starting test generation...",
+           "progress": 0, "workflow_id": workflow_id}
 
     if model_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
@@ -623,9 +717,15 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # element stage).
             # org_id comes from the authenticated user (threaded down from the SSE
             # entry point); legacy/unauthenticated callers pass None → unscoped.
-            _crew_output, crew_with_results, optimization_metrics, hint_metadata, llm_monitor = run_crew(
+            run_result = run_crew(
                 natural_language_query, model_provider, model_name, workflow_id=workflow_id,
                 progress_queue=progress_queue, org_id=org_id)
+            (_crew_output, crew_with_results, optimization_metrics, hint_metadata,
+             llm_monitor, crew_stage_metrics, shared_llm,
+             crew_guardrail_attempts) = tuple(run_result)[:8]
+            # F1: browser-service's change marks, kept beside the steps (never in the
+            # assembler's prompt); an eight-member result has none.
+            change_waits = getattr(run_result, "change_waits", ()) or ()
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -634,7 +734,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Extract robot code from tasks[-1] (Code Assembler — the terminal task of
         # the assembler crew) and apply the shared normalization pipeline (also used
         # by the dryrun repair path) so both normalize identically.
-        robot_code = extract_and_normalize_robot_code(crew_with_results.tasks[-1].output)
+        robot_code = insert_change_waits(
+            extract_and_normalize_robot_code(crew_with_results.tasks[-1].output), change_waits)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -643,7 +744,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # not the asyncio loop) and AFTER create_workflow_span has closed (R5).
         gate = validate_and_repair(
             workflow_id, robot_code, model_provider, model_name,
-            progress_queue=progress_queue,
+            progress_queue=progress_queue, change_waits=change_waits,
         )
         robot_code = gate["code"]
 
@@ -657,44 +758,15 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # ============================================
         try:
             # 1. Extract CrewAI metrics
-            # Note: In CrewAI 1.3.0, we need to call calculate_usage_metrics() method
-            try:
-                usage_metrics_obj = crew_with_results.calculate_usage_metrics()
-
-                # Convert UsageMetrics object to dict
-                usage_metrics_dict = {
-                    'total_tokens': usage_metrics_obj.total_tokens,
-                    'prompt_tokens': usage_metrics_obj.prompt_tokens,
-                    'completion_tokens': usage_metrics_obj.completion_tokens,
-                    'successful_requests': usage_metrics_obj.successful_requests
-                }
-
-                logging.info(f"📊 Raw CrewAI usage metrics: {usage_metrics_dict}")
-                # NOTE: crew_with_results is the single-agent ASSEMBLER crew, but its
-                # calculate_usage_metrics() covers the WHOLE pipeline: the planner
-                # and assembler wrappers are separate instances (Task 22 gave the
-                # planner its own response_format) that ALIAS one _token_usage dict
-                # (RobotAgents.__init__), so it accumulates across both kickoffs and
-                # CrewAI sums it once per agent (here: once — the old
-                # 3-agent crew triple-counted). The authoritative call count is in
-                # "📊 Final LLM Stats" (crew.py), which reads llm_monitor
-                # (agents.llm._monitor) — incremented exactly once per
-                # CleanedLLMWrapper.call() invocation, scoped to this workflow only.
-
-            except Exception as e:
-                logging.warning(f"⚠️ Could not extract CrewAI usage metrics: {e}")
-                # Fallback to empty metrics
-                usage_metrics_dict = {
-                    'total_tokens': 0,
-                    'prompt_tokens': 0,
-                    'completion_tokens': 0,
-                    'successful_requests': 0
-                }
-
-            crewai_metrics = calculate_crewai_cost(
-                usage_metrics_dict,
-                model_name=model_name
-            )
+            # Read the shared wrapper's accumulator directly instead of the
+            # assembler crew's calculate_usage_metrics(). Both give the same
+            # numbers today, but only because the crew is single-agent:
+            # calculate_usage_metrics() adds the shared _token_usage once PER
+            # AGENT, which triple-counted on the old 3-agent crew. One wrapper
+            # per workflow is exact regardless of crew shape, and it prices
+            # through the same path as the per-stage figures, so the stages sum
+            # to the total. Never raises — returns zeroed usage on failure.
+            crewai_metrics = shared_llm.get_workflow_usage()
             logging.info(f"📊 CrewAI metrics: {crewai_metrics}")
             # Fold the dryrun repair crew's LLM cost into the CrewAI bucket. The repair
             # mini-crew replaced the removed validator agent (whose cost used to live
@@ -710,6 +782,38 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 crewai_metrics['prompt_tokens'] += _repair_usage.get('prompt_tokens', 0)
                 crewai_metrics['completion_tokens'] += _repair_usage.get('completion_tokens', 0)
                 logging.info(f"📊 Folded dryrun repair usage into CrewAI metrics: {_repair_usage}")
+
+            # 1b. Per-stage breakdown. The planner/assembler entries are drained
+            # in-thread at each task boundary (crew_ai/callbacks.py); repair is
+            # composed here from the gate's usage plus its own wall time, since
+            # the mini-crew has no task callback to drain. Same key set for all
+            # three, so a Grafana panel can GROUP BY stage without special cases.
+            _stage_metrics = dict(crew_stage_metrics or {})
+            # Key off the repair COUNT, not the usage dict. dryrun_service
+            # increments dryrun_repairs BEFORE invoking the repair crew and
+            # bills repair_duration_s in a `finally`, so a repair that raised —
+            # or one whose usage extraction failed and returned {}, which
+            # _repair_usage_dict() does by design so cost tracking can never
+            # break the gate — still spent real seconds. Keying off the usage
+            # dropped the whole stage on that path: the time disappeared from
+            # the per-stage panel while remaining inside workflow_duration_s.
+            # Zero-fill first, then overlay whatever usage did survive, so the
+            # key set matches planner/assembler and the Grafana panel's
+            # GROUP BY stage still needs no special case.
+            if int(gate.get("dryrun_repairs", 0) or 0) > 0:
+                _stage_metrics["repair"] = {
+                    "duration_s": gate.get("repair_duration_s", 0.0),
+                    "llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "tokens": 0, "cost": 0.0,
+                    **_repair_usage,
+                }
+
+            # Guardrail invocations from BOTH RobotTasks instances: the main
+            # crew's (assembly_output) and the repair mini-crew's (repair_output).
+            # The names never collide, so a plain merge is unambiguous.
+            _guardrail_attempts = dict(crew_guardrail_attempts or {})
+            for _name, _count in (gate.get("guardrail_attempts") or {}).items():
+                _guardrail_attempts[_name] = _guardrail_attempts.get(_name, 0) + _count
 
             # 2. Read browser-use metrics from temp file
             temp_storage = get_temp_metrics_storage()
@@ -748,6 +852,12 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 timestamp=datetime.now(),
                 url=extract_url_from_query(natural_language_query),
 
+                # What produced the cost and token figures below. Taken from
+                # this call's arguments, not from settings: a caller may pass a
+                # provider/model other than the configured default.
+                model_provider=model_provider,
+                model_name=model_name,
+
                 # Totals
                 total_llm_calls=crewai_metrics['llm_calls'] + browser_calls_for_total,
                 total_cost=crewai_metrics['cost'] + browser_actual_cost,
@@ -785,6 +895,17 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
                 # identify_s phase breakdown (2026-07-26 efficiency check)
                 phase_timings=browser_metrics.get('phase_timings'),
                 agent_diagnostics=browser_metrics.get('agent_diagnostics'),
+
+                # Workflow wall time — crew kickoffs + element stage + gate.
+                workflow_duration_s=round(time.monotonic() - _t0, 3),
+
+                # The deterministic gate's own account of what it did.
+                dryrun_status=gate.get("dryrun_status"),
+                dryrun_attempts=gate.get("dryrun_attempts"),
+                dryrun_repairs=gate.get("dryrun_repairs"),
+
+                crew_stage_metrics=_stage_metrics,
+                guardrail_attempts=_guardrail_attempts,
             )
 
             # 4. Merge optimization metrics from CrewAI run (context reduction, keyword
@@ -813,13 +934,13 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             collector = get_workflow_metrics_collector()
             # Prefer the org_id threaded into this call. The run row may not be
             # persisted yet on the stream_generate_only / stream_generate_and_run
-            # paths, so get_run_owner() can return (None, None) and would persist
+            # paths, so get_run_owner() can return an all-None row and would persist
             # an authenticated user's metrics as unscoped. Fall back to the
             # registry only when no org_id was threaded through.
             _run_org_id: str | None = org_id
             if _run_org_id is None:
                 try:
-                    _, _run_org_id = get_run_registry().get_run_owner(workflow_id)
+                    _run_org_id = get_run_registry().get_run_owner(workflow_id).org_id
                 except Exception as e:
                     logging.debug("[RUN_REGISTRY] org lookup for metrics failed: %s", e)
             collector.record_workflow(unified_metrics, org_id=_run_org_id)
@@ -857,6 +978,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         if gate["dryrun_status"] != "passed":
             complete_event["dryrun_status"] = gate["dryrun_status"]
             complete_event["dryrun_errors"] = gate.get("dryrun_errors", "")
+            # The gate's own reason for degrading. 'unverified' has several
+            # causes (executor hop down, runner image missing, container
+            # produced no output.xml) and only the gate knows which; it records
+            # that in `message`, and dryrun_errors cannot carry it because only
+            # the 'failed' exit sets that key. Without this the client had
+            # nothing to show and had to assert one hard-coded cause.
+            if gate.get("message"):
+                complete_event["dryrun_message"] = redact_secrets(gate["message"])
         yield complete_event
 
     except (json.JSONDecodeError, AttributeError, ValueError) as e:
@@ -865,7 +994,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_evict_hint_metadata(workflow_id)
         # workflow_id lets the bench detach a failed run — its pre-failure LLM
         # calls are already recorded in llm_traces.
-        yield {"status": "error", "message": f"Failed to generate valid Robot Framework code: {e}",
+        yield {"status": "error",
+               "message": f"Failed to generate valid Robot Framework code: {redact_secrets(str(e))}",
                "workflow_id": workflow_id}
     except Exception as e:
         logging.error(
@@ -874,7 +1004,14 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         _safe_delete_temp_metrics(workflow_id)
         _safe_evict_hint_metadata(workflow_id)
 
-        yield {"status": "error", "message": f"An error occurred: {str(e)}",
+        # A setup failure (bad API key, unmounted credentials, billing/API off) is
+        # the most likely reason a first run dies here, and litellm reports all of
+        # them as a nested google.rpc JSON blob. Translate the ones we recognise
+        # into an instruction; anything else keeps the raw text, redacted — the
+        # provider quotes the failing request URL, which carries the API key.
+        setup_hint = friendly_setup_error(e, model_provider) or friendly_provider_error(e)
+        message = setup_hint or f"An error occurred: {redact_secrets(str(e))}"
+        yield {"status": "error", "message": message,
                "workflow_id": workflow_id}
     
 
@@ -894,15 +1031,16 @@ def run_workflow_in_thread(
     where the CrewAI event bus handlers push real-time progress events directly.
 
     If a _SlotReleaser is provided, calls releaser.done() unconditionally in the
-    finally block so the countdown latch can release the slot even when the SSE
-    client has already disconnected and the generator's finally fired first.
+    finally block so the countdown latch can release the slot even when the
+    job was cancelled (server shutdown) and the generator's finally fired
+    first.
     """
     try:
         for event in run_agentic_workflow(user_query, model_provider, model_name, progress_queue=queue, org_id=org_id, user_id=user_id):
             queue.put(event)
     except Exception as e:
         logging.error(f"Exception in workflow thread: {e}")
-        queue.put({"status": "error", "message": f"Workflow thread failed: {e}"})
+        queue.put({"status": "error", "message": f"Workflow thread failed: {redact_secrets(str(e))}"})
     finally:
         if releaser is not None:
             releaser.done()
@@ -922,28 +1060,215 @@ class _GenerationError(Exception):
 
 
 def _record_run(run_id: str, user: dict | None, user_query: str | None, status: str,
-                robot_code: str | None = None, rerun_of: str | None = None) -> None:
+                robot_code: str | None = None, rerun_of: str | None = None,
+                error_message: str | None = None, group_id: str | None = None,
+                is_platform_admin: bool = False, test_id: str | None = None,
+                test_version_id: str | None = None,
+                version_reason: str | None = None) -> None:
     """History bookkeeping (test_runs row) — must never break the run pipeline.
 
     get_run_registry() itself can raise on first use when Postgres is down, so
     the guard sits here rather than relying on the registry's internal
     swallowing alone.
+
+    is_platform_admin becomes test_runs.ran_as_platform_admin (owner
+    decision D7), write-once on the row that CREATED it. Every call site
+    in this module passes an is_validated_admin result computed once per
+    REQUEST rather than once per call — but from two different places.
+    _compute_is_platform_admin below serves the generate paths
+    (stream_generate_only, stream_generate_and_run, and
+    stream_execute_only when nobody handed one in); the two re-run routes
+    pass history_scope()'s own flag straight through from
+    api/endpoints.py and never reach _compute_is_platform_admin at all.
+
+    test_id/test_version_id/version_reason NAME the test this run belongs to,
+    instead of letting the registry derive one (P2 Task 7). Only the
+    regeneration and Tests-page-Run paths pass them; RunRegistry._attach_test's
+    first branch is the authority on what each combination does.
     """
     try:
         get_run_registry().record_start(
             run_id, user, user_query, status,
             robot_code=robot_code, rerun_of=rerun_of,
+            error_message=error_message, group_id=group_id,
+            is_platform_admin=is_platform_admin, test_id=test_id,
+            test_version_id=test_version_id, version_reason=version_reason,
         )
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — run {run_id} not recorded: {e}")
 
 
-def _set_run_status(run_id: str, status: str) -> None:
-    """Advance a test_runs row's status — never breaks the run pipeline."""
+def _read_run_version(run_id: str) -> tuple[str | None, int | None]:
+    """The test and version number a run ended up attached to.
+
+    (None, None) on an unattached run, an unknown one, or any failure — the
+    caller cannot tell those apart and does not try to: its message says the
+    version could not be CONFIRMED, never that it was not saved.
+    """
     try:
-        get_run_registry().set_status(run_id, status)
+        return get_run_registry().get_run_version(run_id)
+    except Exception as e:
+        logging.error(f"[RUN_REGISTRY] version read-back failed for {run_id}: {e}")
+        return (None, None)
+
+
+async def _compute_is_platform_admin(user: dict | None) -> bool:
+    """The caller's platform-admin authority, computed ONCE per request.
+
+    is_validated_admin only re-reads the users table when the token's own
+    role claim is already "admin" — every other caller returns False before
+    that read runs. It still costs a DB round trip for exactly the callers
+    who could be flagged, so every entry point below calls this once and
+    threads the result to every _record_run call the request makes, rather
+    than re-deriving it per write.
+
+    Never raises: a failure here must not break the run pipeline, the same
+    rule _record_run itself lives by, so it degrades to False (non-admin)
+    exactly as an unresolved caller would — is_validated_admin already fails
+    closed internally, but the thread hop is guarded here too, the same
+    reasoning _make_start_recorder's own try/except uses around its
+    to_thread call.
+    """
+    try:
+        return await asyncio.to_thread(is_validated_admin, user)
+    except Exception as e:
+        logging.error(
+            "[RUN_REGISTRY] platform-admin check failed; treating as non-admin: %s", e)
+        return False
+
+
+_ERROR_MESSAGE_MAX_CHARS = 2000
+
+
+def _store_failure(result_store: dict, event: dict) -> None:
+    """Remember a generation failure so the caller can record a test_runs row.
+
+    The error SSE already carries workflow_id (so the bench can detach failed
+    runs); this keeps it, plus the reason, for the history row. Redacted
+    BEFORE the cap — the History drawer now shows this stored text verbatim
+    (E5b Part B), so a credential a provider quoted back in its own error
+    must never reach the row raw.
+    """
+    result_store["error_message"] = redact_secrets(
+        event.get("message") or "Generation failed")[:_ERROR_MESSAGE_MAX_CHARS]
+    if event.get("workflow_id"):
+        result_store["workflow_id"] = event["workflow_id"]
+
+
+def _make_start_recorder(user: dict | None, user_query: str | None,
+                         is_platform_admin: bool = False,
+                         test_id: str | None = None):
+    """Return an async callback that opens a test_runs row at status 'running'.
+
+    Without an opening row, a run that dies before either terminal path — the
+    process is killed, the container restarts, the machine runs out of memory —
+    leaves no trace anywhere, and "never started" is indistinguishable from
+    "started and vanished". A row left sitting at 'running' makes that
+    difference visible.
+
+    'running' is not a new status: the execute path already writes it. The
+    terminal upsert overwrites it, and record_start COALESCEs ownership and
+    query, so the later write fills in anything missing here.
+
+    is_platform_admin is the caller's ONE _compute_is_platform_admin result
+    for this request — passed straight through to _record_run, not
+    recomputed.
+
+    test_id names the test a REGENERATION is regenerating, so the opening row
+    attaches to it. Deliberately without a version_reason: this write carries
+    no code, so it can only ever attach, never append (spec case 10 / D8 (b)).
+    """
+    async def _record(workflow_id: str) -> None:
+        try:
+            run_id = str(uuid.UUID(workflow_id))
+        except ValueError:
+            logging.warning("[RUN_REGISTRY] non-UUID workflow_id at start; run not opened")
+            return
+        try:
+            await asyncio.to_thread(_record_run, run_id, user, user_query, "running",
+                                    is_platform_admin=is_platform_admin,
+                                    test_id=test_id)
+        except Exception as e:
+            # _record_run swallows registry errors itself; this guards the hop
+            # into the thread as well. Opening a row is bookkeeping — it must
+            # never take down a run that is otherwise fine.
+            logging.error("[RUN_REGISTRY] could not open run %s: %s", run_id, e)
+
+    return _record
+
+
+def _record_generation_failure(result_store: dict, user: dict | None,
+                               user_query: str | None,
+                               is_platform_admin: bool = False,
+                               test_id: str | None = None) -> None:
+    """Write a test_runs row for a run that never produced code.
+
+    Without this a generation failure leaves no trace anywhere: the metrics
+    block runs after the dryrun gate, so _GenerationError returns before any
+    row is written and the run is invisible to History and to Grafana.
+
+    Status 'error' already exists in test_runs and in the SPA's RunStatus and
+    filter list, so this adds no vocabulary and needs no UI change.
+
+    is_platform_admin is the caller's ONE _compute_is_platform_admin result
+    for this request — passed straight through to _record_run, not
+    recomputed.
+
+    test_id attaches a failed REGENERATION to the test it was regenerating
+    (owner decision D8 (b), spec case 10): no version is written and
+    current_version does not move, but the failure is visible on the test
+    rather than lost. A brand-new generation that fails still names no test.
+    """
+    wf_id = result_store.get("workflow_id")
+    if not wf_id:
+        # No id means nothing to key the row on; the SSE already told the user.
+        return
+    try:
+        run_id = str(uuid.UUID(wf_id))
+    except ValueError:
+        logging.warning("[RUN_REGISTRY] non-UUID workflow_id on failure; run not recorded")
+        return
+    _record_run(run_id, user, user_query, status="error",
+                error_message=result_store.get("error_message"),
+                is_platform_admin=is_platform_admin, test_id=test_id)
+
+
+def _set_run_status(run_id: str, status: str, error_message: str | None = None) -> None:
+    """Advance a test_runs row's status and record why — never breaks the run pipeline.
+
+    error_message is written EXACTLY (RunRegistry.set_status): None clears a
+    stale reason, which is what a passed re-run of a reused run id needs.
+    """
+    try:
+        get_run_registry().set_status(run_id, status, error_message)
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] unavailable — status for {run_id} not recorded: {e}")
+
+
+def _stored_reason(text: str | None) -> str | None:
+    """Failure text as test_runs.error_message holds it: redacted, then capped
+    keeping the head. None when there is no text."""
+    if not text:
+        return None
+    return redact_secrets(text)[:_ERROR_MESSAGE_MAX_CHARS] or None
+
+
+def _failure_reason(output_xml_path: str | None) -> tuple[str | None, str | None]:
+    """(stored reason, plain-English sentence) for a `failed` run — never raises.
+
+    Runs inside the try that spans the verdict write and the result event, on
+    every failing run (bench included), so an exception here would turn a real
+    `failed` into `error` and drop the result event. It returns (None, None)
+    instead. The sentence is classified from the SAME stored string, so the
+    Generate card and History read one text.
+    """
+    try:
+        message = _stored_reason(first_failure_message(output_xml_path))
+        return message, failure_sentence(message)
+    except Exception:
+        logging.exception(
+            "[RUN_REGISTRY] could not derive the failure reason from %s", output_xml_path)
+        return None, None
 
 
 def _run_owner(run_id: str) -> str | None:
@@ -953,6 +1278,104 @@ def _run_owner(run_id: str) -> str | None:
     except Exception as e:
         logging.error(f"[RUN_REGISTRY] owner lookup failed for {run_id}: {e}")
         return None
+
+
+# After the 'running' write an execution can legitimately wait for the image
+# provision (900 s) and then the execute call (1,860 s by default, from
+# TEST_EXECUTION_TIMEOUT) = 2,760 s. A row still 'running' past that plus one
+# sweep interval, and never under an hour, was abandoned.
+_SWEEP_EVERY_S = 600
+_ABANDONED_AFTER_S = max(
+    3600,
+    runner_exec_client._IMAGE_PROVISION_READ_TIMEOUT_S
+    + runner_exec_client._EXECUTE_READ_TIMEOUT_S + _SWEEP_EVERY_S,
+)
+
+
+def _close_abandoned() -> list[str]:
+    """Registry lookup and sweep in one call, so a slow construction (Postgres
+    down at boot: connect timeout, schema DDL) stays off the event loop."""
+    return get_run_registry().close_abandoned_runs(_ABANDONED_AFTER_S)
+
+
+async def sweep_abandoned_runs_forever() -> None:
+    """Close 'running' rows a dead server left behind, every _SWEEP_EVERY_S.
+
+    Sweeps first, then sleeps. A failed sweep is logged and the loop
+    carries on; cancelling the task is the only way it ends."""
+    logging.info(
+        "[RUN_REGISTRY] abandoned-run sweeper started (limit %ss, every %ss)",
+        _ABANDONED_AFTER_S, _SWEEP_EVERY_S)
+    while True:
+        try:
+            closed = await asyncio.to_thread(_close_abandoned)
+            if closed:
+                logging.warning(
+                    "[RUN_REGISTRY] closed %s abandoned run(s) still 'running' "
+                    "after %ss: %s", len(closed), _ABANDONED_AFTER_S,
+                    ", ".join(closed))
+        except Exception as e:
+            logging.error(f"[RUN_REGISTRY] abandoned-run sweep failed: {e}")
+        await asyncio.sleep(_SWEEP_EVERY_S)
+
+
+# Jobs that outlive their HTTP response. A strong reference per task: the event
+# loop holds tasks weakly, so an unreferenced one can be collected mid-run.
+_detached_jobs: set[asyncio.Task] = set()
+_JOB_DONE = object()
+
+
+async def _pump_job(job, events: asyncio.Queue, reader_gone: asyncio.Event, name: str) -> None:
+    """Drive one detached job to its end, handing its events to the relay while a reader is there."""
+    try:
+        async for sse in job:
+            if not reader_gone.is_set():
+                events.put_nowait(sse)
+    except Exception as e:
+        # Logged here, always: a reader that leaves between this put
+        # and its own next read would otherwise take the error with it.
+        logging.exception("[DETACHED] stream job failed: %s", name)
+        if not reader_gone.is_set():
+            events.put_nowait(e)
+    finally:
+        events.put_nowait(_JOB_DONE)
+
+
+def _detached(job_fn):
+    """Run a stream's job to its end whether or not anyone is still reading it.
+
+    Every terminal write of a run — its status and reason, the learning
+    record, artifact persistence — lives inside the stream's own body. Served
+    directly, that body is cancelled the moment the client leaves (Starlette
+    cancels the response; measured: CancelledError at the parked await), while
+    the workflow thread and the Docker run finish with nobody left to record
+    the outcome: the row reads 'running' forever.
+
+    So the job runs in its own task and the response only relays what it
+    emits. A reader that leaves stops the relay, never the job. The job's own
+    finally blocks still release the slot — now when the work has ended, not
+    when the reader went away.
+
+    What this does not cover: the process dying mid-run. Nothing is left
+    alive to write anything then.
+    """
+    @functools.wraps(job_fn)
+    async def stream(*args, **kwargs):
+        events: asyncio.Queue = asyncio.Queue()
+        reader_gone = asyncio.Event()
+        task = asyncio.create_task(
+            _pump_job(job_fn(*args, **kwargs), events, reader_gone, job_fn.__name__))
+        _detached_jobs.add(task)
+        task.add_done_callback(_detached_jobs.discard)
+        try:
+            while (item := await events.get()) is not _JOB_DONE:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            reader_gone.set()
+
+    return stream
 
 
 def _capacity_error_sse(stage: str) -> str:
@@ -987,17 +1410,42 @@ def _start_workflow_thread(
     return thread
 
 
-async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict):
+async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_store: dict,
+                                  on_workflow_id=None):
     """Drain the workflow queue, yielding SSE generation events.
 
     Populates result_store with 'robot_code' and 'workflow_id' on completion.
     Raises _GenerationError when an error event is seen or no code is produced,
     so the caller can return early.  The error SSE is always yielded before
     raising, so the client receives it.
+
+    on_workflow_id, when given, is awaited ONCE with the workflow_id the first
+    time any event carries it — which is the opening 'running' event, long
+    before either terminal path. That is what lets the caller open a history row
+    for a run that may never reach a terminal event at all.
     """
+    async def _note_workflow_id(event: dict) -> None:
+        """Fire on_workflow_id once, on the first event that carries an id.
+
+        Called from BOTH drain loops: a short run can finish before the
+        is_alive() loop runs at all, leaving every event to the buffered drain
+        below — which is exactly the vanished-run case this exists to catch.
+        """
+        if on_workflow_id is None or not event.get("workflow_id"):
+            return
+        already_seen = result_store.get("workflow_id") is not None
+        result_store["workflow_id"] = event["workflow_id"]
+        if not already_seen:
+            await on_workflow_id(event["workflow_id"])
+
     while workflow_thread.is_alive():
         try:
             event = q.get_nowait()
+            # The opening row is still written before the event is yielded.
+            # The job no longer dies at a yield when the client leaves (it
+            # runs detached), but the row must exist before any terminal
+            # write can happen, so it is noted first.
+            await _note_workflow_id(event)
             yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
             if event.get("status") == "complete" and "robot_code" in event:
                 result_store["robot_code"] = event["robot_code"]
@@ -1005,6 +1453,7 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
                 workflow_thread.join()
                 return
             elif event.get("status") == "error":
+                _store_failure(result_store, event)
                 workflow_thread.join()
                 raise _GenerationError()
         except Empty:
@@ -1014,16 +1463,19 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
     # Thread finished — drain any remaining buffered events
     while not q.empty():
         event = q.get_nowait()
+        await _note_workflow_id(event)  # before the yield — see the loop above
         yield f"data: {json.dumps({'stage': 'generation', **event})}\n\n"
         if event.get("status") == "complete" and "robot_code" in event:
             result_store["robot_code"] = event["robot_code"]
             result_store["workflow_id"] = event.get("workflow_id")
         elif event.get("status") == "error":
+            _store_failure(result_store, event)
             raise _GenerationError()
 
     if not result_store.get("robot_code"):
         msg = "Agentic workflow finished without generating code."
         logging.error(msg)
+        _store_failure(result_store, {"message": msg})
         yield f"data: {json.dumps({'stage': 'generation', 'status': 'error', 'message': msg})}\n\n"
         raise _GenerationError()
 
@@ -1037,8 +1489,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
 
     release_slot is a 0-arg callable (the caller's _SlotReleaser.done). It is
     invoked the moment the result SSE has been sent, so the concurrency slot is
-    freed before the background learning step — which may make a 5-30s Trigger 1
-    LLM call — runs. Idempotent: the caller's finally releases the slot too.
+    freed before the background learning steps — the second of which may make a
+    5-30s attribution LLM call. Idempotent: the caller's finally releases the
+    slot too.
+
+    Learning runs in two halves around artifact persistence: the record half
+    immediately after the result SSE (so a feedback POST finds the row), the
+    attribution half after persist_run (so its LLM call cannot delay a durable
+    report).
     """
     test_filename = "test.robot"
     test_filepath = str(get_artifact_store().run_dir(run_id, create=True) / test_filename)
@@ -1053,8 +1511,14 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
     except Exception as e:
         logging.error(f"Failed to save test code: {e}")
         _safe_evict_hint_metadata(run_id)
-        await asyncio.to_thread(_set_run_status, run_id, "error")
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': f'Failed to save test code: {str(e)}'})}\n\n"
+        # Built once, before the write, so the row and the event say the same.
+        save_error = f"Failed to save test code: {redact_secrets(str(e))}"[
+            :_ERROR_MESSAGE_MAX_CHARS]
+        await asyncio.to_thread(_set_run_status, run_id, "error", save_error)
+        # run_id here for the same reason it is on the first event below:
+        # this is the only execution event that can arrive BEFORE it, so a
+        # client that never sees another one still learns which run failed.
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': save_error})}\n\n"
         return
 
     try:
@@ -1062,8 +1526,24 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # no longer touches Docker. ensure_image is required — if it raises
         # (executor unreachable / image build failed) the except below converts
         # it to an execution-error event, since there is no image to run on.
+        # Announce BEFORE ensure_image, not after. On a first run this call pulls
+        # the runner image and returns only when it is on disk — measured 98.8s on
+        # a cold machine — and yielding afterwards left the client silent for that
+        # entire wait, which reads as a hang. This also moves the execution stage's
+        # first event ahead of image provisioning, so exec_s now covers it; on a
+        # warm machine ensure_image is a local image lookup, so the difference is
+        # sub-second and the bench is unaffected.
+        #
+        # run_id rides on this event because it is the FIRST one execution
+        # can yield, and /execute-test is an SSE stream with no response body
+        # for the id to come back in — so without it the SPA cannot learn
+        # which run it just started and reloads the whole list to guess
+        # (owner ruling R7-5). A key on an existing event rather than a new
+        # event: both SPA clients read fields by name off each event and
+        # ignore ones they do not know, and no test asserts an exact
+        # execution-event dict.
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'run_id': run_id, 'message': 'Preparing execution environment (on the first run this downloads the test runner image, which can take a few minutes)...'})}\n\n"
         await asyncio.to_thread(runner_exec_client.ensure_image)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'running', 'message': 'Preparing execution environment...'})}\n\n"
 
         logging.info(f"🚀 Executing test: {test_filename}")
         result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
@@ -1071,8 +1551,27 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # History row: only passed/failed are real verdicts (from output.xml);
         # anything else means the run errored before producing one.
         _status = result.get("test_status")
-        await asyncio.to_thread(
-            _set_run_status, run_id, _status if _status in ("passed", "failed") else "error")
+        _verdict = _status if _status in ("passed", "failed") else "error"
+        # Why, with the verdict. `result` carries only a generic message, so a
+        # failed run's reason is read from output.xml — off the event loop, and
+        # through _failure_reason, which cannot raise. A passed run stores
+        # None, clearing a reason left by an earlier run of the same id.
+        if _verdict == "failed":
+            _reason, result["failure_sentence"] = await asyncio.to_thread(
+                _failure_reason, result.get("output_xml_path"))
+        elif _verdict == "error":
+            _reason = _stored_reason(str(result.get("message") or ""))
+            # The row gets the capped, redacted text (Ruling R6); the SSE
+            # event below streams `result` as-is, so without this the raw
+            # message — a malformed or version-skewed runner body — reaches
+            # the browser unredacted. Redact only, don't cap: the other
+            # execution-error site in this function deliberately streams the
+            # full redacted text and stores the capped copy.
+            if result.get("message"):
+                result["message"] = redact_secrets(str(result["message"]))
+        else:
+            _reason = None
+        await asyncio.to_thread(_set_run_status, run_id, _verdict, _reason)
 
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
 
@@ -1080,6 +1579,21 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # background learning step so a Case B re-run's Trigger 1 LLM call
         # (~5-30s) does not hold concurrency capacity it has no need for.
         release_slot()
+
+        # Learning, half 1 of 2: submit this run's execution record NOW, before
+        # the artifact work below. In practice the SPA cannot race this: the
+        # generator holds the stream open through _process_learning_attribution
+        # and GeneratePage.tsx gates the feedback panel on !busy, so the
+        # measured gap between the result SSE and Submit being clickable is
+        # 606ms and 478ms on two real runs, not milliseconds. The reorder is
+        # still worth having for API callers that poll rather than gate on the
+        # stream — every step this write sits behind is a step it can lose a
+        # race by, for those callers.
+        # The two change-wait lines are the framework's, not the assembler's: learning must
+        # not score them or show them back to the LLM. The test that ran keeps them.
+        learning_code = remove_change_waits(robot_code)
+        learning_ctx = await asyncio.to_thread(
+            _process_learning_record, run_id, user_query, learning_code, result)
 
         # Inline screenshots BEFORE persist_run so the durable copy (local serve
         # or S3 upload) is self-contained for the CSP-sandboxed report route.
@@ -1096,23 +1610,83 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # a successful run into an error.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
 
-        await asyncio.to_thread(_process_learning, run_id, user_query, robot_code, result)
+        # Learning, half 2 of 2: hint attribution makes a 5-30s LLM call, so it
+        # stays behind artifact durability. None means the record half stored
+        # nothing (learning off, empty query, or it threw) — there is nothing to
+        # credit against.
+        if learning_ctx is not None:
+            await asyncio.to_thread(
+                _process_learning_attribution, run_id, user_query, learning_code,
+                result, *learning_ctx)
 
     except Exception as e:
         logging.error(f"An error occurred during Docker execution: {e}")
         _safe_evict_hint_metadata(run_id)
-        await asyncio.to_thread(_set_run_status, run_id, "error")
+        # Unlike its siblings above, this message has no prefix — so an exception
+        # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
+        # would leave the client with status='error' and nothing to show, and the
+        # log line above as the only record of the cause. Name the type instead.
+        # Built before the write: the row stores it capped (a runner system
+        # error carries up to 400 lines of container stderr), the event keeps
+        # it whole.
+        detail = redact_secrets(str(e)) or type(e).__name__
+        await asyncio.to_thread(
+            _set_run_status, run_id, "error", detail[:_ERROR_MESSAGE_MAX_CHARS])
         # Persist whatever artifacts the run produced before erroring (a partial
         # log.html is still useful). Best-effort: persist_run never raises and
         # no-ops when there is no staging dir. Without this, an errored run's
         # report is served only from the originating replica's local staging and
         # 404s on any other replica in an S3 deployment.
         await asyncio.to_thread(get_artifact_store().persist_run, run_id)
-        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': detail})}\n\n"
 
 
+async def _confirm_version(
+    run_id: str | None, user: dict | None, user_query: str | None,
+    robot_code: str | None, is_platform_admin: bool,
+    test_id: str | None, version_reason: str | None,
+) -> str:
+    """The regeneration stream's terminal event, built from a READ-BACK.
+
+    Generation's own 'complete' event says the LLM produced code, which is a
+    different fact from "version n+1 exists". record_start swallows every
+    failure — a lost connection, a lock timeout, and in particular a deadlock
+    with either folder-move route, because no lock order avoids both
+    (measured) — so the only honest way to report success is to go and look.
+
+    Exactly ONE retry when nothing is found, and it is safe to repeat: the
+    registry's named-test branch never appends to a run whose row already
+    names a version, so a retry after a write that actually succeeded is a
+    no-op. It is a NEW _record_run call site, so it passes is_platform_admin
+    like the other five — the retry can be the write that CREATES the row
+    when the first was lost outright, and that column is write-once on
+    whichever write does.
+
+    When the second read-back still finds nothing, the event says the version
+    could not be CONFIRMED. This function cannot tell "it was not saved" from
+    "I could not check" — a read failure answers (None, None) exactly like a
+    missing row — and telling someone their work was lost when it may be in
+    the database is the one wrong answer available here.
+    """
+    attached = n = None
+    if run_id:
+        attached, n = await asyncio.to_thread(_read_run_version, run_id)
+        if n is None:
+            await asyncio.to_thread(
+                _record_run, run_id, user, user_query, status="generated",
+                robot_code=robot_code, is_platform_admin=is_platform_admin,
+                test_id=test_id, version_reason=version_reason)
+            attached, n = await asyncio.to_thread(_read_run_version, run_id)
+    if attached is None or n is None:
+        return f"data: {json.dumps({'stage': 'version', 'status': 'error', 'run_id': run_id, 'message': 'Generation finished, but the new version could not be confirmed. Reload the test list to see whether it is there.'})}\n\n"
+    return f"data: {json.dumps({'stage': 'version', 'status': 'complete', 'test_id': attached, 'n': n, 'run_id': run_id})}\n\n"
+
+
+@_detached
 async def stream_generate_only(
-    user_query: str, model_provider: str, model_name: str, user: dict | None = None
+    user_query: str, model_provider: str, model_name: str, user: dict | None = None,
+    regenerate_test_id: str | None = None, version_reason: str | None = None,
+    report_version: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Generates Robot Framework test code without executing it.
@@ -1120,6 +1694,25 @@ async def stream_generate_only(
 
     user: the authenticated requester (from require_user) — recorded on the
     test_runs history row so regular users can see their own runs.
+
+    regenerate_test_id/version_reason/report_version are POST
+    /api/tests/{test_id}/versions' three parameters, and POST /generate-test
+    passes none of them, so its behaviour is unchanged.
+
+    regenerate_test_id reaches ALL THREE writes this function makes — the
+    opening row, the failure row and the success row — because a
+    regeneration that dies must still be visible on the test it was
+    regenerating (spec case 10), and one that succeeds must append to that
+    test rather than mint a second one. version_reason rides on the SUCCESS
+    write alone; it is the label spec section 7.4 records and the route
+    computes it when the request arrives, never here.
+
+    report_version ends the stream with a `stage: "version"` event built from
+    a READ-BACK of what actually landed, because record_start swallows every
+    failure it meets — a deadlock with either folder-move route included, and
+    no lock order avoids both (measured). It is set for `mode: "new_test"`
+    too, where regenerate_test_id is None and the read-back names the test
+    that was MINTED.
     """
     if not _acquire_workflow_slot():
         yield _capacity_error_sse("generation")
@@ -1127,40 +1720,64 @@ async def stream_generate_only(
 
     # Two-party latch: thread + generator both call done().
     # Slot is released only when the last of the two finishes.
-    # This prevents premature release when the client disconnects mid-stream
-    # while the LLM thread is still running.
+    # This prevents premature release when the job is cancelled (server
+    # shutdown) while the LLM thread is still running.
     releaser = _SlotReleaser()
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
         q = Queue()
         org_id = user.get("org_id") if user else None
         user_id = user.get("user_id") if user else None
         workflow_thread = _start_workflow_thread(q, user_query, model_provider, model_name, releaser, org_id=org_id, user_id=user_id)
         result_store: dict = {}
         try:
-            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+            async for sse in _drain_generation_queue(
+                    workflow_thread, q, result_store,
+                    on_workflow_id=_make_start_recorder(
+                        user, user_query, is_platform_admin,
+                        test_id=regenerate_test_id)):
                 yield sse
         except _GenerationError:
+            await asyncio.to_thread(
+                _record_generation_failure, result_store, user, user_query,
+                is_platform_admin, regenerate_test_id)
+            # No version event here, deliberately: nothing was generated, so
+            # there is nothing to confirm and generation's own error event is
+            # the client's last word (spec case 10 / 37 (b)).
             return
 
         # History row: a generate-only run is terminal at 'generated' until the
         # user executes it (execute-test upserts the same id to 'running').
         wf_id = result_store.get("workflow_id")
+        run_id = None
         if wf_id:
             try:
-                await asyncio.to_thread(
-                    _record_run, str(uuid.UUID(wf_id)), user, user_query, status="generated",
-                    robot_code=result_store.get("robot_code"))
+                run_id = str(uuid.UUID(wf_id))
             except ValueError:
                 logging.warning("[RUN_REGISTRY] non-UUID workflow_id from generation; run not recorded")
+        if run_id:
+            await asyncio.to_thread(
+                _record_run, run_id, user, user_query, status="generated",
+                robot_code=result_store.get("robot_code"),
+                is_platform_admin=is_platform_admin,
+                test_id=regenerate_test_id, version_reason=version_reason)
 
         logging.info("✅ Test generation complete. Ready for user review.")
+        if report_version:
+            yield await _confirm_version(
+                run_id, user, user_query, result_store.get("robot_code"),
+                is_platform_admin, regenerate_test_id, version_reason)
     finally:
         releaser.done()  # Generator's share of the latch
 
 
+@_detached
 async def stream_execute_only(
     robot_code: str, user_query: str = None, workflow_id: str = None, user: dict | None = None,
-    history_query: str | None = None, rerun_of: str | None = None
+    history_query: str | None = None, rerun_of: str | None = None,
+    group_id: str | None = None, is_platform_admin: bool | None = None,
+    test_id: str | None = None, test_version_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Executes provided Robot Framework test code in Docker container.
@@ -1179,6 +1796,35 @@ async def stream_execute_only(
         rerun_of: The ORIGINAL run this re-run was cloned from (root-flattened
             by the endpoint). Stored on the history row so /api/feedback can
             route feedback to the run that owns the learning record.
+        group_id: The folder of the run this one was cloned from — a re-run
+            stays where its source was filed until the user moves it. Set only
+            by the rerun path. record_start re-checks it against the CALLER'S
+            org — the token's, or the one _lookup_org_id derives — and drops
+            it if the folder is not that org's, so a folder a platform admin
+            could see but the caller's org could not never reaches the row.
+            That is not always the org the row ends up carrying: the check
+            runs before _attach_test, which can replace it with the TEST'S
+            org (D6). See _fileable_group_id and delete_group in
+            core/run_registry.py for the gap that leaves. Org only — there is
+            no owner term in that check, and there should not be: D5 lets any
+            org member re-run a published test, and their re-run stays in the
+            folder.
+        is_platform_admin: Pre-computed platform-admin flag. Both
+            re-run routes in api/endpoints.py — _rerun_from_history
+            (History's "Run again") and _run_current_version (the Tests
+            page's Run) — already hold this from their own
+            history_scope() call and pass it here instead of paying for
+            a second one. Only the third caller, execute_test_only's
+            paste-and-execute path, leaves it None and pays for the
+            computation below.
+        test_id/test_version_id: The test and the exact version being run,
+            set only by POST /execute-test's test_id path (the Tests page's
+            Run). The version is named rather than derived so a run that
+            starts just before a regeneration lands keeps the version it
+            actually executed (spec case 14), and the registry checks the
+            PAIR before storing it. No group_id goes with them: a NULL folder
+            column on the run can never go stale, and the run inherits its
+            test's folder by join.
     """
     if not robot_code or not robot_code.strip():
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'message': 'No test code provided'})}\n\n"
@@ -1198,7 +1844,15 @@ async def stream_execute_only(
     # Guard: finally must not raise NameError if we return before run_id is assigned
     # (happens when workflow_id is present but fails UUID validation).
     run_id = None
+    claimed = False
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        # Both re-run routes already have it from history_scope and pass
+        # it in above; only execute_test_only's paste-and-execute path
+        # leaves this None and pays for the computation here instead.
+        if is_platform_admin is None:
+            is_platform_admin = await _compute_is_platform_admin(user)
+
         # Validate or generate the run ID.
         # workflow_id comes from an untrusted request body; if present it must be a
         # canonical UUID4 string so it is safe to use as a directory name.
@@ -1224,24 +1878,36 @@ async def stream_execute_only(
             run_id = str(uuid.uuid4())
         logging.info(f"🆔 Execution ID (unified): {run_id}")
 
+        # One execution per run id at a time (see _executing_run_ids).
+        claimed = _try_claim_run_id(run_id)
+        if not claimed:
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': 'This run is still in progress on the server. Its result will appear in History when it finishes.'})}\n\n"
+            return
+
         # History row. When this run_id came from a generation by another (or
         # the same) session, the upsert only advances status — the original
         # owner/query attribution is write-once.
         await asyncio.to_thread(
             _record_run, run_id, user, history_query or user_query, status="running",
-            robot_code=robot_code, rerun_of=rerun_of)
+            robot_code=robot_code, rerun_of=rerun_of, group_id=group_id,
+            is_platform_admin=is_platform_admin, test_id=test_id,
+            test_version_id=test_version_id)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
-        # if the task was cancelled between await points, _process_learning never
+        # if the task was cancelled between await points, _process_learning_record never
         # ran and its cache pop never fired. No-op if already consumed.
-        if run_id is not None:
+        # Only the request that claimed the id cleans up: a refused one must not
+        # evict hint metadata, or release the claim, of the run still executing.
+        if claimed:
             _safe_evict_hint_metadata(run_id)
+            _release_run_id(run_id)
         releaser.done()
 
 
+@_detached
 async def stream_generate_and_run(
     user_query: str, model_provider: str, model_name: str, user: dict | None = None
 ) -> AsyncGenerator[str, None]:
@@ -1254,13 +1920,16 @@ async def stream_generate_and_run(
         return
 
     # Two-party latch: thread (phase 1 — LLM generation) + generator (phase 2 — Docker).
-    # Slot is released only when both have finished, preventing premature release on
-    # client disconnect during phase 1 while the LLM thread is still consuming quota.
+    # Slot is released only when both have finished, preventing premature release
+    # when the job is cancelled (server shutdown) during phase 1 while the LLM
+    # thread is still consuming quota.
     releaser = _SlotReleaser()
     # Guard: finally must not raise NameError if we return before run_id is assigned
     # (happens when UUID validation fails or generation errors before reaching execution).
     run_id = None
     try:
+        # Computed ONCE for this request — see _compute_is_platform_admin.
+        is_platform_admin = await _compute_is_platform_admin(user)
         q = Queue()
         org_id = user.get("org_id") if user else None
         user_id = user.get("user_id") if user else None
@@ -1268,9 +1937,13 @@ async def stream_generate_and_run(
 
         result_store: dict = {}
         try:
-            async for sse in _drain_generation_queue(workflow_thread, q, result_store):
+            async for sse in _drain_generation_queue(
+                    workflow_thread, q, result_store,
+                    on_workflow_id=_make_start_recorder(user, user_query, is_platform_admin)):
                 yield sse
         except _GenerationError:
+            await asyncio.to_thread(
+                _record_generation_failure, result_store, user, user_query, is_platform_admin)
             return
 
         robot_code = result_store["robot_code"]
@@ -1290,13 +1963,14 @@ async def stream_generate_and_run(
 
         # History row: generation is done and Docker execution starts now.
         await asyncio.to_thread(
-            _record_run, run_id, user, user_query, status="running", robot_code=robot_code)
+            _record_run, run_id, user, user_query, status="running", robot_code=robot_code,
+            is_platform_admin=is_platform_admin)
 
         async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
-        # if the task was cancelled between await points, _process_learning never
+        # if the task was cancelled between await points, _process_learning_record never
         # ran and its cache pop never fired. No-op if already consumed.
         if run_id is not None:
             _safe_evict_hint_metadata(run_id)

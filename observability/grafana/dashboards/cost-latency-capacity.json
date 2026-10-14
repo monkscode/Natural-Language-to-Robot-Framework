@@ -1,0 +1,185 @@
+{
+  "uid": "mark1-cost",
+  "title": "Mark 1 — Cost, latency and capacity",
+  "tags": ["mark1", "cost"],
+  "links": [
+    {
+      "title": "All runs",
+      "type": "link",
+      "url": "/d/mark1-runs",
+      "icon": "external link",
+      "tooltip": "Every run this install has a record of",
+      "targetBlank": false
+    }
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {"from": "now-1y", "to": "now"},
+  "panels": [
+    {
+      "type": "table",
+      "title": "Cost by model and provider",
+      "description": "Always group cost by model. llm_traces.model is not a substitute for model_provider: LiteLLM strips the provider prefix before the trace callback runs, so those rows cannot tell Vertex from AI Studio. Gemini's implicit-cache behaviour swings a single run's cost by a couple of percent — compare medians, never two individual runs. median_run_wall_s is workflow_duration_s: wall time for the whole generation run — both crew kickoffs, the element stage and the dryrun gate. It is not execution_time, which times the browser-use element stage alone and runs 45% of the run's wall time on average, measured over the 15 rows that carry both as of 2026-08-12. Covers 18 of 447 rows as of 2026-08-12 — model_name/model_provider only started recording 2026-08-07 onward; read this panel as provisional until more traffic accrues. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT data->>'model_provider' AS provider, data->>'model_name' AS model, count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_cost_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'workflow_duration_s')::numeric))::numeric, 1) AS median_run_wall_s FROM workflow_metrics WHERE data ? 'model_name' GROUP BY 1, 2 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Cost split: crewai against browser-use",
+      "description": "Median crewai and browser-use spend over the runs that actually recorded a split — 157 of 447 rows as of 2026-08-12. The other 290 recorded no split — the WHERE clause cannot distinguish an absent key from one stored at zero, and observability/README.md documents synthetic test rows among workflow_metrics that carry neither key at all. Including them put every median in the zero mass while total_cost, non-zero on 335 rows, did not, so the panel rendered 0.0000 against a non-zero total and read as broken. The three medians are computed independently and do not sum. total_cost excludes the learning path's LLM spend — see the learning-health dashboard. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'crewai_cost')::numeric))::numeric, 4) AS median_crewai_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'browser_use_cost')::numeric))::numeric, 4) AS median_browser_use_usd, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY (data->>'total_cost')::numeric))::numeric, 4) AS median_total_usd FROM workflow_metrics WHERE (data->>'crewai_cost')::numeric > 0 OR (data->>'browser_use_cost')::numeric > 0"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Cost and duration per crew stage",
+      "description": "Covers 13 of 434 rows as of 2026-08-10 — this fills in as traffic accrues on this branch. The other 20 rows that carry the crew_stage_metrics key hold a JSON null rather than an object and are excluded so the panel doesn't error, not filtered as bad data. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 7},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT stage.key AS stage, count(*) AS runs, round(avg((stage.value->>'cost')::numeric), 6) AS avg_cost_usd, round(avg((stage.value->>'duration_s')::numeric), 2) AS avg_duration_s, round(avg((stage.value->>'llm_calls')::numeric), 2) AS avg_llm_calls FROM workflow_metrics m, jsonb_each(m.data->'crew_stage_metrics') AS stage WHERE jsonb_typeof(m.data->'crew_stage_metrics') = 'object' GROUP BY 1 ORDER BY avg_cost_usd DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Implicit cache hit rate",
+      "description": "Explains the run-to-run cost swing rather than leaving it as noise. A sample run cached 10,134 of 24,572 browser-use prompt tokens. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 7},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, sum((data->>'browser_use_cached_tokens')::bigint) AS cached_tokens, sum((data->>'browser_use_prompt_tokens')::bigint) AS prompt_tokens, round(100.0 * sum((data->>'browser_use_cached_tokens')::bigint) / nullif(sum((data->>'browser_use_prompt_tokens')::bigint), 0), 1) AS cache_hit_pct FROM workflow_metrics WHERE data ? 'browser_use_cached_tokens'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Dryrun gate outcomes",
+      "description": "'unverified' means Docker or the executor was unavailable and the code was still delivered. It is an infrastructure signal, and is excluded from both sides of the pass ratio below. Covers 13 of 434 rows as of 2026-08-10; the other 20 rows that carry the dryrun_status key hold a JSON null rather than a string and are excluded so no blank-status row appears in the mix. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT data->>'dryrun_status' AS status, count(*) AS runs, round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct_of_all FROM workflow_metrics WHERE jsonb_typeof(data->'dryrun_status') = 'string' GROUP BY 1 ORDER BY runs DESC"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Gate pass rate, excluding unverified",
+      "description": "Covers 13 of 434 rows as of 2026-08-10. All 13 are 'passed' — zero failed, zero unverified in the corpus so far. Read the 100% as 'no failure has been recorded yet', not as a quality guarantee about the product. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 14},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT round(100.0 * count(*) FILTER (WHERE data->>'dryrun_status' = 'passed') / nullif(count(*), 0), 1) AS gate_pass_pct FROM workflow_metrics WHERE jsonb_typeof(data->'dryrun_status') = 'string' AND data->>'dryrun_status' <> 'unverified'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Where the browser stage spends time",
+      "description": "poll_overhead_s is how long the backend kept polling after the agent finished. queue_s above zero means the browser service was at capacity. Covers 50 of 434 rows as of 2026-08-10; the other 169 rows that carry the phase_timings key hold a JSON null rather than an object and are excluded so runs matches what the averages are computed over. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 21},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, round(avg((data->'phase_timings'->>'queue_s')::numeric), 2) AS avg_queue_s, round(avg((data->'phase_timings'->>'session_setup_s')::numeric), 2) AS avg_session_setup_s, round(avg((data->'phase_timings'->>'agent_run_s')::numeric), 2) AS avg_agent_run_s, round(avg((data->'phase_timings'->>'poll_wait_s')::numeric - (data->'phase_timings'->>'agent_run_s')::numeric), 2) AS avg_poll_overhead_s FROM workflow_metrics WHERE jsonb_typeof(data->'phase_timings') = 'object'"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Rate limiting and lost time",
+      "description": "The llm_429_count field is known to undercount against the raw log. Treat a non-zero value as a floor, not a total. Covers 49 of 434 rows as of 2026-08-10; the other 170 rows that carry the agent_diagnostics key hold a JSON null rather than an object and are excluded so runs matches what the sums are computed over. All-time: the time picker does not move this panel. workflow_metrics carries no tz-aware column — see observability/README.md.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 21},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(*) AS runs, sum((data->'agent_diagnostics'->>'llm_429_count')::int) AS total_429s, count(*) FILTER (WHERE (data->'agent_diagnostics'->>'llm_429_count')::int > 0) AS runs_with_a_429, round(sum((data->'agent_diagnostics'->>'retry_lost_s')::numeric), 1) AS total_retry_lost_s FROM workflow_metrics WHERE jsonb_typeof(data->'agent_diagnostics') = 'object'"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM calls and failures per hour",
+      "description": "Real LLM calls only — rows where llm_traces.model is set. The table holds 100,907 rows but only 2,829 are model calls; the rest are OpenTelemetry HTTP, agent, task and orchestration spans, and every ERROR row in the table belongs to those. Before 2026-08-12 this panel counted all of them and reported 1,298 failures, none of which were LLM failures. The 2,829-call count, measured 2026-08-12, is a real measurement; failed_calls is not — it is structurally zero, not measured zero. The row is written by insert_litellm_call (src/backend/core/trace_store.py:252), which hardcodes status='OK' on every insert and takes no status parameter at all, and that write path is registered only as litellm.success_callback (src/backend/crew_ai/cleaned_llm_wrapper.py:222-223) — no failure_callback exists anywhere in src/, so a failed call writes no row rather than a failed one. Read failed_calls as a tripwire for a future writer that actually records failures, not as a reliability measurement. Spine is created_at, which is tz-aware, so this panel follows the time picker. History runs 2026-06-19 onward, which is why the dashboard defaults to a 1-year window rather than 6h.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, count(*) FILTER (WHERE status <> 'OK') AS failed_calls, count(*) AS llm_calls FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token burn per hour, prompt against completion",
+      "description": "Prompt and completion tokens per hour over real model calls only — rows where llm_traces.model is set. Follows the time picker, which defaults to a year because this install is bursty: 43 rows in the last 24 hours against 9,044 in the last 7 days and 81,257 in the last 30 as measured on 2026-08-13, with whole days at zero beside a 7,778-row day. Narrow the picker to today and this panel will usually be empty, and that is the traffic, not a fault. The figure is a floor, not a total: prompt_tokens is recorded on 1,874 of the 2,829 rows carrying a model and completion_tokens on 1,867, so the true burn is higher by an unknown amount. Completion tokens are the ones worth watching — Vertex bills them at a multiple of prompt tokens, and the thinking-budget work exists because they inflated 4-6x once without any prompt change. Browser-use spend never reaches this table at all; it is recoverable only from workflow_metrics, per run, on the trace dashboard.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, sum(prompt_tokens) AS prompt_tokens, sum(completion_tokens) AS completion_tokens FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Spend per hour, and cumulative over the window",
+      "description": "Recorded LLM spend per hour, with a running total across the selected window. Real model calls only — rows where llm_traces.model is set. The figure is a floor, not a total: cost_usd is recorded on 1,603 of the 2,829 rows carrying a model, or 56.7%, so the real spend is higher by an unknown amount. That gap has no trend to attribute it to — daily population ranges from 34% to 100% across the whole history with no step change — so do not read a rising line as rising cost without checking the call count beside it. cumulative_usd resets whenever the time picker moves, because it accumulates within the window rather than over all history. Browser-use spend is absent here entirely and is roughly two thirds of a run's cost in the median run, so this panel is the CrewAI side of the bill, not the bill.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+      "fieldConfig": {
+        "defaults": {"unit": "currencyUSD"},
+        "overrides": []
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, round(sum(cost_usd)::numeric, 4) AS spend_usd, round(sum(sum(cost_usd)) OVER (ORDER BY date_trunc('hour', created_at))::numeric, 4) AS cumulative_usd FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM call latency per hour, p50 against p95",
+      "description": "Median and 95th-percentile duration of real model calls, per hour. Unlike the spend and token panels beside it, this one carries no coverage caveat and needs none: duration_ms is populated on all 2,829 rows that carry a model, so these percentiles describe the whole population rather than a sample. Measured over the full history the median sits near 2,518 ms and p95 near 17,928 ms, and the p95 line is the one that moves — a single slow call in a quiet hour will lift it sharply, because an hour with three calls has no percentile worth the name. Read a spike together with the call count on the panel above. This is also the honest place to watch for provider-side latency drift, which has swung by more than an order of magnitude within a single day and is the reason bench timing figures are only comparable within one session.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 52},
+      "fieldConfig": {
+        "defaults": {"unit": "ms"},
+        "overrides": []
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "time_series",
+        "rawQuery": true,
+        "rawSql": "SELECT date_trunc('hour', created_at) AS time, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::numeric, 0) AS p50_ms, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::numeric, 0) AS p95_ms FROM llm_traces WHERE nullif(model, '') IS NOT NULL AND created_at BETWEEN $__timeFrom() AND $__timeTo() GROUP BY 1 ORDER BY 1"
+      }]
+    }
+  ]
+}

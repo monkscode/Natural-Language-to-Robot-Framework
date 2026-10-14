@@ -1,0 +1,144 @@
+{
+ "expect_error_mismatch.xml": {
+  "error_message": "Expected error 'Nothing like this*' but got 'TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#mismatch\")'.",
+  "failed_keyword": "Run Keyword And Expect Error",
+  "failed_keyword_args": [
+   "Nothing like this*",
+   "Fail",
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#mismatch\")"
+  ],
+  "test_status": "failed"
+ },
+ "long_failure_with_token.xml": {
+  "error_message": "Error: page.goto: net::ERR_ABORTED at https://example.com/app?token=SECRETVALUE123\nCall log:\n  - navigating to \"https://example.com/app?token=SECRETVALUE123\", waiting until \"load\"\n  - xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "Error: page.goto: net::ERR_ABORTED at https://example.com/app?token=SECRETVALUE123\\nCall log:\\n${SPACE}${SPACE}-${SPACE}navigating to \"https://example.com/app?token=SECRETVALUE123\", waiting until \"load\"\\n${SPACE}${SPACE}-${SPACE}${tail}"
+  ],
+  "test_status": "failed"
+ },
+ "pass_then_fail.xml": {
+  "error_message": null,
+  "failed_keyword": null,
+  "failed_keyword_args": null,
+  "test_status": "passed"
+ },
+ "retry_all_attempts_fail.xml": {
+  "error_message": "Keyword 'Fail' failed after retrying 2 times. The last error was: TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#retry\")",
+  "failed_keyword": "Wait Until Keyword Succeeds",
+  "failed_keyword_args": [
+   "2x",
+   "10ms",
+   "Fail",
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#retry\")"
+  ],
+  "test_status": "failed"
+ },
+ "several_failures.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#first\")",
+  "failed_keyword": "Run Keyword And Continue On Failure",
+  "failed_keyword_args": [
+   "Fail",
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#first\")"
+  ],
+  "test_status": "failed"
+ },
+ "silenced_if_then_teardown_failure.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#silenced\")",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#silenced\")"
+  ],
+  "test_status": "failed"
+ },
+ "silenced_var_then_teardown_failure.xml": {
+  "error_message": "Error: teardown message",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "Error: teardown message"
+  ],
+  "test_status": "failed"
+ },
+ "single_failure.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#submit\")",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#submit\")"
+  ],
+  "test_status": "failed"
+ },
+ "skip_then_fail.xml": {
+  "error_message": "not today",
+  "failed_keyword": null,
+  "failed_keyword_args": null,
+  "test_status": "failed"
+ },
+ "suite_setup_failure.xml": {
+  "error_message": "Parent suite setup failed:\nTimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#suite-setup\")",
+  "failed_keyword": null,
+  "failed_keyword_args": null,
+  "test_status": "failed"
+ },
+ "suite_teardown_failure.xml": {
+  "error_message": null,
+  "failed_keyword": null,
+  "failed_keyword_args": null,
+  "test_status": "passed"
+ },
+ "suite_teardown_failure_rebot.xml": {
+  "error_message": "Parent suite teardown failed:\nTimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#suite-teardown\")",
+  "failed_keyword": null,
+  "failed_keyword_args": null,
+  "test_status": "failed"
+ },
+ "test_setup_failure.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#test-setup\")",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#test-setup\")"
+  ],
+  "test_status": "failed"
+ },
+ "test_teardown_failure.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#test-teardown\")",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#test-teardown\")"
+  ],
+  "test_status": "failed"
+ },
+ "try_uncaught.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#uncaught\")",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "TimeoutError: locator.click: Timeout 10000ms exceeded.\\nCall log:\\n${SPACE}${SPACE}-${SPACE}waiting for locator(\"#uncaught\")"
+  ],
+  "test_status": "failed"
+ },
+ "user_keyword_long_failure.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#wrapped\")\n  - xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...\n    [ Message content over the limit has been removed. ]\n...xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "failed_keyword": "Click Through Wrapper",
+  "failed_keyword_args": [],
+  "test_status": "failed"
+ },
+ "user_keyword_wrapper.xml": {
+  "error_message": "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - waiting for locator(\"#inner\")",
+  "failed_keyword": "Do The Click",
+  "failed_keyword_args": [],
+  "test_status": "failed"
+ },
+ "var_failure.xml": {
+  "error_message": "Setting variable '${x}' failed: Variable '${undefined_variable}' not found.",
+  "failed_keyword": null,
+  "failed_keyword_args": null,
+  "test_status": "failed"
+ },
+ "var_then_teardown_failure.xml": {
+  "error_message": "Error: teardown message",
+  "failed_keyword": "Fail",
+  "failed_keyword_args": [
+   "Error: teardown message"
+  ],
+  "test_status": "failed"
+ }
+}

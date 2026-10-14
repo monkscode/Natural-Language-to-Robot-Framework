@@ -127,8 +127,7 @@ class QueryPatternMatcher:
                     user_query, used_keywords, org_id=org_id)
                 if pattern_id:
                     logger.debug(f"Stored query pattern: {pattern_id}")
-
-            logger.info(f"Learned pattern: query='{user_query[:50]}...', keywords={used_keywords}")
+                    logger.info(f"Learned pattern: query='{user_query[:50]}...', keywords={used_keywords}")
 
         except Exception as e:
             logger.error(f"Failed to learn from execution: {e}", exc_info=True)

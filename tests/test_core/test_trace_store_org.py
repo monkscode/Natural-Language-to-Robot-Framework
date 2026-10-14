@@ -96,7 +96,8 @@ def test_insert_org_lookup_memoized_per_workflow():
     wid = str(uuid.uuid4())
 
     fake_reg = MagicMock()
-    fake_reg.get_run_owner.return_value = ("u-x", "org-cached")
+    from src.backend.core.run_registry import RunOwnership
+    fake_reg.get_run_owner.return_value = RunOwnership("u-x", "org-cached", None)
     with patch("src.backend.core.run_registry.get_run_registry", return_value=fake_reg):
         for _ in range(3):
             store.insert_litellm_call(

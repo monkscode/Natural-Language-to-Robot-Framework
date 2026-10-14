@@ -56,20 +56,23 @@ def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browse
     mock_llm = MagicMock(name="llm", spec=_CrewAILLM)
     mock_llm._monitor = MagicMock(name="monitor")
     mock_llm._token_usage = {}
+    # set_workflow_id is CleanedLLMWrapper's, not crewai LLM's, so spec= hides
+    # it. The repair crew labels its calls with run_id for trace attribution.
+    mock_llm.set_workflow_id = MagicMock(name="set_workflow_id")
     with patch("crewai.Crew", mock_cls), \
          patch("src.backend.crew_ai.agents.get_llm", return_value=mock_llm), \
          patch("src.backend.crew_ai.library_context.get_library_context",
                return_value=_fake_library_context()):
-        out, usage = ds.repair_robot_code(
+        out, usage, guardrails = ds.repair_robot_code(
             "rid", "*** Settings ***\nLibrary    Browser\n", errors,
             "gemini", "gemini-2.5-flash",
         )
-    return out, usage, mock_cls, crew, task
+    return out, usage, mock_cls, crew, task, guardrails
 
 
 class TestRepairCrew:
     def test_returns_task_output_and_usage(self):
-        out, usage, mock_cls, crew, task = _run_repair()
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair()
         # Result read DIRECTLY from crew.tasks[0].output (no delegation).
         assert out is task.output
         # usage dict in calculate_crewai_cost shape (folds into crewai_* in Step 5).
@@ -79,7 +82,7 @@ class TestRepairCrew:
         assert usage["cost"] == 0.003  # LiteLLM-computed total_cost passthrough
 
     def test_single_agent_no_delegation(self):
-        out, usage, mock_cls, crew, task = _run_repair()
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair()
         kwargs = mock_cls.call_args.kwargs
         agents = kwargs["agents"]
         assert len(agents) == 1
@@ -87,12 +90,12 @@ class TestRepairCrew:
 
     def test_repair_agent_max_iter_bounded(self):
         from src.backend.core.config import settings
-        out, usage, mock_cls, crew, task = _run_repair()
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair()
         agents = mock_cls.call_args.kwargs["agents"]
         assert agents[0].max_iter == settings.MAX_AGENT_ITERATIONS
 
     def test_crew_hygiene_no_callbacks_no_logfile(self):
-        out, usage, mock_cls, crew, task = _run_repair()
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair()
         kwargs = mock_cls.call_args.kwargs
         # §8.5 — no extra crewai.log noise, no callbacks (not registered in progress_events)
         assert kwargs.get("output_log_file") is None
@@ -101,7 +104,7 @@ class TestRepairCrew:
 
     def test_fix_task_carries_dryrun_errors(self):
         errors = "No keyword with name 'Cilck' found. Did you mean: Browser.Click"
-        out, usage, mock_cls, crew, task = _run_repair(errors=errors)
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair(errors=errors)
         tasks = mock_cls.call_args.kwargs["tasks"]
         assert len(tasks) == 1
         # Conservative repair: the exact RF error (incl. the suggestion) is in the prompt.
@@ -110,5 +113,5 @@ class TestRepairCrew:
         assert "verbatim" in tasks[0].description.lower()
 
     def test_kickoff_called_once(self):
-        out, usage, mock_cls, crew, task = _run_repair()
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair()
         crew.kickoff.assert_called_once()

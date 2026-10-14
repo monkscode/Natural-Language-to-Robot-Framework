@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:39.374074" rpa="false" schemaversion="5">
+<suite id="s1" name="Suite Setup Failure" source="/w/suite_setup_failure.robot">
+<kw name="Fail" owner="BuiltIn" type="SETUP">
+<msg time="2026-09-21T18:17:39.415579" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-setup")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#suite-setup")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:39.415322" elapsed="0.000336">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-setup")</status>
+</kw>
+<test id="s1-t1" name="Under Failed Suite Setup" line="5">
+<status status="FAIL" start="2026-09-21T18:17:39.415722" elapsed="0.000153">Parent suite setup failed:
+TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-setup")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:39.374929" elapsed="0.041112">Suite setup failed:
+TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#suite-setup")</status>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Suite Setup Failure" id="s1" pass="0" fail="1" skip="0">Suite Setup Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

@@ -1,0 +1,118 @@
+// Scrape Docker json-file logs and ship them to Loki.
+//
+// No application change is needed: every application.log line already
+// carries workflow_id — bound once per run in both the backend and the
+// browser service.
+//
+// Label source: docker-compose.yml's json-file logging blocks set
+// `logging.options.labels: "service=<name>"`, but that Docker log-driver
+// option only copies a label onto the JSON log line's "attrs" field if a
+// container label with that exact key ALREADY exists — it does not create
+// one. No service here has a "service" container label (verified via
+// `docker inspect --format '{{json .Config.Labels}}'` and by reading the
+// raw *-json.log line: no "attrs" key at all), so
+// __meta_docker_container_label_service is always empty and a relabel rule
+// keyed on it drops every target. Docker Compose does always inject
+// `com.docker.compose.service=<name>` as a real container label, so that is
+// the label discovery.docker actually exposes and relabeling keys on it
+// instead.
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // Only the services that bind workflow_id — every other container here
+  // (postgres, frontend, grafana, loki) logs nothing a run query can reach.
+  //
+  // runner-exec joined the list once it configured logging and started binding
+  // the run_id it is handed (src/backend/runner_exec/app.py). Before that it
+  // was dropped right here, which is why a failed image pull at boot left no
+  // trace in Grafana: /loki/api/v1/label/service/values returned exactly
+  // ["browser-service","fastapi"]. Adding a service without a binding would
+  // have been the other half of the same mistake — lines nothing can filter.
+  rule {
+    source_labels = ["service"]
+    regex         = "fastapi|browser-service|runner-exec"
+    action        = "keep"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.process.level.receiver]
+}
+
+// Stamp detected_level from the level the application actually recorded.
+//
+// Loki's own level discovery guesses a level out of raw text, and CrewAI
+// echoes our prompt to stdout verbatim, so the prompt was being classified.
+// Measured 2026-08-14 over the five days Loki held, counting only lines that
+// are NOT structlog records: 7,769 carried a guessed level, of which 1,053
+// were CrewAI box-drawing prompt echo and every one of those was wrong —
+// 270 stamped critical, 232 warn, 551 error. Discovery was correct on all
+// 16,436 real structlog records.
+//
+// It is not only the `KEYWORD:` shape. `--- CRITICAL: ONLY EXPLICIT ELEMENTS
+// ---` is stamped critical, but so is a prompt line that merely contains the
+// bare word `error` in prose, which is where 551 of the 1,053 came from.
+//
+// The `unknown` default below only holds because discover_log_levels is off
+// in observability/loki/loki-config.yml. Loki honours an incoming
+// detected_level only when it names a real level — it treats the literal
+// string `unknown` as absent and re-runs discovery over it. Both halves are
+// required, and neither reads as broken alone: drop either and every
+// component stays healthy, every line still flows, and the prompt goes back
+// to being reported as critical.
+//
+// This only works while the services emit JSON. Under LOG_FORMAT=console
+// there is no `level` field to read and every line falls to unknown.
+loki.process "level" {
+  forward_to = [loki.write.default.receiver]
+
+  stage.json {
+    expressions = { level = "level" }
+  }
+
+  // uvicorn does not write JSON — it prefixes its level at the start of the
+  // line (`INFO:     127.0.0.1:44866 - "GET /health HTTP/1.1" 200 OK`), and
+  // Loki classified those 6,408 lines CORRECTLY. Dropping them to unknown
+  // would be a regression, so read the prefix instead. Anchored at line
+  // start, which is why it cannot reach prompt text: every CrewAI echo line
+  // begins with a box-drawing character, never with `LEVEL:`. Today this
+  // channel carries only INFO, but it is the same one uvicorn uses for
+  // `ERROR:    Exception in ASGI application`.
+  stage.regex {
+    expression = "^(?P<uvicorn_level>INFO|WARNING|ERROR|CRITICAL): "
+  }
+
+  stage.template {
+    source   = "level"
+    template = "{{ if .Value }}{{ ToLower .Value }}{{ else if .uvicorn_level }}{{ ToLower .uvicorn_level }}{{ else }}unknown{{ end }}"
+  }
+
+  stage.structured_metadata {
+    values = { detected_level = "level" }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

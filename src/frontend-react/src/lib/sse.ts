@@ -7,7 +7,7 @@
  * chunks so an event split across reads is still parsed correctly.
  */
 
-import { clearToken, getToken } from './api'
+import { ApiError, clearToken, extractDetail, getToken } from './api'
 
 export async function streamSSE(
   path: string,
@@ -29,8 +29,22 @@ export async function streamSSE(
     if (!window.location.pathname.startsWith('/login')) window.location.href = '/login'
     throw new Error('Session expired. Please sign in again.')
   }
-  if (!resp.ok || !resp.body) {
-    throw new Error(`Request failed (${resp.status})`)
+  // The server's own words, not the status code. A refused re-run answers
+  // "Run not found" or "No stored code for this run — it predates code
+  // persistence. Use Regenerate instead."; discarding the body left the
+  // caller showing a bare "Request failed (404)" while the real sentence sat
+  // unread in the response.
+  if (!resp.ok) {
+    let detail = `Request failed (${resp.status})`
+    try {
+      detail = extractDetail(await resp.json(), detail)
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(resp.status, detail)
+  }
+  if (!resp.body) {
+    throw new ApiError(resp.status, 'The server sent no event stream')
   }
 
   const reader = resp.body.getReader()

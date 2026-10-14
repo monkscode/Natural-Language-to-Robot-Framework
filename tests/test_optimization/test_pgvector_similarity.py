@@ -110,12 +110,15 @@ class TestExecutionEmbeddingPgvector:
             workflow_id="wf-emb-1", timestamp=datetime.now(),
             user_query="click the login button", url="u", domain="d",
             robot_code="code", code_structure=None, test_status="passed",
+            org_id="org-A",  # T9: similarity search fails closed without an org
         ))
         em_vec.store(ExecutionRecord(
             workflow_id="wf-emb-2", timestamp=datetime.now(),
             user_query="add three laptops to the shopping cart", url="u", domain="d",
             robot_code="code", code_structure=None, test_status="passed",
+            org_id="org-A",
         ))
-        hits = em_vec.find_similar_executions("press the sign-in button", top_k=2)
+        hits = em_vec.find_similar_executions("press the sign-in button", top_k=2,
+                                              org_id="org-A")
         assert hits, "expected at least one similar execution"
         assert hits[0]["workflow_id"] == "wf-emb-1"  # login nearest to sign-in

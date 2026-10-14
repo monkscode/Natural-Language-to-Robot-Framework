@@ -376,3 +376,63 @@ def test_factory_builds_s3_when_configured(tmp_path, monkeypatch):
         s = mod.get_artifact_store()
     assert isinstance(s, mod.S3ArtifactStore)
     monkeypatch.setattr(mod, "_store", None)  # reset singleton for other tests
+
+
+class TestSharedRunDirMode:
+    """The staging tree is a workspace shared by two containers running as
+    DIFFERENT users, so the directory mode is a correctness constraint.
+
+    The app writes as appuser (uid 1000). The test-runner container runs as root
+    but with cap_drop ALL, which removes CAP_DAC_OVERRIDE — so its root is
+    subject to normal permission checks like anybody else. mkdir's default 0755
+    leaves it unable to create output.xml in the run directory, and Robot
+    Framework dies with 'PermissionError: [Errno 13]' and exit code 252.
+
+    Reproduced 2026-08-07 against monkscode/nlrf:test-runner-local: identical
+    directory, image, mount and command, the ONLY variable being --cap-drop ALL.
+
+    NOT asserted via st_mode: os.chmod cannot set POSIX bits on Windows, where
+    this suite runs. The contract is that the creation path asks for the shared
+    mode; whether the kernel honours it is the OS's business.
+    """
+
+    def test_run_dir_creation_requests_world_writable_mode(self, tmp_path):
+        from unittest.mock import patch
+        from src.backend.core.artifact_store import (
+            SHARED_DIR_MODE, LocalArtifactStore,
+        )
+
+        store = LocalArtifactStore(tmp_path)
+        with patch("src.backend.core.artifact_store.os.chmod") as chmod:
+            d = store.run_dir("run-shared", create=True)
+
+        assert d.is_dir()
+        chmod.assert_any_call(d, SHARED_DIR_MODE)
+
+    def test_shared_mode_grants_write_to_other(self):
+        """uid 0 without CAP_DAC_OVERRIDE writes as 'other' here — it matches
+        neither the owner (1000) nor the group (1000)."""
+        from src.backend.core.artifact_store import SHARED_DIR_MODE
+
+        assert SHARED_DIR_MODE & 0o002, "other must have the write bit"
+
+    def test_shared_mode_has_no_sticky_bit(self):
+        """dryrun_service deletes the runner's root-owned output.xml as appuser.
+        A sticky bit would deny exactly that, trading one bug for another."""
+        from src.backend.core.artifact_store import SHARED_DIR_MODE
+
+        assert not SHARED_DIR_MODE & 0o1000
+
+    def test_run_dir_survives_a_chmod_the_filesystem_refuses(self, tmp_path):
+        """Windows and exotic mounts reject POSIX bits. Creating the directory
+        must still succeed — the mount there already presents host-created dirs
+        as world-writable, so the chmod is belt-and-braces, not load-bearing."""
+        from unittest.mock import patch
+        from src.backend.core.artifact_store import LocalArtifactStore
+
+        store = LocalArtifactStore(tmp_path)
+        with patch("src.backend.core.artifact_store.os.chmod",
+                   side_effect=PermissionError("nope")):
+            d = store.run_dir("run-chmod-refused", create=True)
+
+        assert d.is_dir()

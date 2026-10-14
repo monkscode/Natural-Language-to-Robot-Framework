@@ -199,6 +199,48 @@ class TestLocatorMappingFoundEntries:
         assert entry["row_anchored"] is False
         assert entry["row_anchor_ambiguous"] is False
 
+    def test_changed_by_action_forwarded(self, tool):
+        """F1: browser-service marks a read whose text changed because of an
+        earlier action with that action's element id; the mapping carries it."""
+        mapping = _run_mapping(tool, [
+            _found("elem_1", "a:has-text('Laptops')"),
+            _found("elem_2", "css=#t >> nth=0 >> a", changed_by_action="elem_1"),
+        ])
+        assert mapping["elem_2"]["changed_by_action"] == "elem_1"
+
+    def test_changed_by_action_key_absent_without_a_mark(self, tool):
+        """No mark (or an empty one) must leave the key out, not None / ''."""
+        mapping = _run_mapping(tool, [
+            _found("elem_1", "id=username"),
+            _found("elem_2", "id=password", changed_by_action=""),
+        ])
+        assert "changed_by_action" not in mapping["elem_1"]
+        assert "changed_by_action" not in mapping["elem_2"]
+
+    def test_came_back_forwarded(self, tool):
+        """F1: browser-service flags a read whose value came back to an earlier
+        value; the mapping carries the flag so NLRF can refuse the whole test."""
+        mapping = _run_mapping(tool, [
+            _found("elem_1", "a:has-text('Laptops')"),
+            _found("elem_2", "css=#t >> nth=0 >> a", came_back=True),
+        ])
+        assert mapping["elem_2"]["came_back"] is True
+
+    def test_came_back_key_absent_without_the_flag(self, tool):
+        """No flag (or a false one) must leave the key out."""
+        mapping = _run_mapping(tool, [
+            _found("elem_1", "id=username"),
+            _found("elem_2", "id=password", came_back=False),
+        ])
+        assert "came_back" not in mapping["elem_1"]
+        assert "came_back" not in mapping["elem_2"]
+
+    def test_came_back_never_carried_on_a_not_found_entry(self, tool):
+        result = _not_found("elem_1")
+        result["came_back"] = True
+        mapping = _run_mapping(tool, [result])
+        assert "came_back" not in mapping["elem_1"]
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""

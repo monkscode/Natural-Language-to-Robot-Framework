@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:41.253390" rpa="false" schemaversion="5">
+<suite id="s1" name="Test Setup Failure" source="/w/test_setup_failure.robot">
+<test id="s1-t1" name="Test Setup Fails" line="2">
+<kw name="Fail" owner="BuiltIn" type="SETUP">
+<msg time="2026-09-21T18:17:41.293322" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#test-setup")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#test-setup")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:41.292909" elapsed="0.000500">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#test-setup")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:41.292545" elapsed="0.000975">Setup failed:
+TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#test-setup")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:41.254264" elapsed="0.039451"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Test Setup Failure" id="s1" pass="0" fail="1" skip="0">Test Setup Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

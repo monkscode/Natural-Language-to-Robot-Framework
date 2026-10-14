@@ -7,7 +7,8 @@ An authenticated caller must be a platform-admin (all orgs) or an org-admin
 (their own org); a plain member is 403. Returning None means platform scope
 (all orgs); a string means filter to that org_id.
 
-Referenced by: api/workflow_metrics_endpoints.py, api/trace_endpoints.py.
+Referenced by: api/workflow_metrics_endpoints.py, api/trace_endpoints.py,
+               api/learning_endpoints.py (four routes).
 Depends on: auth/jwt_utils.py (is_validated_admin), auth/ownership.py
             (is_dashboard_viewer).
 """

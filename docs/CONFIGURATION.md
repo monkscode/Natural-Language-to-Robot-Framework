@@ -54,15 +54,25 @@ GEMINI_API_KEY=your-actual-api-key-here
 Which model to use (bare name — the provider prefix is added automatically based on `MODEL_PROVIDER`).
 
 ```env
-ONLINE_MODEL=gemini-2.5-flash
+ONLINE_MODEL=gemini-3.8-flash
 ```
 
-**Available Models:**
-- `gemini-2.5-flash` - Fast, accurate (recommended)
-- `gemini-2.0-flash` - Faster, slightly less capable
-- `gemini-1.5-pro` - More powerful, slower
+**Default:** `gemini-3.8-flash`
 
-**Recommendation:** Use `gemini-2.5-flash` for best speed/accuracy balance.
+**Available Models:**
+- `gemini-3.8-flash` - the default, and the only one with current benchmark evidence
+- `gemini-3.5-flash` - works; no longer benched (it was the benched model until 2026-10-01)
+- `gemini-2.5-flash` - cheaper; never benched here
+- `gemini-2.0-flash` - faster, slightly less capable
+- `gemini-1.5-pro` - more powerful, slower
+
+**Recommendation:** keep `gemini-3.8-flash`. Since 2026-10-01 it is the model
+the bench gate's baseline is measured on. Figures dated before that, including
+the performance numbers in `docs/ARCHITECTURE.md`, were measured on
+`gemini-3.5-flash`. The other models work; none has current benchmark numbers
+behind it. On Vertex, `gemini-3.8-flash` costs $0.75 per million input tokens
+and $3.75 per million output (LiteLLM's price map); Google lists that as
+introductory pricing through 2026-12-31, and $1.50 / $7.50 from 2027-01-01.
 
 ### LOCAL_MODEL
 
@@ -82,6 +92,28 @@ LOCAL_MODEL=llama3.1
 ollama pull llama3.1
 ```
 
+### LLM_REQUEST_TIMEOUT_S
+
+Seconds the first try of a cloud LLM request (`MODEL_PROVIDER=gemini` or `vertex`) may
+take. The second and third tries get twice and four times as long, so the default gives
+60 s, 120 s and 240 s; a call that gets no answer gives up after about 7.5 minutes and the
+UI says the model provider did not answer. Rejections from the provider (HTTP 429, 500,
+503, a dropped connection) are retried up to 4 times after a backoff (0.5–8 s, or the wait
+Google names — capped at 60 s, plus up to 1 s); they do not move on to the longer timeout. HTTP 408
+counts as a timeout; other gateway errors (502, 504) are retried like rejections. A per-day free-tier quota is not retried.
+
+```env
+LLM_REQUEST_TIMEOUT_S=60
+```
+
+**Default:** 60 · **Allowed:** 30–150
+
+At 150 the tries get 150 s, 300 s and 600 s and a call gives up after about 18 minutes; the
+last try then equals LiteLLM's own 600 s per-request default.
+
+**Not applied to** `MODEL_PROVIDER=local`: Ollama models can take minutes on a CPU, so
+they keep LiteLLM's own behaviour (no per-try timeout, 3 automatic retries).
+
 ## Application Settings
 
 ### APP_PORT
@@ -96,19 +128,10 @@ APP_PORT=5000
 
 **Change if:** Port 5000 is already in use on your system.
 
-### APP_HOST
-
-Host address for the backend.
-
-```env
-APP_HOST=0.0.0.0
-```
-
-**Default:** 0.0.0.0 (all interfaces)
-
-**Options:**
-- `0.0.0.0` - Accessible from network
-- `127.0.0.1` - Localhost only
+> **Note:** the bind address is not configurable through `.env`. Under Docker
+> Compose the API is published on loopback only (`127.0.0.1:5000`) and end users
+> reach it through the nginx frontend on `:3000`. Change the `ports:` mapping in
+> `docker-compose.yml` if you need something different.
 
 ## Browser Automation Settings
 
@@ -117,12 +140,16 @@ APP_HOST=0.0.0.0
 URL for the BrowserUse AI service.
 
 ```env
-BROWSER_USE_SERVICE_URL=http://localhost:4999
+BROWSER_USE_SERVICE_URL=http://127.0.0.1:4999
 ```
 
-**Default:** http://localhost:4999
+**Default:** `http://127.0.0.1:4999` (`core/config.py`)
 
-**Change if:** Running service on different host/port.
+Use `127.0.0.1`, not `localhost`. On Windows `localhost` resolves to `::1` first
+and this service binds IPv4 only, so every call stalls ~2s before falling back.
+Docker Compose overrides this to the `browser-service` service name.
+
+**Change if:** Running the service on a different host/port.
 
 ### BROWSER_USE_TIMEOUT
 
@@ -141,89 +168,63 @@ BROWSER_USE_TIMEOUT=900
 
 ### ROBOT_LIBRARY
 
-Which Robot Framework library to use for test execution.
+Which Robot Framework library the generated tests use.
 
 ```env
-ROBOT_LIBRARY=browser  # Recommended
+ROBOT_LIBRARY=browser
 ```
 
-**Options:**
-- `browser` - Browser Library (Playwright-based) - **Recommended** ⭐
-- `selenium` - SeleniumLibrary (legacy support)
+**`browser` is the only supported value.** Setting `selenium` makes the app **fail
+at startup** with:
 
-**Browser Library (Recommended):**
-- ✅ **2-3x faster** execution than Selenium
-- ✅ **Better AI compatibility** - LLMs understand JavaScript/Playwright better
-- ✅ **Modern web support** - Shadow DOM, iframes, SPAs work seamlessly
-- ✅ **Auto-waiting built-in** - No explicit waits needed
-- ✅ **Powerful locators** - Text-based (`text=Login`), role-based (`role=button[name="Submit"]`), and traditional selectors
-- ✅ **Consistent validation** - Same Playwright engine for locator generation and execution
-- ✅ **Better error messages** - More detailed diagnostics
+```
+ROBOT_LIBRARY=selenium is no longer supported; this system generates
+Browser Library (Playwright) tests only.
+```
 
-**SeleniumLibrary (Legacy):**
-- ✅ **Mature and stable** - Battle-tested over many years
-- ✅ **Wide compatibility** - Works with older websites
-- ✅ **Familiar syntax** - Traditional Selenium WebDriver approach
-- ⚠️ Slower execution
-- ⚠️ Manual waits often needed
-- ⚠️ Limited modern web support
+SeleniumLibrary support was removed: the locator pipeline validates and emits
+Playwright-only syntax, so there is no code path that can produce a working
+Selenium test. Leave this at `browser`, or omit it entirely.
 
-**When to use Browser Library:**
-- New projects
-- Modern websites (React, Vue, Angular)
-- Performance-critical tests
-- Sites with Shadow DOM or complex iframes
-- When you want faster test execution
+**What you get with Browser Library:**
+- Playwright engine — the *same* engine used to discover and validate the locators,
+  so what was verified during generation is what runs
+- Auto-waiting, so generated tests need far fewer explicit waits
+- Text (`text=Login`) and role (`role=button[name="Submit"]`) locators alongside
+  CSS and XPath
+- Shadow DOM, iframes and SPA support
 
-**When to use SeleniumLibrary:**
-- Existing projects with Selenium tests
-- Legacy websites
-- Team has Selenium expertise
-- Compatibility with older browsers
-
-**Switching libraries:**
-1. Change `ROBOT_LIBRARY` in `.env`
-2. Restart Mark 1
-3. Generate new tests - they'll use the selected library automatically!
-
-**Example outputs:**
-
-*Browser Library:*
+**Example output:**
 ```robot
 *** Settings ***
-Library    Browser
+Library    Browser    timeout=30s
 
 *** Test Cases ***
 Example Test
-    New Browser    chromium    headless=False
-    New Context    viewport=None
+    New Browser    chromium    headless=True
+    New Context    viewport={'width': 1920, 'height': 1080}
     New Page    https://example.com
     Fill Text    name=q    search term
     Click    text=Search
     Close Browser
 ```
 
-*SeleniumLibrary:*
-```robot
-*** Settings ***
-Library    SeleniumLibrary
-
-*** Test Cases ***
-Example Test
-    Open Browser    https://example.com    chrome
-    Input Text    name=q    search term
-    Click Element    xpath=//button[text()='Search']
-    Close Browser
-```
-
 ## Logging Settings
 
-### LOG_LEVEL
+### LOG_LEVEL — NOT WIRED UP
 
-Application logging verbosity.
+**Setting this has no effect.** `setup_logging()` in
+`src/backend/config/logging_config.py` takes the level as a function argument
+defaulting to `"INFO"`, and `src/backend/main.py` never passes one.
+No code reads a `LOG_LEVEL` environment variable. To change the level you must
+pass it at the call site.
+
+`LOG_FORMAT=console` *is* read (`logging_config.py:170`) and does work.
+
+The values below describe the intended levels, not a working switch.
 
 ```env
-LOG_LEVEL=INFO
+LOG_LEVEL=INFO   # inert
 ```
 
 **Options:**
@@ -234,27 +235,109 @@ LOG_LEVEL=INFO
 
 ### LOG_DIR
 
-Directory for application logs.
+Moves the API's `application.log`, and nothing else. Unset or empty means
+`logs`, relative to the working directory.
 
 ```env
 LOG_DIR=logs
 ```
 
-**Default:** `logs/` in project root
+- **Only `application.log` moves.** `crewai.log.txt`, `crewai_steps.log` and
+  `temp_metrics/` stay under `./logs` whatever this is set to. The executor
+  (`runner_exec`) writes no log file at all; it logs to stdout.
+- **It has to be in the process environment.** `src/backend/main.py` reads it
+  with `os.environ` when it is imported, before `settings` loads `.env`.
+  `run.sh` exports `.env` (`set -a`) and compose passes it through `env_file`,
+  so both see a value set there. A bare `uvicorn src.backend.main:app` does
+  not — export it in the shell instead.
+- **Its parent directory must exist.** `setup_logging()` creates the directory
+  itself but not its parents, and outside its error handling: a missing parent,
+  or a path that names a file, stops the API at import with
+  `FileNotFoundError` / `FileExistsError`. A mistyped value fails loudly rather
+  than logging somewhere unexpected.
+- **Compose mounts `./logs` at `/app/logs`.** Inside a container, a `LOG_DIR`
+  outside `/app/logs` takes `application.log` off that mount, so it no longer
+  reaches the host's `./logs`. Alloy is unaffected either way: it ships
+  container stdout, not the file. A manual 429 count over `application.log`
+  (see `observability/README.md`) has to read the new path.
+
+(`BROWSER_USE_LOG_DIR` is a different variable, read by the browser service —
+see `tools/browser_service/__init__.py`.)
 
 ## Docker Settings
 
-### DOCKER_IMAGE
+Tests run in a throwaway `test-runner` container that the app launches per run. It
+is **not** a Compose service, so `docker compose pull` does not fetch it — see the
+README's step 4.
 
-Docker image for test execution.
+### TEST_RUNNER_IMAGE_TAG
+
+Which runner image to run tests in. Set this in the **root `.env`** (next to
+`docker-compose.yml`), not in `src/backend/.env`, because Compose reads that file
+for `${VAR}` substitution.
 
 ```env
-DOCKER_IMAGE=python:3.9-slim
+TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
 ```
 
-**Default:** python:3.9-slim
+Keep the suffix the same as the other three image tags in that file. Pre-pull it
+with `docker pull monkscode/nlrf:test-runner-develop` so your first run does not
+wait on the download (~0.5 GB compressed, ~1.9 GB on disk).
 
-**Custom images:** You can build and use custom images with pre-installed dependencies.
+### PREFER_REMOTE_DOCKER_IMAGE
+
+Whether to pull the runner image before falling back to building it locally.
+
+```env
+PREFER_REMOTE_DOCKER_IMAGE=true
+```
+
+**Default when the variable is absent: `false`** (`services/docker_service.py`,
+`os.getenv('PREFER_REMOTE_DOCKER_IMAGE', 'false')`).
+
+**Set it explicitly to `true`.** Omitted, the fallback is `false`, which builds
+the runner image from source on your first **Run Test** — minutes of CPU instead
+of a ~0.5 GB pull — and also disables the startup warm-up below. The shipped
+`src/backend/.env.example` sets it; only a hand-trimmed `.env` loses it.
+
+The `false` fallback is deliberate: with no `TEST_RUNNER_IMAGE_TAG` configured
+either, a `true` fallback would pull `monkscode/nlrf:test-runner-latest` — the
+main-branch build, which is not the one this tree is developed against.
+
+### REMOTE_DOCKER_IMAGE
+
+Registry to pull the runner from. **Leave unset** unless you mirror the image
+yourself: the pulled image is re-tagged locally as `TEST_RUNNER_IMAGE_TAG`, so
+naming a different build here puts the wrong content under that tag. Unset, it
+tracks `TEST_RUNNER_IMAGE_TAG` automatically.
+
+### RUNNER_IMAGE_WARMUP
+
+Pre-fetch the runner image when the executor starts, rather than on the first
+**Run Test**.
+
+```env
+RUNNER_IMAGE_WARMUP=true
+```
+
+**Default:** `true`. The download is ~0.5 GB and takes about 99 seconds; starting
+it at boot overlaps it with signup, writing your first query and the ~23s
+generation stage, so by the time you click **Run Test** the image is normally
+already there. It runs on a background thread, never delays the service becoming
+healthy, and is pull-only — it will not start a local image build. If it fails,
+the image is provisioned on first use exactly as before.
+
+Set to `false` on metered connections or air-gapped hosts.
+
+### TEST_EXECUTION_TIMEOUT
+
+Maximum seconds to wait for a test container to finish. Set in the **root `.env`**.
+
+```env
+TEST_EXECUTION_TIMEOUT=1800
+```
+
+**Default:** 1800 (30 minutes). Increase for very long suites.
 
 ## Advanced Settings
 
@@ -266,119 +349,197 @@ Enable verbose output from CrewAI agents.
 CREWAI_VERBOSE=true
 ```
 
+**Default:** `false`
+
 **Options:**
 - `true` - Show detailed agent workflow
 - `false` - Minimal output
 
-### MAX_ITERATIONS
+### MAX_AGENT_ITERATIONS
 
-Maximum iterations for agent tasks.
-
-```env
-MAX_ITERATIONS=10
-```
-
-**Default:** 10
-
-**Increase if:** Complex queries need more processing steps.
-
-### TEMPERATURE
-
-AI model temperature (creativity vs consistency).
+Maximum retry iterations for an agent task.
 
 ```env
-TEMPERATURE=0.1
+MAX_AGENT_ITERATIONS=3
 ```
 
-**Range:** 0.0 to 1.0
-- `0.0` - Deterministic, consistent
-- `0.5` - Balanced
-- `1.0` - Creative, varied
+**Default:** 3. **Valid range: 1–5** — values outside it are rejected at startup.
 
-**Recommendation:** Keep low (0.1-0.3) for test generation.
+### MAX_CONCURRENT_WORKFLOWS
+
+How many generation/execution workflows may run at once.
+
+```env
+MAX_CONCURRENT_WORKFLOWS=10
+```
+
+**Default:** 10. **Valid range: 1–50.** Each workflow spawns a CrewAI thread and may
+launch a test container, so lower this on memory-constrained hosts.
+
+### MAX_LOCATOR_STRATEGIES
+
+How many locator strategies to try when resolving an element.
+
+```env
+MAX_LOCATOR_STRATEGIES=21
+```
+
+**Default:** 21. **Valid range: 1–50.**
+
+> **Model temperature is not configurable.** It is pinned low in code deliberately —
+> test generation wants determinism, and exposing it invites irreproducible runs.
+
+## Authentication & Database
+
+Mark 1 is multi-user and approval-gated. These are the settings a first-time
+operator actually has to think about.
+
+### ADMIN_EMAILS
+
+Comma-separated emails that receive the `admin` role at signup.
+
+```env
+ADMIN_EMAILS=you@company.com,cofounder@company.com
+```
+
+**Default:** empty.
+
+> ⚠️ **Set this before your first start.** Every new signup lands `pending` and sees
+> an Access Gate instead of the Generate page. Accounts listed here are created
+> `active` and can approve everyone else. Miss it and nobody can get in — including
+> you. Admins approve others under **Access** in the sidebar; there is no email
+> notification, so check that page after a teammate signs up.
+
+### JWT_SECRET_KEY
+
+Secret used to sign access tokens.
+
+```env
+# leave unset for local development
+#JWT_SECRET_KEY=
+```
+
+In **development** (the default), leave it unset: the app generates a strong random
+secret on first start and persists it to `data/jwt_secret`, so logins survive
+restarts. Delete that file and everyone is signed out.
+
+With `ENVIRONMENT=production` nothing is generated — the app **refuses to start**
+unless this is set explicitly, is at least 32 characters, and is not a placeholder.
+Generate one with:
+
+```bash
+docker run --rm monkscode/nlrf:fastapi-develop python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Running outside Compose (plain `docker run`, Kubernetes, more than one replica)
+without persisting `/app/data` puts the generated secret on a throwaway layer, so
+each restart and each replica signs with a different key. Set it explicitly there.
+
+### ENVIRONMENT / COOKIE_SECURE
+
+```env
+ENVIRONMENT=development   # 'production' enables the strict startup checks
+COOKIE_SECURE=false       # set true when serving over HTTPS
+```
+
+### AUTH_ENFORCED
+
+```env
+AUTH_ENFORCED=true
+```
+
+**Default:** `true`. Setting `false` lets token-less requests through — an escape
+hatch for local API-only debugging and for the bench. **Never disable it in
+production.**
+
+### DATABASE_URL
+
+PostgreSQL connection string. Compose wires this up for you, using the
+`POSTGRES_PASSWORD` from the root `.env` (required — there is no default).
+
+```env
+DATABASE_URL=postgresql://nlrf:<POSTGRES_PASSWORD>@postgres:5432/nlrf   # inside Compose
+```
+
+Outside Compose the host is `localhost` instead of the `postgres` service name,
+and the password must equal the root `.env`'s `POSTGRES_PASSWORD`.
+
+### Google SSO (optional)
+
+Leave `GOOGLE_CLIENT_ID` empty to disable the "Continue with Google" button.
+
+```env
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_REDIRECT_URI=http://localhost:5000/auth/google/callback
+```
+
+### Production hardening checklist
+
+1. `ENVIRONMENT=production`, `COOKIE_SECURE=true`, `JWT_SECRET_KEY` injected from a
+   secret manager.
+2. Drop `credentials.json` — use [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation),
+   an attached service account/ADC, or short-lived injected credentials.
+3. If you must ship a key, scope it to `roles/aiplatform.user`, mount it read-only,
+   and give it a rotation schedule.
+4. Keep `AUTH_ENFORCED=true` and set `ALLOWED_ORIGINS` to your real front-end origin.
+5. Put the app behind HTTPS — the API binds loopback under Compose and expects the
+   frontend proxy in front of it.
 
 ## Example Configurations
 
-### Production Setup (Cloud) - Recommended
+### Docker Quick Start (Vertex AI) — what the README sets up
 
 ```env
 # AI Provider
-MODEL_PROVIDER=gemini
-GEMINI_API_KEY=your-production-key
-ONLINE_MODEL=gemini-2.5-flash
+MODEL_PROVIDER=vertex
+VERTEXAI_PROJECT=your-gcp-project-id
+VERTEXAI_LOCATION=global
+ONLINE_MODEL=gemini-3.8-flash
 
-# Application
-APP_PORT=5000
-APP_HOST=0.0.0.0
+# Access — set BEFORE the first start
+ADMIN_EMAILS=you@company.com
 
-# Browser Automation
-BROWSER_USE_SERVICE_URL=http://localhost:4999
-BROWSER_USE_TIMEOUT=900
-ROBOT_LIBRARY=browser  # Use Browser Library for best performance
+# JWT_SECRET_KEY intentionally unset: auto-generated into data/jwt_secret
 
-# Logging
+ROBOT_LIBRARY=browser
 LOG_LEVEL=INFO
 ```
 
-### Development Setup (Local)
+Start it with the Vertex overlay so `credentials.json` is mounted:
+`docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d`
+
+### Google AI Studio key instead of a service account
+
+Both services also accept a plain AI Studio API key, which skips the gcloud CLI,
+the GCP project and the `credentials.json` mount — the Vertex compose overlay is
+not needed at all. The free tier is rate-limited, so it suits a first look rather
+than sustained use; the README's Vertex path is what the project benchmarks and
+runs in production.
 
 ```env
-# AI Provider
+MODEL_PROVIDER=gemini
+GEMINI_API_KEY=your-ai-studio-key   # https://aistudio.google.com/apikey
+ONLINE_MODEL=gemini-3.8-flash
+ADMIN_EMAILS=you@company.com
+```
+
+Start it without the overlay: `docker compose up -d`
+
+### Fully local (Ollama)
+
+`local` drives the backend LLM only. The browser service requires a Google vision
+model and does **not** support Ollama, so element detection still needs
+`GEMINI_API_KEY` or Vertex credentials.
+
+```env
 MODEL_PROVIDER=local
-LOCAL_MODEL=llama3.1
+LOCAL_MODEL=llama3
+OLLAMA_API_BASE=http://host.docker.internal:11434   # Docker Desktop
 
-# Application
-APP_PORT=5000
-APP_HOST=127.0.0.1
-
-# Browser Automation
-BROWSER_USE_SERVICE_URL=http://localhost:4999
-BROWSER_USE_TIMEOUT=600
-ROBOT_LIBRARY=browser  # Use Browser Library for faster development
-
-# Logging
+ROBOT_LIBRARY=browser
 LOG_LEVEL=DEBUG
 CREWAI_VERBOSE=true
-```
-
-### Privacy-First Setup
-
-```env
-# AI Provider (fully local)
-MODEL_PROVIDER=local
-LOCAL_MODEL=llama3.1
-
-# Application (localhost only)
-APP_HOST=127.0.0.1
-APP_PORT=5000
-
-# Browser Automation
-BROWSER_USE_SERVICE_URL=http://localhost:4999
-ROBOT_LIBRARY=browser  # Browser Library works great locally too
-
-# Logging (local only)
-LOG_LEVEL=INFO
-```
-
-### Legacy/Compatibility Setup
-
-```env
-# AI Provider
-MODEL_PROVIDER=gemini
-GEMINI_API_KEY=your-key
-ONLINE_MODEL=gemini-2.5-flash
-
-# Application
-APP_PORT=5000
-APP_HOST=0.0.0.0
-
-# Browser Automation
-BROWSER_USE_SERVICE_URL=http://localhost:4999
-BROWSER_USE_TIMEOUT=900
-ROBOT_LIBRARY=selenium  # Use SeleniumLibrary for legacy compatibility
-
-# Logging
-LOG_LEVEL=INFO
 ```
 
 ## Configuration Validation
@@ -389,10 +550,9 @@ Mark 1 validates configuration on startup. Common validation errors:
 - Add key to `.env` file
 - Ensure no extra spaces
 
-### "Invalid ROBOT_LIBRARY"
-- Must be 'selenium' or 'browser' (lowercase)
-- Check spelling
-- Recommended: Use 'browser' for best performance
+### "ROBOT_LIBRARY=selenium is no longer supported"
+- `browser` is the only accepted value (lowercase); remove the setting or set it to `browser`
+- SeleniumLibrary support was removed — the locator pipeline emits Playwright-only syntax
 
 ### "Invalid MODEL_PROVIDER"
 - Must be `gemini`, `vertex`, or `local` (lowercase)

@@ -11,7 +11,7 @@
  * already recorded the query→code evidence). "Regenerate" prefills Generate
  * instead, for when the site changed and the stored locators went stale.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -22,11 +22,22 @@ import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
 } from '@/components/ui/sheet'
 import {
-  Check, ChevronRight, Copy, Download, Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
+  Check, ChevronRight, Copy, Download, FlaskConical, Folder, FolderInput,
+  ListChecks,
+  Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
-import { api } from '@/lib/api'
+import { api, isAccessLoss } from '@/lib/api'
 import { streamSSE } from '@/lib/sse'
+import { formatDate, timeAgo } from '@/lib/time'
+import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { useFetch } from '@/lib/useFetch'
+import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
+import { GroupChipsRow } from '@/components/history/GroupChipsRow'
+import { MoveToGroupMenu } from '@/components/history/MoveToGroupMenu'
+import { useRunGroups, type GroupFilter } from '@/components/history/RunGroupsContext'
+import type { RunGroup } from '@/components/history/useGroups'
+import { useAuth } from '@/auth/AuthContext'
+import { RecordedCorrections, type RecordedCorrectionItem } from '@/components/RecordedCorrections'
 
 type RunStatus = 'generated' | 'running' | 'passed' | 'failed' | 'error'
 
@@ -38,13 +49,66 @@ interface Run {
   // Original run this row was re-run from (root-flattened server-side).
   // Feedback on a re-run is applied to that original run's learning record.
   rerun_of?: string | null
+  // Server-computed: could THIS caller open that original right now? It is a
+  // live question — a peer re-runs a published run and its owner then unfiles
+  // it, which un-publishes it. Never re-derive it here; the row does not carry
+  // the org id it would need. False renders the pill as a non-interactive
+  // badge instead of a link that answers 404.
+  rerun_of_accessible?: boolean
+  group_id?: string | null
+  group_name?: string | null
   created_at: string
   updated_at: string
   has_report: boolean
+  // The test this result belongs to, and the version of THAT test it ran
+  // (spec 7.5). Both are permanently nullable and neither means "missing":
+  // test_id is NULL for a generation that failed before any code existed
+  // (owner decision D8(a)), and test_version_n for a regeneration that failed
+  // after the test already existed (D8(b), spec case 10).
+  test_id?: string | null
+  test_name?: string | null
+  test_query?: string | null
+  test_version_n?: number | null
+  // Server-computed (D7): this result was made with platform-admin authority.
+  // The server withholds the author's ADDRESS on such a row from every caller
+  // who does not hold that authority, so this is what the author column
+  // renders in its place. Never re-derive it: the role is evaluated per
+  // request and test_runs stores none.
+  ran_as_platform_admin?: boolean
+  // Server-computed: may THIS caller file THIS run? Seeing a run and being
+  // able to move it are different questions — a grouped run is visible to
+  // the whole org, but only its owner or an org_admin moves it. Never
+  // re-derive it here; the row does not carry the org id it would need.
+  can_move: boolean
 }
 
 interface RunDetail extends Run {
   robot_code: string | null
+  // Server-computed: would GET /api/feedback/{run_id} answer this caller
+  // at all? The drawer asks only when this says so. It cannot be derived
+  // here — the feedback route withholds is_grouped where the detail route
+  // passes it, and both a platform admin and the token-less dev caller may
+  // read a peer's corrections while the client knows it is neither.
+  can_read_feedback?: boolean
+  // Only present when status is failed/error (server withholds both keys
+  // for every other status — their absence is not "no reason", it is "not
+  // applicable"). failure_sentence is the human-readable summary;
+  // error_message is the raw underlying text. A generation failure always
+  // stores a message ("Generation failed" at minimum); for an execution
+  // failure error_message is null, for example, when the row predates this
+  // change, output.xml is missing or cannot be parsed, output.xml holds no
+  // failure text (no failed test and no failing suite teardown — an
+  // all-skipped run is one case of this), or deriving the reason raised
+  // (logged server-side, never changes the run's outcome).
+  // failure_sentence is additionally null when the message maps to no
+  // sentence — a generation failure's text usually does not, since the
+  // sentence map only covers execution-time failure types.
+  error_message?: string | null
+  failure_sentence?: string | null
+  // Only present when status is passed and the run has code (the server
+  // withholds the key for every other status). Finished sentences; an empty
+  // array means there is nothing to say.
+  suggestions?: string[]
 }
 
 interface HistoryResponse {
@@ -53,16 +117,40 @@ interface HistoryResponse {
   scope: 'own' | 'all'
 }
 
+/** GET /api/feedback/{run_id} — see GeneratePage.tsx's RecordedResponse for
+    the full contract (can_retract, absent-field semantics, etc.); the
+    drawer is read-only, so it only needs `applied_to` and the corrections
+    themselves. `applied_to` names the run these corrections are actually
+    filed against — the ORIGINAL run when the one being viewed is a re-run
+    (endpoints.py, get_run_corrections). */
+interface FeedbackCorrectionsResponse {
+  applied_to?: string
+  corrections?: RecordedCorrectionItem[]
+}
+
 const PAGE = 100
 
+/* The three coloured badges' dark variants are the SAME values
+   TestsPage's RESULT_BADGE carries, and that map's comment named this
+   retrofit. Measured in Chromium before it: on a body of rgb(2,8,23)
+   the Failed badge still painted rgb(185,28,28) on rgb(254,226,226)
+   — the light pastel pill, legible but one of the two places the
+   list pages visibly disagreed. The Running dot below was the other.
+   Generated is deliberately left alone: variant="outline" resolves
+   through the theme already, and a dark: override on it would be a
+   second answer to a question the token has answered. Running's BADGE
+   is left alone for the same reason (variant="secondary") — but that
+   answers the CHROME only. The pulsing dot inside it is a raw
+   bg-blue-500 that no token speaks for, so it carries the dark variant
+   TestsPage's RunningBadge already pairs with the identical span. */
 const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
-  passed: <Badge className="bg-green-100 text-green-700 border-green-200 hover:bg-green-100 text-xs">Passed</Badge>,
-  failed: <Badge className="bg-red-100 text-red-700 border-red-200 hover:bg-red-100 text-xs">Failed</Badge>,
-  error:  <Badge className="bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-100 text-xs">Error</Badge>,
+  passed: <Badge className="bg-green-100 text-green-700 border-green-200 hover:bg-green-100 dark:bg-green-950 dark:text-green-300 dark:border-green-900 dark:hover:bg-green-950 text-xs">Passed</Badge>,
+  failed: <Badge className="bg-red-100 text-red-700 border-red-200 hover:bg-red-100 dark:bg-red-950 dark:text-red-300 dark:border-red-900 dark:hover:bg-red-950 text-xs">Failed</Badge>,
+  error:  <Badge className="bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-900 dark:hover:bg-amber-950 text-xs">Error</Badge>,
   generated: <Badge variant="outline" className="text-xs">Generated</Badge>,
   running: (
     <Badge variant="secondary" className="gap-1.5 text-xs">
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400" />
       <span>Running</span>
     </Badge>
   ),
@@ -71,26 +159,630 @@ const STATUS_BADGE: Record<RunStatus, JSX.Element> = {
 const FILTERS = ['all', 'passed', 'failed', 'generated', 'error'] as const
 type Filter = (typeof FILTERS)[number]
 
-function formatDate(iso: string): string {
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit',
-  })
+/** scope='all' means "no per-user narrowing", NOT "every user on the
+    platform": the server returns it to any org_admin, and every solo signup
+    is org_admin of their own personal org. Reading it as a platform-admin
+    signal told ordinary users they were looking at everyone's runs. Only
+    role='admin' answers that question, so the three cases are separate. */
+function historySubtitle(isAdminScope: boolean, isAdmin: boolean): string {
+  if (!isAdminScope) {
+    return 'Your work in progress, plus every test your team has filed into a group — click any run to view its script and re-run it as-is'
+  }
+  if (isAdmin) return 'All users’ test runs (admin view) — click any run to view its script and details'
+  return 'Every test run in your organization — click any run to view its script and re-run it as-is'
 }
 
-/** "2h ago" for the table; the exact stamp lives in the cell tooltip. */
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
-  if (Number.isNaN(ms)) return iso
-  const mins = Math.floor(ms / 60_000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(iso).toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' })
+/** Which empty-state sentence explains why the table has no rows, in
+    precedence order: an active search wins over an active group filter,
+    which wins over the status filter, which wins over the plain "nothing
+    yet" default. */
+function noRunsMessage(debouncedSearch: string, groupFilter: GroupFilter, filter: Filter): string {
+  if (debouncedSearch) return 'No runs match your search.'
+  if (groupFilter === 'ungrouped') return 'No ungrouped runs — everything is filed.'
+  if (groupFilter) return 'No runs in this group yet — move runs here with the folder button on any row.'
+  if (filter === 'all') return 'No test runs yet — generate your first test from the Generate page.'
+  return `No ${filter} runs yet.`
+}
+
+/** The drawer's code panel. `d` is null while the fetch is pending OR still
+    resolving a row switch (useFetch keeps stale data), so gate the body on
+    it to avoid flashing the previous run's code. */
+function drawerCodeBody(detailError: string, d: RunDetail | null): ReactNode {
+  if (detailError) return <p className="py-6 text-center text-xs text-destructive">{detailError}</p>
+  if (!d) return <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
+  if (d.robot_code) {
+    return (
+      <pre className="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
+        {d.robot_code}
+      </pre>
+    )
+  }
+  return (
+    <p className="rounded-md border border-dashed px-3 py-6 text-center text-xs italic text-muted-foreground">
+      No stored code — this run predates code persistence.
+      {d.user_query ? ' Use Regenerate to produce it again.' : ''}
+    </p>
+  )
+}
+
+/** Which test a result belongs to, and the version of it that ran — the chip
+ *  that replaced the re-run pill (spec 7.5).
+ *
+ *  The test's LABEL is drawn only when it differs from the row's own
+ *  description. Owner decision D2 made a test's name its per-org key and left
+ *  `tests.name` NULL for good, so labelFrom always falls through to the
+ *  TEST's description — which, on a test nobody has edited, is the same
+ *  sentence this cell already shows an inch to the right. Printing it twice
+ *  would be the whole column, permanently. It reappears the moment the two
+ *  diverge, which is exactly when it says something the row does not: the
+ *  description travels with each new version, so an older result's test
+ *  acquires a different name as soon as someone updates it.
+ *
+ *  That suppression hides nothing and needs no sr-only counterpart, unlike
+ *  the inaccessible re-run pill it replaced: the label is dropped only when
+ *  the identical string is already on the row as the description. The title
+ *  carries both facts for a mouse.
+ *
+ *  No chip at all when the run names no test. That is permanent and legal
+ *  rather than missing data (owner decision D8(a)) — a generation that failed
+ *  before any code existed belongs to no test and never will. */
+function ResultTestChip({ run }: Readonly<{ run: Run }>) {
+  if (!run.test_id) return null
+  const label = labelFrom(run.test_name ?? null, run.test_query ?? null)
+  const version = versionLabel(run.test_version_n ?? null)
+  const echoesTheRow = label === (run.user_query ?? '').trim()
+  return (
+    <span className="shrink-0" title={`Test: ${label} — ${version.title}`}>
+      {/* FlaskConical is the sidebar's own Tests icon, so the chip reads as
+          "this belongs to a test" in the vocabulary the nav already taught. */}
+      <Badge variant="outline" className="gap-1 text-xs font-normal text-muted-foreground">
+        <FlaskConical className="h-3 w-3" />
+        {!echoesTheRow && <span className="max-w-[10rem] truncate">{label}</span>}
+        <span>{version.text}</span>
+      </Badge>
+    </span>
+  )
+}
+
+/** Who the drawer names as this result's author, or null for nobody worth
+ *  naming. The viewer's own address says nothing and is suppressed; an
+ *  address the server withheld under D7 is replaced by the authority that ran
+ *  it, because the row does the same and the two must agree. */
+function drawerAuthor(d: RunDetail | null, viewerEmail: string | undefined): string | null {
+  if (!d) return null
+  if (d.user_email) return d.user_email === viewerEmail ? null : d.user_email
+  return d.ran_as_platform_admin ? PLATFORM_ADMIN : null
+}
+
+/* ── The drawer's "re-run of {id}" trail. The original id is always shown in
+   full; whether it is a link depends on rerun_of_accessible, and the
+   inaccessible branch keeps a copy control so an id you cannot open can still
+   be handed to someone who can ── */
+function RerunOriginLine({ d, copied, onCopy, onOpenRun }: Readonly<{
+  d: RunDetail | null
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+  onOpenRun: (runId: string) => void
+}>) {
+  if (!d?.rerun_of) return null
+  return (
+    <span className="basis-full">
+      re-run of{' '}
+      {d.rerun_of_accessible ? (
+        <button
+          type="button"
+          className="font-mono hover:text-foreground hover:underline"
+          title="Open the original run — feedback on this re-run applies to it"
+          onClick={() => onOpenRun(d.rerun_of!)}
+        >
+          {d.rerun_of}
+        </button>
+      ) : (
+        /* The same rule as the row pill: the id is still shown in
+           full, but it is not a link, because that link would
+           404. It keeps the copy control the accessible branch
+           gets for free from being a button — the id rule is
+           full-AND-copyable unconditionally, and this is the case
+           where copying earns the most: the only thing left to do
+           with an id you cannot open is hand it to someone who
+           can. */
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+          title="Copy the original run’s id — you no longer have access to open it"
+          onClick={() => onCopy(d.rerun_of!, 'drawer-rerun-of')}
+        >
+          {d.rerun_of}
+          {copied === 'drawer-rerun-of' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        </button>
+      )}
+      {/* The leading space in the string below is load-bearing.
+          JSX strips the newline between two adjacent elements, so
+          without it textContent, a copy-paste and every screen
+          reader read "…b05c23967b51(no longer available to you)".
+          The ml-2 that used to sit here moved 8px on screen and
+          nothing anywhere else. */}
+      {!d.rerun_of_accessible && (
+        <span className="text-muted-foreground">
+          {' (no longer available to you)'}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/* ── The drawer's header: status, who ran it, the description, and the id and
+   timestamp line ── */
+function RunDrawerHeader({ selected, d, detailError, viewerEmail, copied, onCopy, onOpenRun }: Readonly<{
+  selected: string | null
+  d: RunDetail | null
+  detailError: string
+  viewerEmail: string | undefined
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+  onOpenRun: (runId: string) => void
+}>) {
+  return (
+    <SheetHeader className="space-y-2 pr-6 text-left">
+      <div className="flex items-center gap-2">
+        {d && STATUS_BADGE[d.status]}
+        {d && <ResultTestChip run={d} />}
+        {d?.rerun_of && (
+          <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-100">
+            <Repeat2 className="h-3 w-3" />
+            <span>Re-run</span>
+          </Badge>
+        )}
+        {drawerAuthor(d, viewerEmail) && (
+          <span className="text-xs text-muted-foreground" title="Who ran this test">
+            {drawerAuthor(d, viewerEmail)}
+          </span>
+        )}
+      </div>
+      {/* detailError means d is null because the fetch was REFUSED,
+          not because the run has no description — so the "Pasted code
+          run" fallback would assert something false about a run we
+          could not read at all. The reason itself renders in the body
+          (see RunDrawerCode); the header only stops lying. */}
+      <SheetTitle className="text-base leading-snug">
+        {detailError ? 'Run unavailable' : d?.user_query || 'Pasted code run'}
+      </SheetTitle>
+      <SheetDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        {selected && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+            title="Copy run id"
+            onClick={() => onCopy(selected, 'drawer-id')}
+          >
+            {selected}
+            {copied === 'drawer-id' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </button>
+        )}
+        {d && <span>created {formatDate(d.created_at)}</span>}
+        {d && d.updated_at !== d.created_at && (
+          <span>last update {formatDate(d.updated_at)}</span>
+        )}
+        <RerunOriginLine d={d} copied={copied} onCopy={onCopy} onOpenRun={onOpenRun} />
+      </SheetDescription>
+      {/* Only failed/error statuses carry a reason — the server withholds
+          both keys for every other status, so their absence there is
+          "not applicable", not "no reason found". Shape borrowed from
+          learning/RunDrawer.tsx's failed_keyword/error_message pair:
+          sentence prominent, raw message below in muted whitespace-pre-wrap. */}
+      {d && (d.status === 'failed' || d.status === 'error') && (d.failure_sentence || d.error_message) && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+          {d.failure_sentence && <p className="font-medium">{d.failure_sentence}</p>}
+          {d.error_message && <p className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">{d.error_message}</p>}
+        </div>
+      )}
+    </SheetHeader>
+  )
+}
+
+/* ── The drawer's action row: re-run, open report, regenerate, and where the
+   run is filed. A run this caller may read but not file still shows WHERE it
+   lives — that is the shared folder doing its job — but as a label rather
+   than a control that could only 404 ── */
+function RunDrawerActions({ d, selected, hasUser, groups, rerunDisabled, onRunAgain, onRegenerate, onMove, onCreateGroup }: Readonly<{
+  d: RunDetail | null
+  selected: string | null
+  hasUser: boolean
+  groups: RunGroup[]
+  rerunDisabled: boolean
+  onRunAgain: (runId: string) => void
+  onRegenerate: (query: string) => void
+  onMove: (runIds: string[], groupId: string | null) => void
+  onCreateGroup: (name: string) => Promise<RunGroup>
+}>) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <Button
+        size="sm"
+        className="h-8 gap-1.5 text-xs"
+        disabled={rerunDisabled}
+        title={d?.robot_code
+          ? 'Execute this exact saved code as a new run — no regeneration, no LLM cost'
+          : 'No stored code for this run'}
+        onClick={() => selected && onRunAgain(selected)}
+      >
+        <Play className="h-3.5 w-3.5" /> Run again
+      </Button>
+      {d?.has_report && (
+        <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+          <a href={`/reports/${d.run_id}/log.html`} target="_blank" rel="noreferrer">
+            <FileTerminal className="h-3.5 w-3.5" /> Open report
+          </a>
+        </Button>
+      )}
+      {d?.user_query && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          title="Start a fresh generation from this description (for when the site changed)"
+          onClick={() => onRegenerate(d.user_query!)}
+        >
+          <RotateCw className="h-3.5 w-3.5" /> Regenerate
+        </Button>
+      )}
+      {d && hasUser && (d.can_move ? (
+        <MoveToGroupMenu
+          groups={groups}
+          currentGroupId={d.group_id}
+          onMove={gid => onMove([d.run_id], gid)}
+          onCreateGroup={onCreateGroup}
+          trigger={
+            <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
+              <FolderInput className="h-3.5 w-3.5" />
+              {d.group_name ? `Group: ${d.group_name}` : 'Move to group…'}
+            </Button>
+          }
+        />
+      ) : d.group_name && (
+        <span
+          className="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs text-muted-foreground"
+          title="Only the owner of a run, or an org admin, can move it"
+        >
+          <Folder className="h-3.5 w-3.5" />
+          Group: {d.group_name}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * What this run has already told the learning system — read-only here;
+ * Retract stays the Generate panel's action alone (see RunDrawerFeedback).
+ * `corrections` is already [] for every case that must render nothing — not
+ * offered, still loading, refused, or genuinely empty — and can never be
+ * another run's (RunDrawerFeedback's key), so this needs no separate
+ * loading/error/staleness check: silence claims nothing, same as
+ * RecordedCorrections' own empty-array case.
+ */
+function RunDrawerCorrections({ corrections, appliedTo, selected, copied, onCopy }: Readonly<{
+  corrections: RecordedCorrectionItem[]
+  appliedTo: string | undefined
+  selected: string | null
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
+  if (corrections.length === 0) return null
+  return (
+    <div className="space-y-1.5">
+      {appliedTo && appliedTo !== selected && (
+        /* Same treatment as the header's own id control above
+           (the "Copy run id" button): font-mono, never truncated,
+           click-to-copy. This run is a re-run, so the corrections
+           just listed are filed against the run the code was
+           cloned from, not this one. */
+        <p className="text-xs text-muted-foreground">
+          Filed against the original run{' '}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+            title="Copy the original run’s id"
+            onClick={() => onCopy(appliedTo, 'drawer-applied-to')}
+          >
+            {appliedTo}
+            {copied === 'drawer-applied-to' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </button>
+        </p>
+      )}
+      <RecordedCorrections corrections={corrections} />
+    </div>
+  )
+}
+
+/* ── The drawer's code panel and its copy/download controls ── */
+function RunDrawerCode({ d, detailError, copied, onCopy, onDownload }: Readonly<{
+  d: RunDetail | null
+  detailError: string
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+  onDownload: (code: string, runId: string) => void
+}>) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot code</span>
+        {d?.robot_code && (
+          <div className="flex gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              title="Copy code"
+              onClick={() => onCopy(d.robot_code!, 'drawer-code')}
+            >
+              {copied === 'drawer-code' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              title="Download .robot file"
+              onClick={() => onDownload(d.robot_code!, d.run_id)}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {drawerCodeBody(detailError, d)}
+
+      {/* Pass-quality suggestions: finished sentences the server sends for a
+          PASSED run only. A quiet muted block, no icon and no colour — a
+          suggestion the user may take or leave, shown nowhere else. */}
+      {d?.status === 'passed' && d.suggestions && d.suggestions.length > 0 && (
+        <div className="flex shrink-0 flex-col gap-1">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {d.suggestions.length === 1 ? 'Suggestion' : 'Suggestions'}
+          </span>
+          {d.suggestions.map(s => (
+            <p key={s} className="text-sm text-muted-foreground break-words">{s}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The corrections the drawer may show for the open run, or [] while that
+ * run's own read is still out or was refused.
+ *
+ * It does NOT decide whether an answer belongs to the open run, and cannot:
+ * the payload carries no run_id of its own (only `applied_to`, the resolved
+ * ORIGINAL run, which legitimately differs from the open run on a re-run), and
+ * useFetch keeps its last good answer while a new path's read is out, and
+ * across a null path (useFetch.ts). A reader that outlived its run therefore
+ * served that run's corrections under the next one in two ways: a run whose
+ * read is not offered gets a null path, which leaves loading false and error
+ * empty over the previous run's data; and the first render after a switch to
+ * another readable run comes before useFetch's effect marks the new read
+ * loading.
+ * RunDrawerFeedback owns the read and is keyed by run id, so its useFetch
+ * starts empty with every run and cannot hold another run's answer.
+ */
+function visibleCorrections(
+  feedbackLoading: boolean,
+  feedbackError: string,
+  feedback: FeedbackCorrectionsResponse | null,
+): RecordedCorrectionItem[] {
+  if (feedbackLoading || feedbackError) return []
+  return Array.isArray(feedback?.corrections) ? feedback.corrections : []
+}
+
+/**
+ * What this run has already contributed to the learning store — the History
+ * drawer's read of the same data GeneratePage's FeedbackPanel shows while the
+ * run is still on screen. Render it only as `key={d.run_id}`: the key is what
+ * ties the read's lifetime to one run (visibleCorrections above).
+ *
+ * Errors are read but never rendered as their own text, and that stays the
+ * backstop rather than the mechanism. A 403 here is legitimate and always
+ * was: GET /api/history/{run_id} passes is_grouped=true (a colleague's run
+ * published into a shared folder opens in this drawer), while
+ * GET /api/feedback/{run_id} deliberately does not — publishing a test does
+ * not publish the corrections filed against it (get_run_corrections,
+ * endpoints.py). An error banner would put a red box on every shared run in
+ * the org. An empty list degrades the same way, silently: silence claims
+ * nothing either way.
+ *
+ * The request is not offered when the server has already said it will refuse
+ * it. can_read_feedback is that answer, computed by run_detail with the same
+ * gate the feedback route applies — and only the server can compute it, since
+ * a platform admin and the token-less dev caller may both read a peer's
+ * corrections while the client knows it is neither. It is read from `d`, the
+ * detail that already names the open run, so the flag always belongs to the
+ * run on screen and the request waits for the detail read instead of racing
+ * it.
+ */
+function RunDrawerFeedback({ d, copied, onCopy }: Readonly<{
+  d: RunDetail
+  copied: string | null
+  onCopy: (text: string, key: string) => void
+}>) {
+  const feedbackPath = d.can_read_feedback ? `/api/feedback/${d.run_id}` : null
+  const { data: feedback, loading, error } = useFetch<FeedbackCorrectionsResponse>(feedbackPath)
+  return (
+    <RunDrawerCorrections
+      corrections={visibleCorrections(loading, error, feedback)}
+      appliedTo={feedback?.applied_to}
+      selected={d.run_id}
+      copied={copied}
+      onCopy={onCopy}
+    />
+  )
+}
+
+/** Run again needs stored code, an open row, no re-run of that row already in
+    flight, and a run that is not still executing. */
+function isRerunDisabled(d: RunDetail | null, selected: string | null, inFlight: Set<string>): boolean {
+  if (!selected) return true
+  return !d?.robot_code || inFlight.has(selected) || d?.status === 'running'
+}
+
+/* ── Status tabs, the text search and the "N of M runs" counter. Status AND
+   text search are both SERVER-side, so the counter is that filter+search's
+   own truth rather than a count of the loaded page ── */
+function HistoryFilterBar({ filter, onFilter, search, onSearch, showAuthor, shown, total }: Readonly<{
+  filter: Filter
+  onFilter: (next: Filter) => void
+  search: string
+  onSearch: (next: string) => void
+  showAuthor: boolean
+  shown: number
+  total: number
+}>) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {FILTERS.map(f => (
+          <Button
+            key={f}
+            size="sm"
+            variant={filter === f ? 'default' : 'outline'}
+            className="h-7 w-24 text-xs capitalize"
+            onClick={() => onFilter(f)}
+          >
+            {f === 'all' ? 'All Runs' : f}
+          </Button>
+        ))}
+      </div>
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={e => onSearch(e.target.value)}
+            placeholder={showAuthor ? 'Search description, user or id…' : 'Search description or id…'}
+            className="h-7 w-56 pl-8 text-xs"
+          />
+        </div>
+        <span className="whitespace-nowrap text-xs text-muted-foreground">
+          {shown} of {total} run{total === 1 ? '' : 's'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+/* ── The bulk-move toolbar. Everything in here is a mutation, and every one of
+   them answers 403 without an identity — so with no user they are not offered
+   at all ── */
+function BulkSelectControls({ hasUser, selectMode, groups, checkedCount, onMoveChecked, onCreateGroup, onEnterSelectMode, onExitSelectMode }: Readonly<{
+  hasUser: boolean
+  selectMode: boolean
+  groups: RunGroup[]
+  checkedCount: number
+  onMoveChecked: (groupId: string | null) => void
+  onCreateGroup: (name: string) => Promise<RunGroup>
+  onEnterSelectMode: () => void
+  onExitSelectMode: () => void
+}>) {
+  if (!hasUser) return null
+  if (!selectMode) {
+    return (
+      <Button
+        size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+        title="Select multiple runs to move them into a group"
+        onClick={onEnterSelectMode}
+      >
+        <ListChecks className="h-3 w-3" /> Select
+      </Button>
+    )
+  }
+  return (
+    <>
+      <MoveToGroupMenu
+        groups={groups}
+        showRemove
+        onMove={onMoveChecked}
+        onCreateGroup={onCreateGroup}
+        trigger={
+          <Button size="sm" className="h-7 text-xs gap-1.5" disabled={checkedCount === 0}>
+            <FolderInput className="h-3 w-3" />
+            Move{checkedCount ? ` ${checkedCount}` : ''} to…
+          </Button>
+        }
+      />
+      <Button
+        size="sm" variant="outline" className="h-7 text-xs"
+        onClick={onExitSelectMode}
+      >
+        Cancel
+      </Button>
+    </>
+  )
+}
+
+/* ── The three mutually exclusive things the table area says when it has no
+   rows to draw: still loading, failed to load, or genuinely empty ── */
+function HistoryEmptyState({ loading, error, isEmpty, debouncedSearch, groupFilter, filter }: Readonly<{
+  loading: boolean
+  error: string
+  isEmpty: boolean
+  debouncedSearch: string
+  groupFilter: GroupFilter
+  filter: Filter
+}>) {
+  if (loading && isEmpty) {
+    return <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">Loading runs…</p>
+  }
+  if (!loading && error) {
+    return <p className="flex min-h-[420px] items-center justify-center text-sm text-destructive">{error}</p>
+  }
+  if (!loading && !error && isEmpty) {
+    return (
+      <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">
+        {noRunsMessage(debouncedSearch, groupFilter, filter)}
+      </p>
+    )
+  }
+  return null
+}
+
+/* ── The runs table's header row. Column geometry is constant (table-fixed),
+   so only the select-all and Ran-by columns come and go ── */
+function RunsTableHead({ selectMode, showAuthor, allVisibleSelected, someVisibleSelected, onToggleAll }: Readonly<{
+  selectMode: boolean
+  showAuthor: boolean
+  allVisibleSelected: boolean
+  someVisibleSelected: boolean
+  onToggleAll: () => void
+}>) {
+  return (
+    <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_hsl(var(--border))]">
+      <tr className="bg-muted/40">
+        {selectMode && (
+          <th className="w-10 py-2.5 pl-4">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5 cursor-pointer accent-primary align-middle"
+              title="Select all loaded runs"
+              aria-label="Select all loaded runs"
+              checked={allVisibleSelected}
+              ref={el => { if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected }}
+              onChange={onToggleAll}
+            />
+          </th>
+        )}
+        <th className="w-28 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
+        <th className="py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Description</th>
+        {showAuthor && (
+          <th className="w-44 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden lg:table-cell">Ran by</th>
+        )}
+        <th className="w-[320px] py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden md:table-cell">ID</th>
+        <th className="w-24 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden sm:table-cell">When</th>
+        <th className="w-20 py-2.5 px-4"></th>
+        <th className="w-9 py-2.5 pr-3"></th>
+      </tr>
+    </thead>
+  )
 }
 
 export default function HistoryPage() {
@@ -109,12 +801,38 @@ export default function HistoryPage() {
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
 
+  // Select mode drives the bulk "Move N runs to…" flow (checkbox column +
+  // toolbar). The group filter itself is NOT local state — it lives in
+  // RunGroupsContext because the sidebar's quick-access list sets the same
+  // value, and two copies would drift apart.
+  const [selectMode, setSelectMode] = useState(false)
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  const [moveError, setMoveError] = useState('')
+
   // Re-run bookkeeping, keyed by the SOURCE run id: which reruns are in
   // flight (disables their Play buttons) and the latest live status line
   // (shown in the drawer).
   const [inFlight, setInFlight] = useState<Set<string>>(new Set())
   const [rerunNote, setRerunNote] = useState<Record<string, string>>({})
   const [copied, setCopied] = useState<string | null>(null)
+
+  // Shared with the sidebar's group quick-access: whichever surface the user
+  // picks a group from, both render the same active group.
+  const {
+    groups, ungroupedCount, error: groupsError, refresh: refreshGroups,
+    createGroup, renameGroup, deleteGroup, assignRuns,
+    groupFilter, setGroupFilter,
+  } = useRunGroups()
+
+  // Who is looking. Without an identity every group mutation answers 403, so
+  // the controls that could only produce one are not offered at all — the LIST
+  // still loads, because GET /api/groups answers 200 with an empty list.
+  const { user, isAdmin } = useAuth()
+
+  // Mirrors the server's rules, which differ per action — see
+  // folderPermissions for each rule and the trap the delete one avoids.
+  const canRename = useCallback((g: RunGroup) => canRenameFolder(user, g), [user])
+  const canDelete = useCallback((_g: RunGroup) => canDeleteFolder(user), [user])
 
   // Status AND text search are both SERVER-side: each tab fetches, counts and
   // paginates only its matching rows, so "Load more (N older)" and the "N of M"
@@ -123,16 +841,25 @@ export default function HistoryPage() {
   const queryString = useCallback((offset: number) => {
     const statusParam = filter === 'all' ? '' : `&status=${filter}`
     const qParam = debouncedSearch ? `&q=${encodeURIComponent(debouncedSearch)}` : ''
-    return `/api/history?limit=${PAGE}&offset=${offset}${statusParam}${qParam}`
-  }, [filter, debouncedSearch])
+    const groupParam = groupFilter ? `&group=${encodeURIComponent(groupFilter)}` : ''
+    return `/api/history?limit=${PAGE}&offset=${offset}${statusParam}${qParam}${groupParam}`
+  }, [filter, debouncedSearch, groupFilter])
+
+  // Every list fetch takes a ticket; only the newest one may write to state.
+  // Switching groups quickly (sidebar → chip → sidebar) fires overlapping
+  // requests, and without this the SLOWER response can land last and repaint
+  // the table with the previous group's runs.
+  const listSeq = useRef(0)
 
   // silent: refresh the rows in place without the "Loading runs…" placeholder
   // (background refetches while the table is already populated).
   const loadRuns = useCallback(async (offset: number, append: boolean, silent = false) => {
+    const seq = ++listSeq.current
     if (!append && !silent) setLoading(true)
     setError('')
     try {
       const page = await api<HistoryResponse>(queryString(offset))
+      if (seq !== listSeq.current) return  // superseded — a newer filter won
       setScope(page.scope)
       setTotal(page.total)
       setRuns(prev => {
@@ -142,27 +869,131 @@ export default function HistoryPage() {
         return [...prev, ...page.runs.filter(r => !seen.has(r.run_id))]
       })
     } catch (e) {
+      if (seq !== listSeq.current) return
       setError(e instanceof Error ? e.message : 'Failed to load history')
     } finally {
-      setLoading(false)
+      // A superseded request must not clear the spinner the newer one raised.
+      if (seq === listSeq.current) setLoading(false)
     }
   }, [queryString])
 
   // Refresh after a re-run WITHOUT collapsing pagination: re-fetch only page
   // zero, merge fresh rows over the loaded set (updating statuses, surfacing
   // the new run at the top) and keep any older pages the user had loaded.
-  const refreshLoaded = useCallback(async () => {
+  // dropIds: rows that must NOT survive in the tail — a run moved out of the
+  // group currently being filtered is absent from the fresh page and would
+  // otherwise linger as a phantom on any older page the user had loaded.
+  const refreshLoaded = useCallback(async (dropIds?: Set<string>) => {
+    const seq = ++listSeq.current
     try {
       const page = await api<HistoryResponse>(queryString(0))
+      if (seq !== listSeq.current) return  // superseded — a newer filter won
       setScope(page.scope)
       setTotal(page.total)
       setRuns(prev => {
         const freshIds = new Set(page.runs.map(r => r.run_id))
-        const tail = prev.filter(r => !freshIds.has(r.run_id))
+        const tail = prev.filter(r => !freshIds.has(r.run_id) && !dropIds?.has(r.run_id))
         return [...page.runs, ...tail]
       })
-    } catch { /* a transient refresh failure leaves the existing rows in place */ }
+    } catch { /* a transient refresh failure leaves the existing rows in place */ } finally {
+      // Both loaders share ONE ticket, so whoever holds the newest one clears
+      // the flag. Without this a refreshLoaded that overtakes an in-flight
+      // loadRuns leaves `loading` true forever: loadRuns sees its ticket is
+      // stale and skips the clear, and nothing else ever runs.
+      if (seq === listSeq.current) setLoading(false)
+    }
   }, [queryString])
+
+  // Rows and folder counts in ONE gesture, fired together rather than in
+  // sequence: they are independent requests and the chips must never lag the
+  // table. Deriving the counts from the loaded rows instead would be cheaper
+  // and wrong — the table is paginated, so anything past the first page would
+  // be missing from the arithmetic.
+  //
+  // Every caller that can change either one goes through here: the Refresh
+  // button, a re-run (which adds a row and moves the Ungrouped count), and a
+  // move. Before this, /api/groups was refetched ONLY by a group mutation, so
+  // a re-run left "Ungrouped · N" one behind and pressing Refresh did not fix
+  // it — the same chip-versus-table disagreement, arriving as staleness
+  // rather than as a wrong query.
+  const reloadAll = useCallback(async (dropIds?: Set<string>) => {
+    await Promise.all([refreshLoaded(dropIds), refreshGroups()])
+  }, [refreshLoaded, refreshGroups])
+
+  // Deleting the active group falls back to All groups; renames/deletes can
+  // change row tags, so refresh the loaded rows in place afterwards.
+  // useGroups already refetched the folder list, so this only needs the rows.
+  const handleRenameGroup = useCallback(async (groupId: string, name: string) => {
+    await renameGroup(groupId, name)
+    void refreshLoaded()
+  }, [renameGroup, refreshLoaded])
+
+  const handleDeleteGroup = useCallback(async (groupId: string) => {
+    await deleteGroup(groupId)
+    if (groupFilter === groupId) {
+      // The filter reset re-fetches via the queryString effect — an extra
+      // refreshLoaded here would race it with the stale deleted-group query.
+      setGroupFilter(null)
+    } else {
+      void refreshLoaded()
+    }
+  }, [deleteGroup, groupFilter, setGroupFilter, refreshLoaded])
+
+  // Declared above moveRuns because a successful move has to refetch it: the
+  // drawer caches the run's group label and check-mark, and without a reload
+  // it keeps showing the folder the run just left.
+  const detailPath = selected ? `/api/history/${selected}` : null
+  const { data: detail, error: detailError, reload: reloadDetail } = useFetch<RunDetail>(detailPath)
+  // useFetch keeps stale data during a refetch, so a just-clicked row would
+  // briefly render the PREVIOUS run's code/query. Only trust detail once it
+  // matches the open row.
+  const d = detail?.run_id === selected ? detail : null
+
+  // fromBulk: the toolbar's multi-select move — only that path exits select
+  // mode, and only on success. A failed move keeps the selection so the user
+  // can retry; the error shows above the table.
+  const moveRuns = useCallback(async (runIds: string[], groupId: string | null, fromBulk = false) => {
+    setMoveError('')
+    try {
+      await assignRuns(runIds, groupId)
+      if (fromBulk) {
+        setCheckedIds(new Set())
+        setSelectMode(false)
+      }
+      // The drawer holds its own copy of the run; refetch it so its folder
+      // label and check-mark stop describing where the run used to be.
+      if (selected && runIds.includes(selected)) void reloadDetail()
+      // Under an active group filter a moved run must LEAVE the view, and
+      // dropping just those ids from the merge tail does that WITHOUT resetting
+      // to page zero — a user who had loaded 150 rows still has 150.
+      //
+      // But only when the run actually left: filing a row into the group being
+      // filtered is a no-op the user can still see, and evicting it would
+      // delete a legitimate row while `total` held ("149 of 150"). Note that
+      // 'ungrouped' is a pseudo-filter rather than a group_id, so "still in
+      // view" there means the new group is null — comparing groupId against
+      // the filter STRING would evict exactly the row Remove-from-group was
+      // supposed to keep. With no filter at all the run stays visible either
+      // way, and dropping it would make an older row vanish.
+      const staysInView = groupFilter === 'ungrouped' ? groupId === null : groupId === groupFilter
+      // assignRuns already refetched the folder list; reloadAll's second
+      // request is what keeps the Ungrouped count right when a run leaves or
+      // joins it, and the two fire together so neither lags the other.
+      if (groupFilter && !staysInView) void reloadAll(new Set(runIds))
+      else void reloadAll()
+    } catch (e) {
+      setMoveError(e instanceof Error ? e.message : 'Failed to move runs')
+    }
+  }, [assignRuns, groupFilter, reloadAll, reloadDetail, selected])
+
+  const toggleChecked = useCallback((runId: string) => {
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(runId)) next.delete(runId)
+      else next.add(runId)
+      return next
+    })
+  }, [])
 
   // Debounce the search box into the server query (and reset to page zero).
   useEffect(() => {
@@ -173,27 +1004,73 @@ export default function HistoryPage() {
   // Initial load + refetch from page zero whenever the tab or search changes.
   useEffect(() => { void loadRuns(0, false) }, [loadRuns])
 
-  const detailPath = selected ? `/api/history/${selected}` : null
-  const { data: detail, error: detailError } = useFetch<RunDetail>(detailPath)
-  // useFetch keeps stale data during a refetch, so a just-clicked row would
-  // briefly render the PREVIOUS run's code/query. Only trust detail once it
-  // matches the open row.
-  const d = detail && detail.run_id === selected ? detail : null
+  // Any filter change replaces the visible rows, so a selection made against
+  // the PREVIOUS list is no longer something the user can see or reason about
+  // — keeping it would let a bulk move act on rows that scrolled out of
+  // existence when they switched groups from the sidebar. Select mode itself
+  // stays on; only the now-invisible picks are dropped, along with a move
+  // error that belonged to the old view.
+  useEffect(() => {
+    setCheckedIds(new Set())
+    setMoveError('')
+  }, [groupFilter, filter, debouncedSearch])
 
   const isAdminScope = scope === 'all'
   const visible = runs  // filtering is server-side now
 
+  const subtitle = historySubtitle(isAdminScope, isAdmin)
+
+  // Who ran each test. A group is shared, so a member's table now contains
+  // colleagues' runs, and a row with no author would leave the org unable to
+  // say who wrote what — the accountability the whole shared model rests on.
+  //
+  // The question is only ever "is any loaded row someone else's". Reading
+  // scope='all' as a second yes was wrong twice over: the server returns it
+  // to ANY org_admin, and every solo signup is org_admin of their own
+  // personal org — so the one user this column exists to spare got their own
+  // address repeated down every line, which is exactly the noise the rule
+  // above was written to prevent. A single-member team org had it too.
+  //
+  // Deliberately not an email-present test: a row with NO author is not the
+  // viewer's either, and it is precisely the row whose "—" the org needs to
+  // see. Only a platform admin (and the token-less dev caller) is ever shown
+  // one, so this stays quiet for everyone else.
+  const showAuthor = visible.some(r => r.user_email !== user?.email)
+
+  // Header select-all works over the VISIBLE (loaded) rows only, so stray ids
+  // checked under a previous filter neither satisfy "all selected" nor get
+  // swept along by the header toggle.
+  // Only rows this caller may actually file can be selected. A bulk move is
+  // all-or-nothing server-side, so one unmovable row in the selection rejects
+  // the entire batch — and now that a folder is shared, a member's table is
+  // full of colleagues' runs they may read but not move. Select-all over the
+  // raw list would have made the bulk move unusable for every team member.
+  const movable = visible.filter(r => r.can_move)
+  const allVisibleSelected = movable.length > 0 && movable.every(r => checkedIds.has(r.run_id))
+  const someVisibleSelected = movable.some(r => checkedIds.has(r.run_id))
+
+  const toggleAllVisible = useCallback(() => {
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      const all = visible.filter(r => r.can_move)
+      if (all.every(r => next.has(r.run_id))) all.forEach(r => next.delete(r.run_id))
+      else all.forEach(r => next.add(r.run_id))
+      return next
+    })
+  }, [visible])
+
   const runAgain = useCallback(async (sourceId: string) => {
-    setSelected(sourceId) // feedback lives in the drawer
+    setSelected(sourceId) // the drawer is where the live status line renders
     setInFlight(prev => new Set(prev).add(sourceId))
     const note = (text: string) => setRerunNote(prev => ({ ...prev, [sourceId]: text }))
     note('Starting re-run of the stored code…')
     let listRefreshed = false
+    let refused = false
     try {
       await streamSSE('/execute-test', { rerun_of: sourceId }, ev => {
         // First event = the new run row exists; surface it at the top
         // (the table is populated and the stream is still going).
-        if (!listRefreshed) { listRefreshed = true; void refreshLoaded() }
+        if (!listRefreshed) { listRefreshed = true; void reloadAll() }
         if (ev.test_status === 'passed') note('✓ Re-run passed')
         else if (ev.test_status === 'failed') note('✗ Re-run failed — open its report from the new row on top')
         else if (ev.status === 'error') note(`Error: ${ev.message || 'execution failed'}`)
@@ -201,11 +1078,25 @@ export default function HistoryPage() {
       })
     } catch (e) {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
+      // Only a run the caller can no longer READ may be dropped below — see
+      // isAccessLoss for why a 409 is not that. The row-level Run again
+      // button fires blind on exactly the runs that 409: the history payload
+      // carries no robot_code, so the row cannot know it has none.
+      refused = isAccessLoss(e)
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(sourceId); return next })
-      void refreshLoaded()
+      // The new run exists and may have landed in its source's folder, so the
+      // chip counts moved too — reload both.
+      //
+      // A run we LOST ACCESS to is gone from page zero, so drop it explicitly
+      // or refreshLoaded's merge keeps it alive in the tail and the user is
+      // left staring at a row the server denies. Anything else — a 409, a
+      // dropped connection, a 5xx — leaves the row alone; see the catch.
+      // Only this id — blanket-dropping everything missing from page zero is
+      // what would delete the older Load-more pages.
+      void reloadAll(refused ? new Set([sourceId]) : undefined)
     }
-  }, [refreshLoaded])
+  }, [reloadAll])
 
   const copyText = useCallback(async (text: string, key: string) => {
     try {
@@ -225,53 +1116,81 @@ export default function HistoryPage() {
   }, [])
 
   const selectedNote = selected ? rerunNote[selected] : undefined
-  const rerunDisabled = !d?.robot_code || !selected || inFlight.has(selected) || d?.status === 'running'
+  const rerunDisabled = isRerunDisabled(d, selected, inFlight)
 
   return (
     <div className="mx-auto max-w-6xl">
       <div className="mb-5 flex items-end justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">Test History</h1>
+          <h1 className="text-xl font-bold tracking-tight">Activity</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            {isAdminScope
-              ? 'All users’ test runs (admin view) — click any run to view its script and details'
-              : 'Click any run to view its script and re-run it as-is — no regeneration time, no LLM cost'}
+            {subtitle}
           </p>
         </div>
-        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => loadRuns(0, false)}>
+        <Button
+          size="sm" variant="outline" className="h-7 text-xs gap-1.5"
+          onClick={() => { void loadRuns(0, false); void refreshGroups() }}
+        >
           <RefreshCw className="h-3 w-3" /> Refresh
         </Button>
       </div>
 
       <Card>
-        <CardHeader className="gap-3 space-y-0 pb-3 px-5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap items-center gap-1.5">
-            {FILTERS.map(f => (
-              <Button
-                key={f}
-                size="sm"
-                variant={filter === f ? 'default' : 'outline'}
-                className="h-7 w-24 text-xs capitalize"
-                onClick={() => setFilter(f)}
-              >
-                {f === 'all' ? 'All Runs' : f}
-              </Button>
-            ))}
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder={isAdminScope ? 'Search description, user or id…' : 'Search description or id…'}
-                className="h-7 w-56 pl-8 text-xs"
+        <CardHeader className="gap-3 space-y-0 pb-3 px-5">
+          <HistoryFilterBar
+            filter={filter}
+            onFilter={setFilter}
+            search={search}
+            onSearch={setSearch}
+            showAuthor={showAuthor}
+            shown={visible.length}
+            total={total}
+          />
+          {/* Group chips row (design option C) + the bulk-move toolbar. The
+              toolbar is pinned top-right: only the CHIPS wrap onto new lines
+              (min-w-0 flex-1), so Select/Move never drift down as groups grow. */}
+          <div className="flex items-start justify-between gap-3 border-t pt-2.5">
+            <div className="min-w-0 flex-1">
+              <GroupChipsRow
+                groups={groups}
+                ungroupedCount={ungroupedCount}
+                active={groupFilter}
+                onSelect={setGroupFilter}
+                onCreate={async name => { await createGroup(name) }}
+                onRename={handleRenameGroup}
+                onDelete={handleDeleteGroup}
+                canRename={canRename}
+                canDelete={canDelete}
+                canCreate={!!user}
               />
             </div>
-            <span className="whitespace-nowrap text-xs text-muted-foreground">
-              {visible.length} of {total} run{total === 1 ? '' : 's'}
-            </span>
+            {/* Everything in here is a mutation, and every one of them answers
+                403 without an identity — so they are not offered at all. */}
+            <div className="flex shrink-0 items-center gap-1.5">
+              <BulkSelectControls
+                hasUser={!!user}
+                selectMode={selectMode}
+                groups={groups}
+                checkedCount={checkedIds.size}
+                onMoveChecked={gid => { if (checkedIds.size) void moveRuns([...checkedIds], gid, true) }}
+                onCreateGroup={createGroup}
+                onEnterSelectMode={() => setSelectMode(true)}
+                onExitSelectMode={() => { setSelectMode(false); setCheckedIds(new Set()) }}
+              />
+            </div>
           </div>
+          {/* A failed /api/groups leaves the chips showing whatever the last
+              good load left behind — a stale count, or none at all — with no
+              hint that anything went wrong. The sidebar already says so; this
+              page is where the folders are actually managed, so it has to as
+              well. Separate line from moveError: they are different failures
+              and either can be live. */}
+          {groupsError && (
+            <p className="text-xs text-destructive">
+              Couldn’t load groups — {groupsError}
+            </p>
+          )}
+          {moveError && <p className="text-xs text-destructive">{moveError}</p>}
         </CardHeader>
 
         <CardContent className="p-0">
@@ -281,72 +1200,86 @@ export default function HistoryPage() {
               collapsing the card. Column geometry is constant (table-fixed),
               so switching filters only changes the values. */}
           <div className="min-h-[420px]">
-          {loading && (
-            <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">Loading runs…</p>
-          )}
-          {!loading && error && (
-            <p className="flex min-h-[420px] items-center justify-center text-sm text-destructive">{error}</p>
-          )}
-          {!loading && !error && visible.length === 0 && (
-            <p className="flex min-h-[420px] items-center justify-center text-sm text-muted-foreground">
-              {debouncedSearch
-                ? 'No runs match your search.'
-                : filter === 'all'
-                  ? 'No test runs yet — generate your first test from the Generate page.'
-                  : `No ${filter} runs yet.`}
-            </p>
-          )}
+          <HistoryEmptyState
+            loading={loading}
+            error={error}
+            isEmpty={visible.length === 0}
+            debouncedSearch={debouncedSearch}
+            groupFilter={groupFilter}
+            filter={filter}
+          />
 
-          {!loading && !error && visible.length > 0 && (
-            <>
+          {/* Filter/search changes keep the PREVIOUS rows on screen and dim
+              them while the refetch is in flight, then swap in place — no
+              unmount, no "Loading runs…" flash between filters. The full
+              placeholder only ever shows on the very first load. */}
+          {!error && visible.length > 0 && (
+            <div className={`transition-opacity duration-200 ${loading ? 'pointer-events-none opacity-50' : 'opacity-100'}`}>
               {/* table-fixed: column widths are set here once and never
                   recomputed from row content, so switching status filters
                   keeps the exact same grid — only the values change. */}
               <table className="w-full table-fixed text-sm">
-                <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_hsl(var(--border))]">
-                  <tr className="bg-muted/40">
-                    <th className="w-28 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Status</th>
-                    <th className="py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">Description</th>
-                    {isAdminScope && (
-                      <th className="w-44 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden lg:table-cell">User</th>
-                    )}
-                    <th className="w-[320px] py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden md:table-cell">ID</th>
-                    <th className="w-24 py-2.5 px-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden sm:table-cell">When</th>
-                    <th className="w-20 py-2.5 px-4"></th>
-                    <th className="w-9 py-2.5 pr-3"></th>
-                  </tr>
-                </thead>
+                <RunsTableHead
+                  selectMode={selectMode}
+                  showAuthor={showAuthor}
+                  allVisibleSelected={allVisibleSelected}
+                  someVisibleSelected={someVisibleSelected}
+                  onToggleAll={toggleAllVisible}
+                />
                 <tbody>
                   {visible.map(row => (
                     <tr
                       key={row.run_id}
                       className="group cursor-pointer border-b last:border-0 hover:bg-muted/30 transition-colors"
-                      onClick={() => setSelected(row.run_id)}
+                      onClick={() => (
+                        selectMode
+                          ? (row.can_move && toggleChecked(row.run_id))
+                          : setSelected(row.run_id)
+                      )}
                     >
+                      {selectMode && (
+                        <td className="py-3 pl-4" onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 accent-primary disabled:cursor-not-allowed disabled:opacity-40 enabled:cursor-pointer"
+                            /* The description alone is not unique — two runs
+                               of the same test gave a screen-reader user
+                               "Select run E2E::alice passed checkout" twice
+                               with nothing to tell them apart. The full run
+                               id, never truncated. */
+                            aria-label={`Select run ${row.user_query || 'Pasted code run'} (${row.run_id})`}
+                            title={row.can_move ? undefined
+                              : 'Only the owner of a run, or an org admin, can move it'}
+                            disabled={!row.can_move}
+                            checked={checkedIds.has(row.run_id)}
+                            onChange={() => toggleChecked(row.run_id)}
+                          />
+                        </td>
+                      )}
                       <td className="py-3 px-4">{STATUS_BADGE[row.status] ?? row.status}</td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
-                          {row.rerun_of && (
-                            <button
-                              type="button"
-                              className="shrink-0"
-                              title={`Re-run of ${row.rerun_of} — click to open the original run`}
-                              onClick={e => { e.stopPropagation(); setSelected(row.rerun_of!) }}
-                            >
-                              {/* Same pill family as the status badges so it
-                                  reads as a first-class chip, not a footnote. */}
-                              <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-200">
-                                <Repeat2 className="h-3 w-3" />
-                                <span>Re-run</span>
-                              </Badge>
-                            </button>
-                          )}
+                          {/* What the re-run pill used to be (spec 7.5).
+                              Lineage between two RESULTS is gone as a
+                              concept; lineage to the TEST replaces it. The
+                              drawer still shows `rerun_of` in full, and P3
+                              drops that column and the trail together. */}
+                          <ResultTestChip run={row} />
                           <span className="line-clamp-1 text-sm" title={row.user_query ?? undefined}>
                             {row.user_query || <span className="text-muted-foreground italic">Pasted code run</span>}
                           </span>
+                          {!groupFilter && row.group_name && (
+                            <span
+                              className="hidden shrink-0 items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground lg:inline-flex"
+                              title={`In group ${row.group_name}`}
+                            >
+                              <Folder className="h-3 w-3" />
+                              {row.group_name}
+                            </span>
+                          )}
                         </div>
                       </td>
-                      {isAdminScope && (
+                      {showAuthor && (
                         <td className="py-3 px-4 text-xs text-muted-foreground hidden lg:table-cell">
                           {row.user_email ? (
                             <button
@@ -357,6 +1290,14 @@ export default function HistoryPage() {
                             >
                               {row.user_email}
                             </button>
+                          ) : row.ran_as_platform_admin ? (
+                            /* D7. A statement, not a control: there is no
+                               individual to filter by, and the address such a
+                               button would need is precisely what the server
+                               withheld from this viewer. */
+                            <span className="block max-w-full truncate" title="Who ran this test">
+                              {PLATFORM_ADMIN}
+                            </span>
                           ) : '—'}
                         </td>
                       )}
@@ -378,6 +1319,23 @@ export default function HistoryPage() {
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex gap-1 justify-end">
+                          {user && row.can_move && (
+                            <MoveToGroupMenu
+                              groups={groups}
+                              currentGroupId={row.group_id}
+                              onMove={gid => void moveRuns([row.run_id], gid)}
+                              onCreateGroup={createGroup}
+                              trigger={
+                                <Button
+                                  variant="ghost" size="icon" className="h-7 w-7"
+                                  title="Move to group…"
+                                  onClick={e => e.stopPropagation()}
+                                >
+                                  <FolderInput className="h-3.5 w-3.5" />
+                                </Button>
+                              }
+                            />
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -422,7 +1380,7 @@ export default function HistoryPage() {
                   </Button>
                 </div>
               )}
-            </>
+            </div>
           )}
           </div>
         </CardContent>
@@ -430,137 +1388,47 @@ export default function HistoryPage() {
 
       <Sheet open={!!selected} onOpenChange={open => { if (!open) setSelected(null) }}>
         <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-2xl">
-          <SheetHeader className="space-y-2 pr-6 text-left">
-            <div className="flex items-center gap-2">
-              {d && STATUS_BADGE[d.status]}
-              {d?.rerun_of && (
-                <Badge className="gap-1 border-blue-200 bg-blue-100 text-xs text-blue-700 hover:bg-blue-100">
-                  <Repeat2 className="h-3 w-3" />
-                  <span>Re-run</span>
-                </Badge>
-              )}
-              {isAdminScope && d?.user_email && (
-                <span className="text-xs text-muted-foreground">{d.user_email}</span>
-              )}
-            </div>
-            <SheetTitle className="text-base leading-snug">
-              {d?.user_query || 'Pasted code run'}
-            </SheetTitle>
-            <SheetDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-              {selected && (
-                <button
-                  type="button"
-                  className="inline-flex items-center gap-1 font-mono hover:text-foreground"
-                  title="Copy run id"
-                  onClick={() => void copyText(selected, 'drawer-id')}
-                >
-                  {selected}
-                  {copied === 'drawer-id' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                </button>
-              )}
-              {d && <span>created {formatDate(d.created_at)}</span>}
-              {d && d.updated_at !== d.created_at && (
-                <span>last update {formatDate(d.updated_at)}</span>
-              )}
-              {d?.rerun_of && (
-                <span className="basis-full">
-                  re-run of{' '}
-                  <button
-                    type="button"
-                    className="font-mono hover:text-foreground hover:underline"
-                    title="Open the original run — feedback on this re-run applies to it"
-                    onClick={() => setSelected(d.rerun_of!)}
-                  >
-                    {d.rerun_of}
-                  </button>
-                </span>
-              )}
-            </SheetDescription>
-          </SheetHeader>
+          <RunDrawerHeader
+            selected={selected}
+            d={d}
+            detailError={detailError}
+            viewerEmail={user?.email}
+            copied={copied}
+            onCopy={copyText}
+            onOpenRun={setSelected}
+          />
 
           {selectedNote && (
             <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs">{selectedNote}</p>
           )}
 
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              disabled={rerunDisabled}
-              title={d?.robot_code
-                ? 'Execute this exact saved code as a new run — no regeneration, no LLM cost'
-                : 'No stored code for this run'}
-              onClick={() => selected && void runAgain(selected)}
-            >
-              <Play className="h-3.5 w-3.5" /> Run again
-            </Button>
-            {d?.has_report && (
-              <Button asChild size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
-                <a href={`/reports/${d.run_id}/log.html`} target="_blank" rel="noreferrer">
-                  <FileTerminal className="h-3.5 w-3.5" /> Open report
-                </a>
-              </Button>
-            )}
-            {d?.user_query && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 gap-1.5 text-xs"
-                title="Start a fresh generation from this description (for when the site changed)"
-                onClick={() => navigate('/generate', { state: { prefillQuery: d.user_query } })}
-              >
-                <RotateCw className="h-3.5 w-3.5" /> Regenerate
-              </Button>
-            )}
-          </div>
+          <RunDrawerActions
+            d={d}
+            selected={selected}
+            hasUser={!!user}
+            groups={groups}
+            rerunDisabled={rerunDisabled}
+            onRunAgain={runAgain}
+            onRegenerate={q => navigate('/generate', { state: { prefillQuery: q } })}
+            onMove={moveRuns}
+            onCreateGroup={createGroup}
+          />
+
+          {/* The card header's copy of this sits BEHIND the drawer overlay, so
+              a move that failed from in here would otherwise be silent. */}
+          {moveError && <p className="text-xs text-destructive">{moveError}</p>}
+
+          {d && <RunDrawerFeedback key={d.run_id} d={d} copied={copied} onCopy={copyText} />}
 
           <Separator />
 
-          <div className="flex min-h-0 flex-1 flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Robot code</span>
-              {d?.robot_code && (
-                <div className="flex gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    title="Copy code"
-                    onClick={() => void copyText(d.robot_code!, 'drawer-code')}
-                  >
-                    {copied === 'drawer-code' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    title="Download .robot file"
-                    onClick={() => downloadCode(d.robot_code!, d.run_id)}
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {/* d is null while the fetch is pending OR still resolving a row
-                switch (useFetch keeps stale data), so gate the body on d to
-                avoid flashing the previous run's code. */}
-            {detailError ? (
-              <p className="py-6 text-center text-xs text-destructive">{detailError}</p>
-            ) : !d ? (
-              <p className="py-6 text-center text-xs text-muted-foreground">Loading…</p>
-            ) : d.robot_code ? (
-              <pre className="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">
-                {d.robot_code}
-              </pre>
-            ) : (
-              <p className="rounded-md border border-dashed px-3 py-6 text-center text-xs italic text-muted-foreground">
-                No stored code — this run predates code persistence.
-                {d.user_query ? ' Use Regenerate to produce it again.' : ''}
-              </p>
-            )}
-          </div>
+          <RunDrawerCode
+            d={d}
+            detailError={detailError}
+            copied={copied}
+            onCopy={copyText}
+            onDownload={downloadCode}
+          />
         </SheetContent>
       </Sheet>
     </div>

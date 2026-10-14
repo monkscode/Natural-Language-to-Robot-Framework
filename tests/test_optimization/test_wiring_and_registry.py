@@ -3,7 +3,7 @@ DAY 07 — Integration Wiring (pytest).
 
 Tests: url_utils.extract_domain, learning_config re-export,
 docker_service return dict enrichment, get_feedback_loop singleton,
-_process_learning wiring, kill switch, error resilience, and regression.
+_process_learning_record wiring, kill switch, error resilience, and regression.
 Uses in-memory SQLite with full Phase 1 schema.
 """
 
@@ -251,13 +251,13 @@ class TestSingleton:
 
 
 # ===================================================================
-# Category 5: _process_learning Wiring Tests
+# Category 5: _process_learning_record Wiring Tests
 # ===================================================================
 
 class TestProcessLearningWiring:
 
     def test_calls_feedback_loop(self):
-        """_process_learning should call process_execution on FeedbackLoop."""
+        """_process_learning_record should call process_execution on FeedbackLoop."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -270,7 +270,7 @@ class TestProcessLearningWiring:
         }
 
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
-            ws._process_learning("wf-123", "click button on demoqa.com", "*** Test Cases ***", result)
+            ws._process_learning_record("wf-123", "click button on demoqa.com", "*** Test Cases ***", result)
 
         mock_fl.process_execution.assert_called_once()
         call_kwargs = mock_fl.process_execution.call_args
@@ -279,19 +279,19 @@ class TestProcessLearningWiring:
         _reset_singleton()
 
     def test_skips_when_none(self):
-        """_process_learning should skip when get_feedback_loop() returns None."""
+        """_process_learning_record should skip when get_feedback_loop() returns None."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=None):
             # Should not raise
-            ws._process_learning("wf-123", "query", "code", {"test_status": "passed"})
+            ws._process_learning_record("wf-123", "query", "code", {"test_status": "passed"})
         # If we got here, it worked
 
         _reset_singleton()
 
     def test_nonblocking_on_error(self):
-        """_process_learning should catch exceptions and not propagate."""
+        """_process_learning_record should catch exceptions and not propagate."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -300,12 +300,12 @@ class TestProcessLearningWiring:
 
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
             # Should NOT raise
-            ws._process_learning("wf-123", "query", "code", {"test_status": "failed"})
+            ws._process_learning_record("wf-123", "query", "code", {"test_status": "failed"})
 
         _reset_singleton()
 
     def test_extracts_url(self):
-        """_process_learning should extract URL from user_query."""
+        """_process_learning_record should extract URL from user_query."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -313,7 +313,7 @@ class TestProcessLearningWiring:
 
         result = {'test_status': 'passed', 'output_xml_path': None, 'exit_code': 0}
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
-            ws._process_learning("wf-123", "go to https://demoqa.com and click", "code", result)
+            ws._process_learning_record("wf-123", "go to https://demoqa.com and click", "code", result)
 
         call_args = mock_fl.process_execution.call_args
         # url should be extracted from user_query
@@ -324,7 +324,7 @@ class TestProcessLearningWiring:
         _reset_singleton()
 
     def test_no_user_query(self):
-        """_process_learning should handle user_query=None by skipping (guard clause)."""
+        """_process_learning_record should handle user_query=None by skipping (guard clause)."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -333,7 +333,7 @@ class TestProcessLearningWiring:
         result = {'test_status': 'passed', 'output_xml_path': None, 'exit_code': 0}
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
             # Should not raise -- guard clause returns early for None user_query
-            ws._process_learning("wf-123", None, "code", result)
+            ws._process_learning_record("wf-123", None, "code", result)
 
         # user_query=None triggers the empty-query guard -- process_execution NOT called
         mock_fl.process_execution.assert_not_called()
@@ -341,7 +341,7 @@ class TestProcessLearningWiring:
         _reset_singleton()
 
     def test_passes_output_xml(self):
-        """_process_learning should pass output_xml_path from docker result."""
+        """_process_learning_record should pass output_xml_path from docker result."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -349,7 +349,7 @@ class TestProcessLearningWiring:
 
         result = {'test_status': 'failed', 'output_xml_path': '/path/output.xml', 'exit_code': 1}
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
-            ws._process_learning("wf-123", "query", "code", result)
+            ws._process_learning_record("wf-123", "query", "code", result)
 
         call_args = mock_fl.process_execution.call_args
         kwargs = call_args[1] if call_args[1] else {}
@@ -359,7 +359,7 @@ class TestProcessLearningWiring:
         _reset_singleton()
 
     def test_passes_metrics_none(self):
-        """_process_learning should pass metrics=None for execute-only mode."""
+        """_process_learning_record should pass metrics=None for execute-only mode."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -367,7 +367,7 @@ class TestProcessLearningWiring:
 
         result = {'test_status': 'passed', 'output_xml_path': None, 'exit_code': 0}
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
-            ws._process_learning("wf-123", "query", "code", result)
+            ws._process_learning_record("wf-123", "query", "code", result)
 
         call_args = mock_fl.process_execution.call_args
         kwargs = call_args[1] if call_args[1] else {}
@@ -377,7 +377,7 @@ class TestProcessLearningWiring:
         _reset_singleton()
 
     def test_handles_missing_keys(self):
-        """_process_learning should handle result dict missing keys."""
+        """_process_learning_record should handle result dict missing keys."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -386,7 +386,7 @@ class TestProcessLearningWiring:
         # Minimal result dict -- missing output_xml_path and exit_code
         result = {'test_status': 'error'}
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
-            ws._process_learning("wf-123", "query", "code", result)
+            ws._process_learning_record("wf-123", "query", "code", result)
 
         call_args = mock_fl.process_execution.call_args
         kwargs = call_args[1] if call_args[1] else {}
@@ -472,7 +472,7 @@ class TestKillSwitch:
 class TestErrorResilience:
 
     def test_init_crash_pipeline_ok(self):
-        """If FeedbackLoop init crashes, _process_learning continues without error."""
+        """If FeedbackLoop init crashes, _process_learning_record continues without error."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
         import src.backend.crew_ai.optimization.learning_registry as lr
@@ -481,13 +481,13 @@ class TestErrorResilience:
             with patch('src.backend.crew_ai.optimization.feedback_loop.FeedbackLoop',
                        side_effect=Exception("Catastrophic init failure")):
                 # get_feedback_loop will try init, fail, return None
-                # _process_learning should handle this gracefully -- Should NOT raise
-                ws._process_learning("wf-123", "query", "code", {"test_status": "passed"})
+                # _process_learning_record should handle this gracefully -- Should NOT raise
+                ws._process_learning_record("wf-123", "query", "code", {"test_status": "passed"})
 
         _reset_singleton()
 
     def test_process_crash_pipeline_ok(self):
-        """If process_execution crashes, _process_learning swallows the error."""
+        """If process_execution crashes, _process_learning_record swallows the error."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -496,12 +496,12 @@ class TestErrorResilience:
 
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
             # Should NOT raise
-            ws._process_learning("wf-123", "query", "code", {"test_status": "failed"})
+            ws._process_learning_record("wf-123", "query", "code", {"test_status": "failed"})
 
         _reset_singleton()
 
     def test_empty_result_dict(self):
-        """_process_learning should handle completely empty result dict."""
+        """_process_learning_record should handle completely empty result dict."""
         _reset_singleton()
         import src.backend.services.workflow_service as ws
 
@@ -509,7 +509,7 @@ class TestErrorResilience:
 
         with patch('src.backend.services.workflow_service.get_feedback_loop', return_value=mock_fl):
             # Should NOT raise
-            ws._process_learning("wf-123", "query", "code", {})
+            ws._process_learning_record("wf-123", "query", "code", {})
 
         _reset_singleton()
 
@@ -546,7 +546,7 @@ class TestIntegrationSmoke:
         """workflow_service.py should import without errors."""
         import src.backend.services.workflow_service as ws
         assert hasattr(ws, 'get_feedback_loop')
-        assert hasattr(ws, '_process_learning')
+        assert hasattr(ws, '_process_learning_record')
         assert hasattr(ws, 'stream_execute_only')
 
     def test_feedback_loop_imports(self):

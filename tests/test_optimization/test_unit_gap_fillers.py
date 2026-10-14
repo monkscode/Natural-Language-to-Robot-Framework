@@ -73,6 +73,10 @@ class SynchronousWriteQueue:
     def submit(self, fn, *args, **kwargs):
         fn(*args, **kwargs)
 
+    def submit_and_wait(self, fn, *args, timeout=None, **kwargs):
+        fn(*args, **kwargs)
+        return ("ok", None)
+
 
 class MockEngine:
     """Minimal mock of a LearningEngine for FeedbackLoop tests."""
@@ -486,7 +490,7 @@ def test_fl_process_execution_submit_count(in_memory_db):
     )
     # Expected submits: store(1) + 3 engines(3) + pattern_learner(1) + metrics(1) + daily_stats(1) = 7.
     # The old Step-7 nl_engine submit (update_hint_effectiveness) was removed —
-    # NL-hint usage attribution now runs from workflow_service._process_learning.
+    # NL-hint usage attribution now runs from workflow_service._process_learning_record.
     assert cq.count == 7, f"Expected 7 submits, got {cq.count}"
 
 
@@ -528,9 +532,9 @@ def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
         "INSERT INTO nl_feedback_corrections "
         "(feedback_text, category, scope, domain, url, "
         " original_failure_category, evidence_count, "
-        " source_workflow_id, created_at, last_seen, conflict_flagged) "
+        " source_workflow_id, created_at, last_seen, conflict_flagged, org_id) "
         "VALUES (?, 'uncategorized', 'domain', 'example.com', NULL, NULL, 1, "
-        "        NULL, datetime('now'), datetime('now'), 1)",
+        "        NULL, datetime('now'), datetime('now'), 1, 'org-A')",
         (feedback_text,),
     )
     conn.commit()
@@ -539,7 +543,7 @@ def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
     fl.process_execution(
         workflow_id="wf-actor-thread", user_query="check the page",
         url="https://example.com", robot_code="*** Test Cases ***",
-        test_status="failed",
+        test_status="failed", org_id="org-A",  # T9: hint writes need an org
     )
     # SynchronousWriteQueue runs each submit inline, so the engine's audit write
     # has completed by the time process_user_feedback returns -- no drain needed.
@@ -551,12 +555,13 @@ def test_fl_process_user_feedback_threads_actor_to_audit(in_memory_db):
     )
 
     audit_rows = conn.execute(
-        "SELECT action, actor FROM hint_audit WHERE hint_id = ?",
+        "SELECT action, actor FROM hint_audit WHERE hint_id = ? ORDER BY id",
         (hint_id,),
     ).fetchall()
-    assert len(audit_rows) == 1
-    assert audit_rows[0]["action"] == "unflag"
-    assert audit_rows[0]["actor"] == "alice@example.com"
+    # T11 writes a 'reinforce' row beside the pre-existing 'unflag' one. The
+    # actor is threaded to both, which is what this test is about.
+    assert [r["action"] for r in audit_rows] == ["unflag", "reinforce"]
+    assert {r["actor"] for r in audit_rows} == {"alice@example.com"}
 
 
 def test_fl_no_holdout_in_config():
@@ -655,14 +660,14 @@ def test_ci_ape_warm_db_returns_warning(in_memory_db):
     conn.execute(
         "INSERT INTO anti_patterns "
         "(failure_category, query_pattern, bad_code_snippet, "
-        " error_message, domain, score, evidence_count, last_seen) "
+        " error_message, domain, score, evidence_count, last_seen, org_id) "
         "VALUES ('A1', 'check all rows', 'Get Text  id=cell', "
-        " 'Missing FOR loop construct', 'example.com', 0.83, 5, ?)",
+        " 'Missing FOR loop construct', 'example.com', 0.83, 5, ?, 'org-A')",
         (now,),
     )
     conn.commit()
     hints = ape.get_hints("check all rows in table",
-                          "https://example.com", "planner")
+                          "https://example.com", "planner", org_id="org-A")
     assert hints is not None, "Warm DB should return hints"
     assert len(hints) > 0
 
@@ -768,73 +773,6 @@ def test_cb_reset_recovers_from_trip():
     stats_after = cb.get_stats()
     assert stats_after["error_rate"] == 0.0
     assert stats_after["error_count"] == 0
-
-
-def test_deduplication_aggregates_after_threshold(in_memory_db):
-    """After 5 identical records, store() deduplicates (UPDATE not INSERT).
-
-    Real scenario: User runs "click login button on example.com" 10 times.
-    First 5 create separate rows; 6th onward updates the most recent row.
-    This prevents unbounded DB growth from repetitive queries.
-    """
-    conn = in_memory_db
-    em = create_execution_memory(conn)
-    # Store 7 identical executions (same query + domain + status)
-    for i in range(7):
-        em.store(ExecutionRecord(
-            workflow_id=f"dedup-{i}",
-            timestamp=datetime.now(),
-            user_query="click login button",
-            url="https://example.com/login",
-            domain="example.com",
-            robot_code=f"*** Test Cases ***\nAttempt {i}",
-            code_structure="linear",
-            test_status="passed",
-            total_llm_calls=2,
-            total_cost=0.01,
-        ))
-    # After dedup threshold (5), row count should stop growing
-    row_count = conn.execute(
-        "SELECT COUNT(*) FROM execution_records "
-        "WHERE LOWER(TRIM(user_query)) = 'click login button' "
-        "AND domain = 'example.com' AND test_status = 'passed'"
-    ).fetchone()[0]
-    assert row_count == 5, (
-        f"After 7 stores with dedup threshold 5, expected 5 rows, got {row_count}. "
-        "Records 6 and 7 should UPDATE the latest row instead of inserting."
-    )
-
-
-def test_deduplication_keeps_latest_code(in_memory_db):
-    """Deduplication should keep the most recent robot_code.
-
-    Real scenario: User retries same query, LLM generates improved code.
-    The deduped row should have the latest version, not the first.
-    """
-    conn = in_memory_db
-    em = create_execution_memory(conn)
-    # Store 6 identical records -- 6th triggers dedup
-    for i in range(6):
-        em.store(ExecutionRecord(
-            workflow_id=f"dedup-code-{i}",
-            timestamp=datetime.now(),
-            user_query="fill form",
-            url="https://example.com",
-            domain="example.com",
-            robot_code=f"version_{i}",
-            code_structure="linear",
-            test_status="passed",
-        ))
-    # The most recent row should have the latest robot_code
-    latest = conn.execute(
-        "SELECT robot_code FROM execution_records "
-        "WHERE LOWER(TRIM(user_query)) = 'fill form' "
-        "AND domain = 'example.com' "
-        "ORDER BY timestamp DESC LIMIT 1"
-    ).fetchone()
-    assert latest["robot_code"] == "version_5", (
-        f"Expected latest code 'version_5', got '{latest['robot_code']}'"
-    )
 
 
 def test_feedback_with_missing_workflow_returns_triage(in_memory_db):

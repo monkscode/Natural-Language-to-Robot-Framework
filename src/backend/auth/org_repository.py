@@ -21,45 +21,172 @@ class OrgRepository:
     """CRUD for organizations + org_members. Stateless — share one instance."""
 
     def ensure_personal_org(self, user_id: str, name: str) -> str:
-        """Return the user's org id, creating a personal org + org_admin
-        membership if they belong to none. Idempotent.
+        """Return the user's personal org id. Idempotent, and now a RECLAIM
+        before a create: a personal org row is permanent (see
+        _collapse_to_single's docstring), so a user who owned one before —
+        vacated by a team join, then handed back by remove_member — is
+        reunited with that SAME org and its learning history, never handed a
+        fresh empty one.
 
         A FOR UPDATE lock on the user row serialises concurrent calls for the
-        same brand-new user (register + a lazy ensure racing), so a user can
-        never end up with two personal orgs.
+        same user (register + a lazy ensure racing, or two logins), so a user
+        can never end up with two personal orgs.
+
+        Order, all inside that lock:
+          1. Reachable via org_members (kind='personal') -> return it. Only a
+             PERSONAL org counts as "already provisioned" — a user may belong
+             to a team org (kind='team') yet still need their own personal
+             org, so keying off any membership would thread the team org as
+             their personal one. If its owner_user_id is still NULL (legacy
+             data predating this column, or a backfill hole), opportunistically
+             stamp it with this user first — the last moment the link is
+             knowable, before a future team join deletes the membership and
+             the link with it. See _stamp_owner_if_unclaimed for why that
+             stamp can never raise.
+          2. Else, reachable via organizations.owner_user_id with NO current
+             membership (e.g. after remove_member's last-membership cleanup)
+             -> re-seat the org_admin membership (ON CONFLICT DO NOTHING:
+             never skip this insert, or the caller is left with zero
+             memberships, which mints an org-less, unscoped-learning token at
+             their next login) and return it.
+          3. Else -> create a fresh personal org with owner_user_id set at
+             INSERT time, seat the membership, return it. The INSERT is
+             ON CONFLICT, not bare: see there for the writer the FOR UPDATE
+             does not serialise.
+
+        Returns an org id or raises nothing it can avoid: this method is on the
+        login self-heal, on remove_member and on provision_on_approval, so a
+        raise here is a 500 on login. That is the same reason
+        _stamp_owner_if_unclaimed is guarded rather than allowed to collide.
         """
         with get_pool().connection() as conn:
             # Serialise per-user so the existence check + insert is atomic.
             conn.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (user_id,))
-            # Only a PERSONAL org counts as "already provisioned". A user may
-            # belong to a team org (kind='team') yet still need their own
-            # personal org — keying off any membership would thread the team
-            # org as their personal one.
             existing = conn.execute(
-                "SELECT m.org_id FROM org_members m "
+                "SELECT m.org_id, o.owner_user_id FROM org_members m "
                 "JOIN organizations o ON o.id = m.org_id "
                 "WHERE m.user_id = %s AND o.kind = 'personal' "
                 "ORDER BY m.created_at LIMIT 1",
                 (user_id,),
             ).fetchone()
             if existing:
+                if existing["owner_user_id"] is None:
+                    self._stamp_owner_if_unclaimed(conn, str(existing["org_id"]), user_id)
                 conn.commit()
                 return str(existing["org_id"])
+
+            # No current membership in a personal org. Before minting a new
+            # one, check whether this user already OWNS a personal org they
+            # vacated (team join, then remove_member's last-membership
+            # cleanup) — reclaim it instead of orphaning its learning history
+            # under a brand new org.
+            reclaimed = conn.execute(
+                "SELECT id FROM organizations WHERE kind = 'personal' AND owner_user_id = %s",
+                (user_id,),
+            ).fetchone()
+            if reclaimed:
+                conn.execute(
+                    "INSERT INTO org_members (org_id, user_id, org_role) "
+                    "VALUES (%s, %s, 'org_admin') "
+                    "ON CONFLICT (org_id, user_id) DO NOTHING",
+                    (reclaimed["id"], user_id),
+                )
+                conn.commit()
+                logger.info("[AUTH] reclaimed personal org for user %s", sanitize_for_log(user_id))
+                return str(reclaimed["id"])
+
+            # ON CONFLICT, not a bare INSERT. uq_org_owner_personal is a
+            # partial unique index on (owner_user_id) WHERE kind='personal',
+            # and the FOR UPDATE above does not serialise every writer that can
+            # land in it. It serialises the writers that SET owner_user_id:
+            # that column carries an FK to users(id), so such a writer takes a
+            # FOR KEY SHARE lock on that users row, which conflicts with this
+            # transaction's FOR UPDATE. backfill_personal_org_owners is one of
+            # them, and it now takes that lock deliberately rather than as a
+            # side effect of its own UPDATE — see the comment on its candidate
+            # lock for the interleaving that used to abort a boot.
+            #
+            # Two writers are still NOT serialised by it. One is any writer
+            # that enters the index WITHOUT touching owner_user_id — changing
+            # only `kind` — because Postgres skips the FK re-check when the
+            # referencing value is unchanged, so it takes no users lock at all
+            # (no code path does this today; it is the constructible
+            # demonstration, and the test below uses it). The other is the
+            # backfill in the window between choosing its candidates and
+            # running its UPDATE, when a row it did not lock can become a
+            # candidate.
+            #
+            # Relying on that FK-plus-row-lock coupling to keep this method
+            # from raising would be a guarantee nobody could see: dropping the
+            # FK, or widening the index, would silently reopen a 500 on login.
+            # So the statement itself absorbs the collision.
+            #
+            # DO UPDATE rather than DO NOTHING because a row must always come
+            # back: DO NOTHING returns nothing, and in READ COMMITTED it may
+            # skip on a row this transaction still cannot SELECT. The SET is a
+            # no-op by value (same owner, and `name` is deliberately untouched,
+            # so a reclaimed org keeps its own); it exists only so RETURNING
+            # yields the existing row's id.
+            #
+            # (xmax <> 0) distinguishes the two outcomes for the log line ONLY
+            # — never for control flow. It is the standard "was this an update"
+            # RETURNING idiom; a wrong answer costs one imprecise log line.
             org = conn.execute(
-                "INSERT INTO organizations (name, kind) VALUES (%s, 'personal') "
-                "RETURNING id",
-                (name,),
+                "INSERT INTO organizations (name, kind, owner_user_id) "
+                "VALUES (%s, 'personal', %s) "
+                "ON CONFLICT (owner_user_id) WHERE kind = 'personal' "
+                "DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id "
+                "RETURNING id, (xmax <> 0) AS collided",
+                (name, user_id),
             ).fetchone()
             conn.execute(
+                # ON CONFLICT DO NOTHING for the same reason step 2 has it: on
+                # the collision branch the org already existed, so it may
+                # already carry this membership. Never skip the insert itself,
+                # or the caller is left with zero memberships, which mints an
+                # org-less, unscoped-learning token at their next login.
                 "INSERT INTO org_members (org_id, user_id, org_role) "
-                "VALUES (%s, %s, 'org_admin')",
+                "VALUES (%s, %s, 'org_admin') "
+                "ON CONFLICT (org_id, user_id) DO NOTHING",
                 (org["id"], user_id),
             )
             conn.commit()
             # user_id reaches this log from an HTTP path param (e.g. admin remove
             # member), so scrub CR/LF before logging (Sonar S5145 / CWE-117).
-            logger.info("[AUTH] provisioned personal org for user %s", sanitize_for_log(user_id))
+            logger.info(
+                "[AUTH] %s personal org for user %s",
+                "adopted concurrently claimed" if org["collided"] else "provisioned",
+                sanitize_for_log(user_id),
+            )
             return str(org["id"])
+
+    def _stamp_owner_if_unclaimed(self, conn, org_id: str, user_id: str) -> None:
+        """Best-effort claim of org_id for user_id when owner_user_id is NULL.
+        Runs in the caller's transaction (ensure_personal_org); does not
+        commit.
+
+        Guards the UPDATE instead of catching a uq_org_owner_personal
+        violation: a legacy user can already OWN a different personal org
+        (e.g. the name-based backfill claimed org B while this user's live
+        membership is in org A, whose name was never an email) — updating
+        org A's owner in that case would collide with org B's claim. The
+        NOT EXISTS clause makes the collision structurally impossible rather
+        than raising and recovering from it, so this never needs a savepoint.
+
+        ensure_personal_org sits on the login/provisioning path: a failed
+        stamp must never raise and strand the user, and with this guard it
+        never does — the WHERE clause simply matches zero rows and the
+        caller returns org_id regardless of whether the stamp took.
+        """
+        conn.execute(
+            "UPDATE organizations SET owner_user_id = %s "
+            "WHERE id = %s AND owner_user_id IS NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM organizations o2 "
+            "  WHERE o2.kind = 'personal' AND o2.owner_user_id = %s"
+            ")",
+            (user_id, org_id, user_id),
+        )
 
     def backfill_personal_orgs(self) -> int:
         """Provision a personal org for every user that has no membership.
@@ -79,6 +206,178 @@ class OrgRepository:
         if orphans:
             logger.info("[AUTH] backfilled %d user(s) into personal orgs", len(orphans))
         return len(orphans)
+
+    def backfill_personal_org_owners(self) -> int:
+        """One-time repair: stamp owner_user_id on personal orgs that predate
+        the column (created before ensure_personal_org started setting it at
+        INSERT time). Two passes, primary then fallback, matching the two
+        ways an old org can be traced back to its user:
+
+          1. Sole remaining member: org_members has exactly one row for that
+             org, and that row's user takes ownership.
+          2. Name is the user's email: every ensure_personal_org caller
+             passes the user's email as `name` (register(), remove_member,
+             provision_on_approval), so a personal org's name identifies its
+             user even after it is vacated (member removed) and pass 1 no
+             longer applies.
+
+        Both passes SKIP an ambiguous match rather than raising: two personal
+        orgs sharing a name (one user would own both), or a user this backfill
+        (or a concurrent stamp — see below) already gave a different org to.
+        uq_org_owner_personal forbids two personal orgs with the same owner,
+        and this backfill must never abort partway and leave later rows
+        unprocessed — an ambiguous org is simply left owner_user_id NULL.
+
+        The primary pass carries TWO guards the task-2 brief's SQL has
+        neither of, and they cover different shapes.
+
+        The first is per-user ambiguity: a user who is the sole member of two
+        still-unclaimed personal orgs matches both rows of this one statement.
+        The "already owned" NOT EXISTS cannot see a row the same statement is
+        updating (it reads the statement snapshot), so both rows take the same
+        owner and uq_org_owner_personal raises. Resolved the way the fallback
+        resolves a duplicate name: claim NEITHER. Picking one arbitrarily would
+        decide which org's learning history the user reclaims.
+
+        The second is "already owned": run_migration_once is
+        advisory-lock-gated per migration NAME, not per row, and this table
+        has a second writer — ensure_personal_org's own opportunistic stamp
+        (step 1) — that a concurrent instance's live login traffic can run at
+        any time, including mid-rolling-deploy while another instance is
+        still starting up. A user who is the sole member of TWO legacy
+        personal orgs (a real pre-single-active-org shape;
+        collapse_all_to_single_org exists because double membership
+        happened) can have one of them stamped by that live traffic before
+        this migration's primary pass reaches the other — without the guard
+        that collision raises UniqueViolation and aborts the WHOLE migration
+        (both passes, every other row, in this one transaction), a boot-time
+        crash from a data race the module's own advisory-lock comment already
+        treats as expected. Caught by test_org_db.py's collision test.
+
+        That guard only sees COMMITTED claims, though — it reads its own
+        statement snapshot — so each pass first takes FOR UPDATE on the users
+        rows it is about to claim for. See the comment on that statement for
+        the interleaving it closes and the one it does not.
+
+        Known holes, left deliberately (see task-2 brief): a vacated personal
+        org whose name is not an email matches neither pass and stays NULL
+        forever (its hints become unreachable); two personal orgs sharing a
+        name leave BOTH NULL; and an org whose user is claimed by a concurrent
+        login mid-migration is skipped rather than fought over, which leaves
+        it NULL after the marker is set, so it is never revisited. All three
+        keep the same shape: when the answer is not unambiguous, claim
+        nothing. Picking one arbitrarily would decide which org's learning
+        history the user gets back.
+
+        Idempotent: only touches rows still NULL. Called once from
+        init_org_db() under run_migration_once("personal_org_owner_backfill").
+        Returns the total number of org rows updated across both passes.
+        """
+        with get_pool().connection() as conn:
+            # Lock this pass's candidate USERS before the UPDATE reads them.
+            #
+            # The "already owned" NOT EXISTS below is evaluated against the
+            # UPDATE's own statement snapshot, so a concurrent
+            # ensure_personal_org that has written its claim and not yet
+            # committed is invisible to it. The org row being updated was not
+            # touched by that other transaction, so there is no EvalPlanQual
+            # re-check either: the snapshot verdict stands, the UPDATE writes,
+            # and uq_org_owner_personal raises the moment the other transaction
+            # commits — aborting BOTH passes, since they share this
+            # transaction. Measured, in both directions, before this lock
+            # existed (test_backfill_pass_{1,2}_survives_a_concurrent_
+            # uncommitted_claim).
+            #
+            # organizations.owner_user_id carries an FK to users(id), so every
+            # writer that SETS it takes FOR KEY SHARE on that users row, which
+            # conflicts with FOR UPDATE here. So this statement blocks until
+            # such a writer commits, and the UPDATE that follows then takes a
+            # FRESH snapshot (READ COMMITTED gives each statement its own) in
+            # which the claim is visible and the NOT EXISTS excludes it.
+            # ensure_personal_org's own comment already leans on that FK
+            # coupling; this makes it explicit and load-bearing instead of
+            # accidental, on the side that was still relying on it silently.
+            #
+            # ORDER BY id so two backfills cannot deadlock against each other
+            # by locking the same users in different orders. (run_migration_once
+            # already serialises them by name; this costs nothing and does not
+            # depend on that staying true.)
+            #
+            # Residual, stated rather than hidden: a writer that enters the
+            # partial index WITHOUT setting owner_user_id — flipping an
+            # already-owned row's `kind` to 'personal' — takes no users lock and
+            # is not serialised by this. That is the same residual step 3
+            # absorbs with ON CONFLICT, no code path does it, and if one ever
+            # did, init_org_db's per-migration try/except keeps the failure
+            # inside this migration and leaves the marker unset so the next
+            # boot retries.
+            conn.execute(
+                "SELECT 1 FROM users u WHERE u.id IN ("
+                "    SELECT m.user_id FROM org_members m "
+                "    JOIN organizations o ON o.id = m.org_id "
+                "    WHERE o.kind = 'personal' AND o.owner_user_id IS NULL"
+                ") ORDER BY u.id FOR UPDATE"
+            )
+            primary = conn.execute(
+                "UPDATE organizations o SET owner_user_id = m.user_id "
+                "FROM org_members m "
+                "WHERE o.kind = 'personal' AND o.owner_user_id IS NULL "
+                "AND m.org_id = o.id "
+                "AND (SELECT count(*) FROM org_members x WHERE x.org_id = o.id) = 1 "
+                # ...and that member is the SOLE member of exactly ONE
+                # unclaimed personal org. Without this, a user who is the sole
+                # member of two of them matches BOTH rows: the NOT EXISTS below
+                # reads the statement snapshot, so neither row sees the other
+                # being set, both take the same owner, and
+                # uq_org_owner_personal aborts the whole migration.
+                #
+                # "sole member of", not merely "a member of": only sole-member
+                # orgs are candidates of this statement, so only they can
+                # collide with each other. Counting every membership left a
+                # user who is sole member of unclaimed O1 AND one of two
+                # members of unclaimed O2 with O1 unclaimed forever, though
+                # nothing about O1 is ambiguous — an undocumented third hole
+                # in a migration whose point is that a personal org's learning
+                # history stays reachable.
+                "AND (SELECT count(*) FROM org_members y "
+                "     JOIN organizations o4 ON o4.id = y.org_id "
+                "     WHERE y.user_id = m.user_id AND o4.kind = 'personal' "
+                "       AND o4.owner_user_id IS NULL "
+                "       AND (SELECT count(*) FROM org_members z "
+                "            WHERE z.org_id = o4.id) = 1) = 1 "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM organizations o2 "
+                "    WHERE o2.kind = 'personal' AND o2.owner_user_id = m.user_id"
+                ")"
+            )
+            # Pass 2's own candidates, locked for the reason above and
+            # computed AFTER pass 1 so a user pass 1 just claimed is no longer
+            # in the set. Locks taken here are held to the end of the
+            # transaction, as are pass 1's.
+            conn.execute(
+                "SELECT 1 FROM users u WHERE u.id IN ("
+                "    SELECT u2.id FROM users u2 "
+                "    JOIN organizations o ON o.name = u2.email "
+                "    WHERE o.kind = 'personal' AND o.owner_user_id IS NULL"
+                ") ORDER BY u.id FOR UPDATE"
+            )
+            fallback = conn.execute(
+                "UPDATE organizations o SET owner_user_id = u.id "
+                "FROM users u "
+                "WHERE o.kind = 'personal' AND o.owner_user_id IS NULL "
+                "AND o.name = u.email "
+                "AND (SELECT count(*) FROM organizations o2 "
+                "     WHERE o2.kind = 'personal' AND o2.name = o.name) = 1 "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM organizations o3 "
+                "    WHERE o3.kind = 'personal' AND o3.owner_user_id = u.id"
+                ")"
+            )
+            conn.commit()
+            updated = (primary.rowcount or 0) + (fallback.rowcount or 0)
+        if updated:
+            logger.info("[AUTH] backfilled owner_user_id for %d personal org(s)", updated)
+        return updated
 
     def get_orgs_for_user(self, user_id: str) -> list[dict]:
         """Org memberships for a user, oldest first. Empty list if none."""
@@ -119,7 +418,15 @@ class OrgRepository:
 
     def create_team_org(self, name: str, owner_user_id: str) -> str:
         """Create a kind='team' org and seat owner_user_id as its org_admin, moving
-        the owner out of any prior org (single-active-org). Returns the new org id."""
+        the owner out of any prior org (single-active-org). Returns the new org id.
+
+        The `owner_user_id` parameter names the MEMBERSHIP to seat and is
+        deliberately NOT written to the organizations.owner_user_id column it
+        now shares a name with: that column exists so a user can reclaim their
+        own PERSONAL org, and uq_org_owner_personal is partial on
+        kind='personal'. A team org has no 1:1 owner and is left unconstrained
+        on purpose (org_db._ORG_OWNER_INDEX_DDL) — writing it here would make
+        one user's team org and their personal org compete for that column."""
         with get_pool().connection() as conn:
             org = conn.execute(
                 "INSERT INTO organizations (name, kind) VALUES (%s, 'team') RETURNING id",
@@ -142,31 +449,24 @@ class OrgRepository:
         ).fetchone()
         return row is not None and row["kind"] == "team"
 
-    def _delete_personal_org_if_empty(self, conn, org_id: str) -> None:
-        """Delete org_id iff it is a personal org with zero remaining members.
-        Personal orgs are 1:1 with a user and meaningless once vacated; team orgs
-        are never auto-deleted. Safe: the only hard FKs to organizations are
-        org_members (none here) and invitations (personal orgs are never invited
-        into), both ON DELETE CASCADE; history/learning org_id is a soft column
-        with no FK, so this can neither be blocked nor cascade user data."""
-        conn.execute(
-            "DELETE FROM organizations o "
-            "WHERE o.id = %s AND o.kind = 'personal' "
-            "AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = o.id)",
-            (org_id,),
-        )
-
     def _collapse_to_single(self, conn, user_id: str, keep_org_id: str) -> None:
-        """Single-active-org invariant: remove every membership of user_id except
-        the one in keep_org_id, deleting any personal org thereby vacated. Runs in
-        the caller's transaction."""
-        vacated = conn.execute(
-            "DELETE FROM org_members WHERE user_id = %s AND org_id <> %s "
-            "RETURNING org_id",
+        """Single-active-org invariant: remove every membership of user_id
+        except the one in keep_org_id. Runs in the caller's transaction.
+
+        A personal org vacated by this removal is kept, not deleted: org
+        rows are permanent. No FK exists from the learning tables to
+        organizations, so deleting a vacated org would strand the learning
+        rows naming it. The token's org claim is minted from org_members
+        JOIN organizations, so a deleted org can never be claimed again and
+        every org-scoped learning read for those rows would match zero
+        rows. Cost: one leftover organizations row per user who joins a
+        team; invisible to the user (get_orgs_for_user joins org_members),
+        it shows in the admin Orgs tab with 0 members.
+        """
+        conn.execute(
+            "DELETE FROM org_members WHERE user_id = %s AND org_id <> %s",
             (user_id, keep_org_id),
-        ).fetchall()
-        for row in vacated:
-            self._delete_personal_org_if_empty(conn, str(row["org_id"]))
+        )
 
     def _email_for(self, user_id: str) -> str | None:
         """The user's email (used as their personal-org name), or None if absent."""
@@ -178,7 +478,8 @@ class OrgRepository:
 
     def add_member(self, org_id: str, user_id: str, org_role: str = "org_member") -> None:
         """Move a user into a TEAM org (single-active-org): upsert their membership,
-        then remove every other membership and prune any emptied personal org.
+        then remove every other membership; an emptied personal org row is kept,
+        not pruned (org rows are permanent, see _collapse_to_single).
         Membership changes apply to team orgs only (Finding #6)."""
         if org_role not in ("org_admin", "org_member"):
             raise ValueError(f"invalid org_role: {org_role!r}")
@@ -247,9 +548,10 @@ class OrgRepository:
         """One-time cleanup: reduce every user with more than one membership to a
         single active org. Keep the most recently joined TEAM org if the user is in
         any team org (reflects the latest assignment intent), else their personal
-        org; delete the rest and prune vacated personal orgs. Bumps token_version
-        for each collapsed user so their stale token refreshes. Returns the number
-        of users collapsed. Idempotent: a no-op once everyone is single-org."""
+        org; delete the rest of their memberships (a vacated personal org row is
+        kept, not pruned). Bumps token_version for each collapsed user so their
+        stale token refreshes. Returns the number of users collapsed. Idempotent:
+        a no-op once everyone is single-org."""
         collapsed_uids: list[str] = []
         with get_pool().connection() as conn:
             multi = conn.execute(

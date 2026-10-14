@@ -32,7 +32,7 @@ class TestSchema:
             "trigger_events", "hint_audit",
             "hint_review_sessions", "hint_review_recommendations",
             "hint_review_pages", "hint_workflow_trace",
-            "learning_anchors", "execution_embeddings",
+            "learning_anchors", "execution_embeddings", "hint_evidence",
             # keyword store tables (kw_* DDL applied to test schema via conftest)
             "kw_keywords", "kw_query_patterns", "kw_library_version",
         }

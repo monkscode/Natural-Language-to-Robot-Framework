@@ -1,4 +1,16 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..800;1,14..32,300..800&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@300;400;500;700&display=swap');
+/* Fonts are bundled, NOT fetched from Google. The SPA is served under a strict
+   CSP (`style-src 'self' 'unsafe-inline'`, see nginx.conf) which blocks a remote
+   stylesheet, so the previous @import of fonts.googleapis.com was rejected on
+   every page load: the browser logged a CSP violation and silently fell back to
+   system fonts, meaning the three families below never actually rendered.
+   Bundling them keeps the strict policy, drops a third-party request from the
+   critical path, and works offline. Variable builds carry the full weight ranges
+   the design uses (Inter 300–800 incl. italic, JetBrains Mono 400–700,
+   Space Grotesk 300–700) in place of the discrete weights requested before. */
+@import '@fontsource-variable/inter/opsz.css';
+@import '@fontsource-variable/inter/opsz-italic.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+@import '@fontsource-variable/space-grotesk/wght.css';
 
 @tailwind base;
 @tailwind components;
@@ -121,9 +133,9 @@
   * { @apply border-border; }
   body {
     @apply bg-background text-foreground font-sans antialiased;
-    font-family: 'Inter', system-ui, sans-serif;
+    font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
   }
-  .neo body { font-family: 'Space Grotesk', system-ui, sans-serif; }
+  .neo body { font-family: 'Space Grotesk Variable', 'Space Grotesk', system-ui, sans-serif; }
 }
 
 /* ── Neobrutalism component overrides ── */

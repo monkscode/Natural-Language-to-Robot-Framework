@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   Sidebar,
@@ -8,8 +8,12 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
   SidebarRail,
 } from '@/components/ui/sidebar'
 import {
@@ -20,8 +24,10 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { BuildBadge } from '@/components/build-badge'
 import {
   Zap,
+  FlaskConical,
   History,
   BarChart2,
   Brain,
@@ -29,11 +35,15 @@ import {
   LogOut,
   MonitorSmartphone,
   Loader2,
+  ChevronDown,
   ChevronsUpDown,
+  Folder,
   ShieldCheck,
   Users,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
+import { gateAllowed, type GateFlags } from '@/auth/pageGates'
+import { useRunGroups } from '@/components/history/RunGroupsContext'
 
 /* ── Logo mark ── */
 const LogoMark = () => (
@@ -52,18 +62,29 @@ interface NavItem {
   icon: typeof Zap
   admin: boolean
   orgAdmin?: boolean
+  /** Gates on canViewLearning instead of admin/orgAdmin — see the
+   * can_view_learning comment on AuthContext.tsx's User interface. */
+  viewLearning?: boolean
+  /** Renders the expandable folder quick-access list under this item, each
+   *  folder counted by this field: the page's own unit — tests on Tests,
+   *  runs on Activity. */
+  groups?: 'test_count' | 'run_count'
 }
 
-const NAV_PLATFORM: NavItem[] = [
+export const NAV_PLATFORM: NavItem[] = [
   { title: 'Generate', url: '/generate', icon: Zap, admin: false },
-  { title: 'History', url: '/history', icon: History, admin: false },
+  { title: 'Tests', url: '/tests', icon: FlaskConical, admin: false, groups: 'test_count' },
+  { title: 'Activity', url: '/history', icon: History, admin: false, groups: 'run_count' },
   { title: 'Metrics', url: '/metrics', icon: BarChart2, admin: true },
-  { title: 'Learning', url: '/learning', icon: Brain, admin: true },
+  { title: 'Learning', url: '/learning', icon: Brain, admin: false, viewLearning: true },
   { title: 'Access', url: '/access', icon: ShieldCheck, admin: true },
   { title: 'Team', url: '/team', icon: Users, admin: false, orgAdmin: true },
 ]
 
-const NAV_WORKSPACE: NavItem[] = [
+// Exported for the same reason NAV_PLATFORM is: auth/pageGates.test.ts
+// compares every nav entry's gate against the PAGES entry for the same
+// path, and a table it cannot see is a table that can drift.
+export const NAV_WORKSPACE: NavItem[] = [
   { title: 'Settings', url: '/settings', icon: Settings, admin: true },
 ]
 
@@ -143,7 +164,7 @@ function NavUser() {
               onSelect={e => {
                 // Keep the menu open while the revoke request is in flight.
                 e.preventDefault()
-                handleLogoutAll()
+                void handleLogoutAll()
               }}
             >
               {signingOutAll ? (
@@ -167,29 +188,158 @@ function NavUser() {
   )
 }
 
-/* ── Renders one nav group, hiding admin-only items from regular users ── */
-function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
-  label: string
-  items: NavItem[]
-  isAdmin: boolean
-  isOrgAdmin: boolean
+/* ── Tests or Activity + its folder quick access ──
+ *
+ * The row keeps its normal behaviour: the label navigates to the page. The
+ * chevron beside it is a separate control that expands the user's groups, so
+ * jumping straight to one group's tests or runs takes a single click from
+ * anywhere in the app.
+ *
+ * The list is read-only on purpose — creating, renaming and deleting groups
+ * all live on the page itself. A nav sidebar answers "where do I go", and
+ * mixing management controls into it would give those actions two homes.
+ *
+ * The active group comes from RunGroupsContext, the same value both pages'
+ * chip rows write, so picking a group here or there always agrees — and it is
+ * ONE filter, so a folder picked for Tests also scopes Activity. */
+function GroupsNavItem({ item, countField, pathname }: {
+  item: NavItem
+  countField: NonNullable<NavItem['groups']>
   pathname: string
 }) {
-  const visible = items.filter(item => (!item.admin || isAdmin) && (!item.orgAdmin || isOrgAdmin))
+  const navigate = useNavigate()
+  const {
+    groups, error: groupsError, loaded: groupsLoaded, groupFilter, setGroupFilter,
+  } = useRunGroups()
+  const [open, setOpen] = useState(false)
+
+  // Reveal the active group the way a file tree opens to the selected file:
+  // when a group is chosen on the PAGE, the sidebar expands to show where you
+  // are. Keyed on the filter alone so a background refresh of the group list
+  // never re-opens a list the user deliberately collapsed. Only under the
+  // page the user is ON: the filter is shared, and revealing it under both
+  // entries would stack two identical lists.
+  const onThisPage = pathname === item.url
+  useEffect(() => {
+    if (onThisPage && groupFilter && groupFilter !== 'ungrouped') setOpen(true)
+  }, [groupFilter, onThisPage])
+
+  const pick = (groupId: string) => {
+    setGroupFilter(groupId)
+    // Already on the page? Only the filter changes — no navigation, so the
+    // page keeps its scroll position and open drawer.
+    if (pathname !== item.url) navigate(item.url)
+  }
+
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
+        <Link to={item.url}>
+          <item.icon />
+          <span>{item.title}</span>
+        </Link>
+      </SidebarMenuButton>
+
+      {/* The chevron shows even with no groups: a user who has never made one
+          would otherwise get no hint anywhere in the nav that groups exist,
+          and they are exactly who needs to find the feature. */}
+      {/* No aria-controls: the sub-list is only in the DOM while open, and
+          naming an absent id is worse than naming none. aria-expanded on the
+          toggle is a complete disclosure pattern on its own. */}
+      <SidebarMenuAction
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        aria-label={open ? 'Hide groups' : 'Show groups'}
+        title={open ? 'Hide groups' : 'Show groups'}
+      >
+        <ChevronDown
+          className={`transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        />
+      </SidebarMenuAction>
+
+      {open && (
+        <SidebarMenuSub className="max-h-[40vh] overflow-y-auto">
+          {/* A failed /api/groups leaves the list empty, and "No groups yet"
+              would then be a lie that sends the user off to create one. Say
+              what actually happened, and keep any rows a previous successful
+              load left behind. */}
+          {groupsError && (
+            <li className="px-2 py-1.5 text-xs leading-snug text-destructive">
+              Couldn’t load groups — {groupsError}
+            </li>
+          )}
+          {!groupsError && !groupsLoaded && (
+            <li className="px-2 py-1.5 text-xs leading-snug text-sidebar-foreground/60">
+              Loading groups…
+            </li>
+          )}
+          {!groupsError && groupsLoaded && groups.length === 0 && (
+            // Empty states point somewhere. Naming where groups come from
+            // turns this click into how the feature gets discovered — and it
+            // stays a signpost, not a second place to create them.
+            <li className="px-2 py-1.5 text-xs leading-snug text-sidebar-foreground/60">
+              No groups yet — create one on {item.title}.
+            </li>
+          )}
+          {groups.map(g => (
+            <SidebarMenuSubItem key={g.group_id}>
+              <SidebarMenuSubButton
+                asChild
+                size="sm"
+                isActive={groupFilter === g.group_id}
+              >
+                <button
+                  type="button"
+                  onClick={() => pick(g.group_id)}
+                  title={`Show only ${g.name}`}
+                >
+                  <Folder />
+                  <span className="truncate">{g.name}</span>
+                  <span className="ml-auto shrink-0 text-xs tabular-nums text-sidebar-foreground/60">
+                    {g[countField]}
+                  </span>
+                </button>
+              </SidebarMenuSubButton>
+            </SidebarMenuSubItem>
+          ))}
+        </SidebarMenuSub>
+      )}
+    </SidebarMenuItem>
+  )
+}
+
+/* ── Renders one nav group, hiding admin-only items from regular users ──
+ * gateAllowed (auth/pageGates.ts) is the SAME predicate App.tsx uses to gate
+ * the page itself, so the Learning nav item and the /learning route can
+ * never disagree. */
+function NavGroup({ label, items, flags, pathname }: {
+  label: string
+  items: NavItem[]
+  /** The caller's flags as one value — GateFlags already IS this shape, and
+   *  taking it whole is what lets the filter below pass it straight through
+   *  instead of rebuilding the same object for every item on every render. */
+  flags: GateFlags
+  pathname: string
+}) {
+  const visible = items.filter(item => gateAllowed(item, flags))
   if (visible.length === 0) return null
   return (
     <SidebarGroup>
       <SidebarGroupLabel>{label}</SidebarGroupLabel>
       <SidebarMenu>
         {visible.map(item => (
-          <SidebarMenuItem key={item.title}>
-            <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
-              <Link to={item.url}>
-                <item.icon />
-                <span>{item.title}</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+          item.groups ? (
+            <GroupsNavItem key={item.title} item={item} countField={item.groups} pathname={pathname} />
+          ) : (
+            <SidebarMenuItem key={item.title}>
+              <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
+                <Link to={item.url}>
+                  <item.icon />
+                  <span>{item.title}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )
         ))}
       </SidebarMenu>
     </SidebarGroup>
@@ -199,7 +349,8 @@ function NavGroup({ label, items, isAdmin, isOrgAdmin, pathname }: {
 /* ── Main sidebar component ── */
 export function AppSidebar() {
   const { pathname } = useLocation()
-  const { isAdmin, isOrgAdmin } = useAuth()
+  const { isAdmin, isOrgAdmin, canViewLearning } = useAuth()
+  const flags: GateFlags = { isAdmin, isOrgAdmin, canViewLearning }
 
   return (
     <Sidebar collapsible="icon">
@@ -208,7 +359,9 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
-              <Link to="/generate" className="flex items-center gap-3">
+              {/* Home, not a named page: the index route decides where home
+                  is, so the logo and a sign-in land in the same place. */}
+              <Link to="/" className="flex items-center gap-3">
                 <LogoMark />
                 <span className="font-bold text-base tracking-tight">Mark 1</span>
               </Link>
@@ -219,13 +372,14 @@ export function AppSidebar() {
 
       {/* Nav — role-filtered */}
       <SidebarContent>
-        <NavGroup label="Platform" items={NAV_PLATFORM} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
-        <NavGroup label="Workspace" items={NAV_WORKSPACE} isAdmin={isAdmin} isOrgAdmin={isOrgAdmin} pathname={pathname} />
+        <NavGroup label="Platform" items={NAV_PLATFORM} flags={flags} pathname={pathname} />
+        <NavGroup label="Workspace" items={NAV_WORKSPACE} flags={flags} pathname={pathname} />
       </SidebarContent>
 
       {/* User footer */}
       <SidebarFooter>
         <NavUser />
+        <BuildBadge />
       </SidebarFooter>
 
       <SidebarRail />

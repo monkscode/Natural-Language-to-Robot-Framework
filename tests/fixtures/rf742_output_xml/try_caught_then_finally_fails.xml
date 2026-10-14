@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:43:28.844317" rpa="false" schemaversion="5">
+<suite id="s1" name="Try Caught Then Finally Fails" source="/w/try_caught_then_finally_fails.robot">
+<test id="s1-t1" name="Caught Then Finally Fails" line="2">
+<try>
+<branch type="TRY">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:28.883520" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#in-try")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:28.883264" elapsed="0.000334">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:28.883038" elapsed="0.000611">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</status>
+</branch>
+<branch type="EXCEPT" pattern_type="GLOB">
+<pattern>*</pattern>
+<kw name="Log" owner="BuiltIn">
+<msg time="2026-09-21T18:43:28.883888" level="INFO">handled</msg>
+<arg>handled</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="PASS" start="2026-09-21T18:43:28.883787" elapsed="0.000125"/>
+</kw>
+<status status="PASS" start="2026-09-21T18:43:28.883739" elapsed="0.000190"/>
+</branch>
+<branch type="FINALLY">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:28.884109" level="FAIL">Error: cleanup in finally failed</msg>
+<arg>Error: cleanup in finally failed</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:28.883983" elapsed="0.000156">Error: cleanup in finally failed</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:28.883950" elapsed="0.000216">Error: cleanup in finally failed</status>
+</branch>
+<status status="FAIL" start="2026-09-21T18:43:28.883007" elapsed="0.001171">Error: cleanup in finally failed</status>
+</try>
+<status status="FAIL" start="2026-09-21T18:43:28.882871" elapsed="0.001369">Error: cleanup in finally failed</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:43:28.845203" elapsed="0.039216"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Try Caught Then Finally Fails" id="s1" pass="0" fail="1" skip="0">Try Caught Then Finally Fails</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

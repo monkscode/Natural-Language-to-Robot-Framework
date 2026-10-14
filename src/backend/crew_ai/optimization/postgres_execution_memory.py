@@ -41,7 +41,6 @@ from src.backend.crew_ai.optimization.execution_memory import (
     _mark,
 )
 from src.backend.crew_ai.optimization.learning_config import (
-    LEARNING_CONFIG,
     ExecutionStore,
     SemanticStore,
 )
@@ -65,8 +64,6 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
     observability (get_health_status / get_learning_stats) reads them — they now
     track the fastembed embedder state, not ChromaDB.
     """
-
-    DEDUPLICATION_THRESHOLD = LEARNING_CONFIG["DEDUPLICATION_THRESHOLD"]
 
     # Sentinel for failed embedder init. The shared FeedbackLoop health check
     # compares against the store instance's own class attribute
@@ -172,64 +169,41 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
         self.store(record)
 
     def _store_relational(self, record: ExecutionRecord) -> None:
-        _assert_writer_thread("PostgresExecutionMemory._store_relational")
-        normalized_query = record.user_query.strip().lower()
-        domain = record.domain or ""
-        try:
-            run_count = self._writer_conn.execute(
-                "SELECT COUNT(*) AS n FROM execution_records "
-                "WHERE LOWER(TRIM(user_query)) = ? "
-                "AND COALESCE(domain, '') = ? AND test_status = ? "
-                "AND COALESCE(org_id, '') = ?",
-                (normalized_query, domain, record.test_status, record.org_id or ""),
-            ).fetchone()["n"]
+        """One row per run, always. Never aggregate repeats.
 
-            if run_count >= self.DEDUPLICATION_THRESHOLD:
-                self._writer_conn.execute(
-                    """
-                    UPDATE execution_records
-                    SET robot_code = ?, error_message = ?, timestamp = ?,
-                        model_version = ?,
-                        total_llm_calls = total_llm_calls + ?,
-                        total_cost = total_cost + ?
-                    WHERE id = (
-                        SELECT id FROM execution_records
-                        WHERE LOWER(TRIM(user_query)) = ?
-                        AND COALESCE(domain, '') = ? AND test_status = ?
-                        AND COALESCE(org_id, '') = ?
-                        ORDER BY timestamp DESC LIMIT 1
-                    )
-                    """,
-                    (
-                        record.robot_code, record.error_message,
-                        record.timestamp.isoformat(), record.model_version,
-                        record.total_llm_calls, record.total_cost,
-                        normalized_query, domain, record.test_status,
-                        record.org_id or "",
-                    ),
-                )
-            else:
-                self._writer_conn.execute(
-                    """
-                    INSERT INTO execution_records (
-                        workflow_id, timestamp, user_query, url, domain,
-                        robot_code, code_structure, test_status, execution_exit_code,
-                        execution_duration_ms, failure_category, failed_keyword,
-                        error_message, total_llm_calls, total_cost, injected_hint_ids,
-                        model_version, org_id, hint_attribution_done
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        record.workflow_id, record.timestamp.isoformat(),
-                        record.user_query, record.url, record.domain,
-                        record.robot_code, record.code_structure, record.test_status,
-                        record.execution_exit_code, record.execution_duration_ms,
-                        record.failure_category, record.failed_keyword,
-                        record.error_message, record.total_llm_calls, record.total_cost,
-                        record.injected_hint_ids, record.model_version,
-                        record.org_id,
-                    ),
-                )
+        An aggregation branch used to UPDATE the newest row in the
+        (query, domain, status, org) bucket once it held 5 rows, instead of
+        inserting. It contradicted `workflow_id TEXT UNIQUE NOT NULL`: the
+        6th run had no record, so `em.get(workflow_id)` — the only way
+        feedback and `is_first_attempt` reach a run — returned None, and the
+        UPDATE (keyed on ORDER BY timestamp, not on this record) wrote one
+        run's code onto another's while bypassing the Case-B arm below. It
+        saved nothing: `_store_execution_embedding` writes the far larger
+        384-dim row unconditionally either way. Do not reintroduce it.
+        """
+        _assert_writer_thread("PostgresExecutionMemory._store_relational")
+        try:
+            self._writer_conn.execute(
+                """
+                INSERT INTO execution_records (
+                    workflow_id, timestamp, user_query, url, domain,
+                    robot_code, code_structure, test_status, execution_exit_code,
+                    execution_duration_ms, failure_category, failed_keyword,
+                    error_message, total_llm_calls, total_cost, injected_hint_ids,
+                    model_version, org_id, hint_attribution_done
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    record.workflow_id, record.timestamp.isoformat(),
+                    record.user_query, record.url, record.domain,
+                    record.robot_code, record.code_structure, record.test_status,
+                    record.execution_exit_code, record.execution_duration_ms,
+                    record.failure_category, record.failed_keyword,
+                    record.error_message, record.total_llm_calls, record.total_cost,
+                    record.injected_hint_ids, record.model_version,
+                    record.org_id,
+                ),
+            )
             self._writer_conn.commit()
         except sqlite3.IntegrityError as e:
             # Case B: a re-run of an existing workflow_id now passes.
@@ -237,6 +211,32 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             if "workflow_id" in str(e).lower() and record.test_status == "passed":
                 self._update_to_passing_state(record.workflow_id, record.robot_code)
             else:
+                # F6 (recorded, not fixed): a FAILED re-run of the same
+                # workflow_id falls here instead — the guard above only
+                # handles "passed" — and leaves the v1 row untouched. Feedback
+                # on this workflow_id then reads v1's robot_code and
+                # error_message, and Trigger 2 judges active hints against
+                # code older than the run the user is giving feedback on. If
+                # v1 credited hints its row also carries
+                # hint_attribution_done = 1, so the re-run's usage is never
+                # credited either.
+                #
+                # This is the ORDINARY path, not an API-caller edge case, and
+                # it has been executed: GeneratePage sends
+                # `workflow_id: workflowId.current`, which is set once when
+                # the code is generated and cleared only by "New Test" or by
+                # emptying the code box — so every repeat click of "Run Test"
+                # on the same generated code re-enters here. Driven through
+                # the real SPA, the second failing run logged
+                # "[LEARNING] Write failed (non-blocking): duplicate key ...
+                # execution_records_workflow_id_key" and the row kept the
+                # FIRST run's timestamp and error_message.
+                #
+                # Left as-is deliberately: workflow_id is UNIQUE, so the only
+                # alternatives are overwriting v1 (destroying the record
+                # feedback is filed against) or a schema change. Raising here
+                # is what keeps _process_learning_record's is_first_attempt
+                # honest — see the DEPENDENCY note at its pre_run_record read.
                 raise
         except Exception:
             self._writer_conn.rollback()
@@ -244,38 +244,50 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def _update_to_passing_state(self, workflow_id: str, working_code: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory._update_to_passing_state")
-        self._writer_conn.execute(
-            "UPDATE execution_records "
-            "SET working_code = ?, test_status = 'passed' WHERE workflow_id = ?",
-            (working_code, workflow_id),
-        )
-        self._writer_conn.commit()
-        logger.info("[LEARNING] Workflow %s updated to passing state", workflow_id)
+        try:
+            self._writer_conn.execute(
+                "UPDATE execution_records "
+                "SET working_code = ?, test_status = 'passed' WHERE workflow_id = ?",
+                (working_code, workflow_id),
+            )
+            self._writer_conn.commit()
+            logger.info("[LEARNING] Workflow %s updated to passing state", workflow_id)
+        except Exception:
+            self._writer_conn.rollback()
+            raise
 
     def update_user_feedback(self, workflow_id: str, feedback_text: str, feedback_type: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory.update_user_feedback")
-        self._writer_conn.execute(
-            "UPDATE execution_records SET user_feedback = ?, user_feedback_type = ? "
-            "WHERE workflow_id = ?",
-            (feedback_text, feedback_type, workflow_id),
-        )
-        self._writer_conn.commit()
+        try:
+            self._writer_conn.execute(
+                "UPDATE execution_records SET user_feedback = ?, user_feedback_type = ? "
+                "WHERE workflow_id = ?",
+                (feedback_text, feedback_type, workflow_id),
+            )
+            self._writer_conn.commit()
+        except Exception:
+            self._writer_conn.rollback()
+            raise
 
     def update_daily_stats(self, test_status: str) -> None:
         _assert_writer_thread("PostgresExecutionMemory.update_daily_stats")
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # UTC day buckets
-        self._writer_conn.execute(
-            """
-            INSERT INTO learning_stats (stat_date, total_executions, total_passed, total_failed)
-            VALUES (?, 1, ?, ?)
-            ON CONFLICT(stat_date) DO UPDATE SET
-                total_executions = learning_stats.total_executions + 1,
-                total_passed = learning_stats.total_passed + EXCLUDED.total_passed,
-                total_failed = learning_stats.total_failed + EXCLUDED.total_failed
-            """,
-            (today, 1 if test_status == "passed" else 0, 1 if test_status != "passed" else 0),
-        )
-        self._writer_conn.commit()
+        try:
+            self._writer_conn.execute(
+                """
+                INSERT INTO learning_stats (stat_date, total_executions, total_passed, total_failed)
+                VALUES (?, 1, ?, ?)
+                ON CONFLICT(stat_date) DO UPDATE SET
+                    total_executions = learning_stats.total_executions + 1,
+                    total_passed = learning_stats.total_passed + EXCLUDED.total_passed,
+                    total_failed = learning_stats.total_failed + EXCLUDED.total_failed
+                """,
+                (today, 1 if test_status == "passed" else 0, 1 if test_status != "passed" else 0),
+            )
+            self._writer_conn.commit()
+        except Exception:
+            self._writer_conn.rollback()
+            raise
 
     def store_hint_workflow_trace(self, workflow_id: str, trace: dict) -> None:
         _assert_writer_thread("PostgresExecutionMemory.store_hint_workflow_trace")
@@ -422,6 +434,11 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
                 if row["injected_hint_ids"] is not None else None
             ),
             model_version=row["model_version"],
+            # The owning org must survive the round trip: this is the record
+            # process_user_feedback hands to the engines, and T9's write guard
+            # refuses an org-less one. Dropping it here made every read-back
+            # record look untenanted.
+            org_id=row["org_id"],
             hint_attribution_done=row["hint_attribution_done"],
         )
 
@@ -534,20 +551,27 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
 
     def find_similar_executions(self, user_query: str, top_k: int = 5,
                                 org_id: str | None = None) -> list:
+        """Nearest past executions by embedding distance, scoped to one org.
+
+        A missing org returns [] (T9): the filter used to be dropped entirely,
+        which handed an org-less caller every org's executions.
+        """
+        if org_id is None:
+            logger.warning(
+                "[LEARNING] execution similarity read refused (no org): "
+                "returning no executions rather than every org's")
+            return []
         vec = self._embed(user_query)
         if not vec:
             return []
-        where = "WHERE org_id = ? " if org_id is not None else ""
-        params = ([vec, org_id, vec, top_k] if org_id is not None
-                  else [vec, vec, top_k])
         try:
             with self.read_conn() as conn:
                 rows = conn.execute(
                     "SELECT workflow_id, test_status, failure_category, domain, "
                     "       code_structure, 1 - (embedding <=> ?::vector) AS similarity "
-                    f"FROM execution_embeddings {where}"
+                    "FROM execution_embeddings WHERE org_id = ? "
                     "ORDER BY embedding <=> ?::vector LIMIT ?",
-                    params,
+                    [vec, org_id, vec, top_k],
                 ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
@@ -581,8 +605,12 @@ class PostgresExecutionMemory(ExecutionStore, SemanticStore):
             except Exception:
                 pass
 
-    def search_similar(self, query: str, top_k: int = 5) -> list:
-        return self.find_similar_executions(query, top_k)
+    def search_similar(self, query: str, top_k: int = 5, *,
+                       org_id: str | None) -> list:
+        # Keyword-only and required — see SemanticStore.search_similar. The
+        # forward matters: find_similar_executions fails closed without an org,
+        # so dropping it here would return [] for every caller.
+        return self.find_similar_executions(query, top_k, org_id=org_id)
 
     def filter_by_query_similarity(self, user_query, candidate_ids, kind,
                                    threshold=0.55, score_sink=None,

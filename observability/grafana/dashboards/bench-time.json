@@ -1,0 +1,128 @@
+{
+  "uid": "bench-time",
+  "title": "Bench — where the time goes",
+  "tags": ["mark1", "bench"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "timepicker": {"hidden": true},
+  "templating": {
+    "list": [
+      {
+        "name": "family",
+        "label": "Query family",
+        "type": "query",
+        "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+        "query": "SELECT DISTINCT family AS __text, family AS __value FROM bench.sweeps ORDER BY 1",
+        "refresh": 1,
+        "current": {"text": "public", "value": "public"},
+        "options": []
+      },
+      {
+        "name": "window_sweeps",
+        "label": "Window (eligible sweeps)",
+        "type": "custom",
+        "query": "4,8,12,20",
+        "current": {"text": "12", "value": "12"},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "0 — What this dashboard covers",
+      "description": "How much of the selected family carries the timings the panels below read. Unlike every other panel here, this one ignores the sweep window and the eligibility filter — it describes the whole family, so the gap between its sweep count and the window tells you how much is being left out. Coverage is uneven and the panels say so individually: of 1,984 runs on record, 1,951 carry the five main stage timings, 1,104 carry the seven sub-stage timings, 1,944 carry a duplicate-lookup rate, 1,880 a cleanup time, 1,876 a cold-start time and only 1,039 a locator latency. agent_steps is populated on 30 runs and is deliberately read by no panel. Families do not blend: public query ids run q01-q10 and the other family's are prefixed, so no panel can silently mix two target sites. All-time: this corpus is scoped by sweep, not by wall clock — bench.sweeps.captured_at is naive and bench.runs.started_at is text, so the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 0},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "SELECT count(DISTINCT s.sweep_name) AS sweeps, count(r.query_id) AS runs, count(r.identify_s) AS runs_with_stage_timings, count(r.agent_run_s) AS runs_with_substage_timings, count(r.locator_latency_ms_median) AS runs_with_locator_timing, count(r.cold_start_s) AS runs_with_overhead FROM bench.sweeps s LEFT JOIN bench.runs r ON r.sweep_name = s.sweep_name WHERE s.family = ${family:sqlstring}"
+      }]
+    },
+    {
+      "type": "barchart",
+      "title": "1 — Where a bench run's wall time goes, per sweep",
+      "description": "Mean seconds per run in each of the five pipeline stages, newest sweep first, stacked so the bar length is the whole run. Every timing column here and the runs count share ONE denominator — the runs carrying all five stage timings — because avg() skips nulls per expression, so without it each column could average a different set of runs and the stack would be a sum over populations that do not match. That is not hypothetical: one run in the corpus carries plan_s and identify_s but no assemble/dryrun/exec, and on its sweep the unshared form overstated the stack against the recorded total by 0.43 s, which is drift the panel would have reported as instrumentation error. pass_rate_pct deliberately keeps the whole-sweep population: it is a test outcome, not a timing, and dropping a run that genuinely executed would be the worse distortion. The five stages account for essentially all the wall time: across the 1,950 runs carrying all of them, they sum to 61.7 s against a recorded total_s of 61.8 s, leaving 0.1 s unattributed. identify_s dominates every sweep — 38.8 s of that, or 63% of the wall time — which is why it gets a panel of its own below. recorded_total_s is shown beside the stack rather than in it, as the independent check on that sum; if the stack and the recorded total ever diverge by more than a second, the stage instrumentation has drifted and that is a finding — and now only that, since a data-completeness gap can no longer produce the divergence. pass_rate_pct rides along for the same reason a speed number is never read alone: a sweep that got faster and lost pass rate did not get better, and this is the one place both are on the same row. It is the executed test status, so it answers a different question from the generation gate the bench reports. Sweeps that are incomplete, flagged invalid in the filename, or re-costed duplicates of another sweep are excluded — admitting the one invalid sweep is measured on the weakest-queries dashboard to move per-query pass rates by 12.7 to 14.3 points. Set the window with the Window variable; the default of 12 shows the last twelve eligible sweeps of the selected family. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 5},
+      "options": {
+        "xField": "sweep",
+        "stacking": "normal",
+        "orientation": "horizontal",
+        "showValue": "never",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "recorded_total_s"},
+           "properties": [{"id": "custom.hideFrom", "value": {"viz": true, "legend": false, "tooltip": false}}]},
+          {"matcher": {"id": "byName", "options": "pass_rate_pct"},
+           "properties": [{"id": "custom.hideFrom", "value": {"viz": true, "legend": false, "tooltip": false}}]},
+          {"matcher": {"id": "byName", "options": "runs"},
+           "properties": [{"id": "custom.hideFrom", "value": {"viz": true, "legend": false, "tooltip": false}}]}
+        ]
+      },
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int), t AS (SELECT sweep_name, plan_s, identify_s, assemble_s, dryrun_s, exec_s, total_s, test_status, (plan_s IS NOT NULL AND identify_s IS NOT NULL AND assemble_s IS NOT NULL AND dryrun_s IS NOT NULL AND exec_s IS NOT NULL) AS timed FROM bench.runs) SELECT e.sweep_name AS sweep, round(avg(t.plan_s) FILTER (WHERE t.timed)::numeric, 2) AS plan_s, round(avg(t.identify_s) FILTER (WHERE t.timed)::numeric, 2) AS identify_s, round(avg(t.assemble_s) FILTER (WHERE t.timed)::numeric, 2) AS assemble_s, round(avg(t.dryrun_s) FILTER (WHERE t.timed)::numeric, 2) AS dryrun_s, round(avg(t.exec_s) FILTER (WHERE t.timed)::numeric, 2) AS exec_s, round(avg(t.total_s) FILTER (WHERE t.timed)::numeric, 2) AS recorded_total_s, round(100.0 * count(*) FILTER (WHERE t.test_status = 'passed') / nullif(count(t.test_status), 0), 1) AS pass_rate_pct, count(*) FILTER (WHERE t.timed) AS runs FROM e LEFT JOIN t ON t.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "2 — The identify stage, decomposed into its two lanes",
+      "description": "What the 63% of wall time inside identify_s is actually spent on. Read the two lane columns as alternatives, never as parts to be added: these seven sub-stage timings are two overlapping views of the same wall clock, one measured from the caller and one from inside the agent, and summing all seven gives 1.947 times the real figure — measured across the 1,104 runs that carry them. Each lane reconstructs identify_s on its own: the caller lane to within 0.583 s on average, the agent lane to within 0.647 s. poll_wait_s is the caller blocking while agent_run_s runs, so those two are the same seconds counted twice. A static guard rejects any panel that adds across the lanes. identify_s here is restricted to the rows that carry sub-stages, which is not cosmetic: on one sweep 30 runs have an identify_s but only 29 have sub-stages, and the missing run took 3,250.73 s, which dragged the unrestricted mean to 169.92 s against lanes of 62.44 and 63.00. Sharing the denominator brings it to 63.69 s and the three agree. runs_with_substages is the row count every timing column is computed over — when it is far below the sweep's run count, treat this panel as a sample. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 17},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.identify_s) FILTER (WHERE r.agent_run_s IS NOT NULL)::numeric, 2) AS identify_s, round(avg(r.submit_s + r.queue_s + r.poll_wait_s + r.postprocess_s)::numeric, 2) AS caller_lane_s, round(avg(r.session_setup_s + r.agent_setup_s + r.agent_run_s)::numeric, 2) AS agent_lane_s, round(avg(r.poll_wait_s)::numeric, 2) AS poll_wait_s, round(avg(r.agent_run_s)::numeric, 2) AS agent_run_s, round(avg(r.session_setup_s)::numeric, 2) AS session_setup_s, count(r.agent_run_s) AS runs_with_substages FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "3 — Locator lookup cost and container overhead",
+      "description": "The levers underneath the identify stage. locator_median_ms and locator_p90_ms are per-run medians averaged over the sweep, so treat them as a trend line rather than a true percentile of the population. cold_start_s and cleanup_s are container overhead that no pipeline stage owns; they sit outside the five-stage sum, so improving them improves wall time without moving any stage figure. Repeat lookups are deliberately not plotted here: bench.runs still carries duplicate_lookup_rate, probe_total and probe_unique, but every value in the corpus is zero because the LOCATOR_PROBE log line they are parsed from was measured and then removed on 2026-07-07 — the duplicate rate came in at 0.35% of calls, six repeats in about 1,700 lookups, and the owner closed the caching question rather than schedule a cache. Do not read those columns as a pipeline that does no repeat work, and do not re-add them to a panel without re-opening that decision first. Coverage differs per column and is the reason runs_with_locator_timing is shown: locator latency is recorded on 1,039 of 1,984 runs across the whole corpus, against 1,880 for cleanup and 1,876 for cold start. A blank cell means the sweep predates that instrumentation. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 27},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT e.sweep_name AS sweep, round(avg(r.locator_latency_ms_median)::numeric, 0) AS locator_median_ms, round(avg(r.locator_latency_ms_p90)::numeric, 0) AS locator_p90_ms, round(avg(r.cold_start_s)::numeric, 2) AS cold_start_s, round(avg(r.cleanup_s)::numeric, 2) AS cleanup_s, count(r.locator_latency_ms_median) AS runs_with_locator_timing FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name GROUP BY 1, e.captured_at ORDER BY e.captured_at DESC"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "4 — Stage timings per query",
+      "description": "The same five stages as panel 1, but grouped by query instead of by sweep and pooled across the whole window, so a query that is reliably slow separates from a sweep that was slow overall. Slowest first by total_s. This is the panel to read before optimising a stage: identify_s averages 38.8 s across the corpus against 8.5 s for planning and 5.6 s for assembly, but that average hides a wide per-query spread, and a change that helps the mean can still leave the worst query untouched. runs is the number of runs behind each row and it varies — a query added recently has fewer, and a row with a handful of runs is an anecdote rather than a measurement. It counts the runs carrying all five stage timings, which is the same denominator every timing column on this row is averaged over; before they were shared, q04 read runs=36 while its stage means were taken over 35. Pair this with the weakest-queries dashboard, which answers whether the same queries that are slow are also the ones that fail. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 37},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int), t AS (SELECT sweep_name, query_id, plan_s, identify_s, assemble_s, dryrun_s, exec_s, total_s, (plan_s IS NOT NULL AND identify_s IS NOT NULL AND assemble_s IS NOT NULL AND dryrun_s IS NOT NULL AND exec_s IS NOT NULL) AS timed FROM bench.runs) SELECT t.query_id AS query, count(*) FILTER (WHERE t.timed) AS runs, round(avg(t.plan_s) FILTER (WHERE t.timed)::numeric, 2) AS plan_s, round(avg(t.identify_s) FILTER (WHERE t.timed)::numeric, 2) AS identify_s, round(avg(t.assemble_s) FILTER (WHERE t.timed)::numeric, 2) AS assemble_s, round(avg(t.dryrun_s) FILTER (WHERE t.timed)::numeric, 2) AS dryrun_s, round(avg(t.exec_s) FILTER (WHERE t.timed)::numeric, 2) AS exec_s, round(avg(t.total_s) FILTER (WHERE t.timed)::numeric, 2) AS total_s FROM e LEFT JOIN t ON t.sweep_name = e.sweep_name GROUP BY 1 ORDER BY avg(t.total_s) FILTER (WHERE t.timed) DESC NULLS LAST"
+      }]
+    },
+    {
+      "type": "table",
+      "title": "5 — The slowest runs on record",
+      "description": "Individual runs, slowest first, capped at 40 rows. Averages hide the runs that matter most here: one run in the corpus took 3,250.73 s in the identify stage alone, and because it carried no sub-stage timings it silently pulled its sweep's mean identify from 63.69 s to 169.92 s — the trap panel 2 corrects for. This panel is where such a run is visible as itself. A blank agent_run_s means the run predates sub-stage instrumentation or died before the agent reported, and on the very slowest rows that is usually the story. outcome is the executed test status, so a slow run that also failed is worth more attention than a slow run that passed. run_id is the full bench workflow id and it deliberately carries no link: bench runs are detached by design and their rows are deleted from the production tables, so the per-run trace view would open empty. All-time: this corpus is scoped by sweep, not by wall clock, and the time picker is hidden.",
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "nlrf-postgres"},
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 47},
+      "targets": [{
+        "refId": "A",
+        "format": "table",
+        "rawQuery": true,
+        "rawSql": "WITH e AS (SELECT sweep_name, captured_at FROM bench.sweeps WHERE is_complete AND NOT is_flagged_invalid AND derived_from IS NULL AND family = ${family:sqlstring} ORDER BY captured_at DESC LIMIT (${window_sweeps:sqlstring})::int) SELECT r.workflow_id AS run_id, r.query_id AS query, e.sweep_name AS sweep, round(r.total_s::numeric, 1) AS total_s, round(r.identify_s::numeric, 1) AS identify_s, round(r.agent_run_s::numeric, 1) AS agent_run_s, r.test_status AS outcome FROM e LEFT JOIN bench.runs r ON r.sweep_name = e.sweep_name WHERE r.total_s IS NOT NULL ORDER BY r.total_s DESC LIMIT 40"
+      }]
+    }
+  ]
+}

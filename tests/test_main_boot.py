@@ -21,11 +21,19 @@ from src.backend.core.config import settings
 
 pytestmark = pytest.mark.integration
 
+_TEST_SECRET = "b2Yt7Rq4Kx9Vn3Ls6Wd0Hf5Zj8Mc1Pg4Tb7Yn2Qs5Xk8Dv1Ru4Gh7Lm0Ap3Ce6"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _configured_jwt_secret():
+    """Boot with a configured secret so startup neither aborts nor provisions a
+    development secret into the working tree."""
+    with patch.object(settings, "JWT_SECRET_KEY", _TEST_SECRET):
+        yield
+
 
 @pytest.fixture(scope="module")
 def app_client():
-    if settings.JWT_SECRET_KEY in ("", "change-me-in-production"):
-        pytest.skip("JWT_SECRET_KEY not configured (startup refuses placeholder)")
     from fastapi.testclient import TestClient
 
     from src.backend import main
@@ -124,9 +132,6 @@ def test_startup_and_shutdown_survive_every_collaborator_failing():
     from src.backend.core import temp_metrics_storage
     from src.backend.crew_ai.optimization import keyword_vector_store, learning_registry
 
-    if settings.JWT_SECRET_KEY in ("", "change-me-in-production"):
-        pytest.skip("JWT_SECRET_KEY not configured")
-
     loop = MagicMock()
     loop.execution_memory.close.side_effect = RuntimeError("store already closed")
     with patch.object(main, "init_auth_db", side_effect=RuntimeError("pg down")), \
@@ -166,14 +171,15 @@ def test_learning_health_check_degrades_and_never_blocks_boot():
     conn.close.assert_called_once()  # connection released even on degraded path
 
 
-def test_startup_refuses_placeholder_jwt_secret():
-    """Booting with the placeholder secret must abort: every minted token
-    would be forgeable."""
+def test_startup_refuses_placeholder_jwt_secret_in_production():
+    """A production deployment must abort on the placeholder: every minted token
+    would be forgeable. Development provisions a real secret instead."""
     from fastapi.testclient import TestClient
 
     from src.backend import main
 
-    with patch.object(settings, "JWT_SECRET_KEY", "change-me-in-production"):
+    with patch.object(settings, "JWT_SECRET_KEY", "change-me-in-production"), \
+         patch.object(settings, "ENVIRONMENT", "production"):
         with pytest.raises(RuntimeError, match="JWT_SECRET_KEY"):
             with TestClient(main.app):
                 pass

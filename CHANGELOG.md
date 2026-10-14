@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - Updated [Configuration Guide](docs/CONFIGURATION.md) - Detailed ROBOT_LIBRARY documentation
+- Corrected [Configuration Guide](docs/CONFIGURATION.md) - `LOG_LEVEL` is documented as inert; nothing reads it (`setup_logging()` takes the level as an argument and `main.py` calls it bare). `LOG_FORMAT=console` does work
 - Updated [Architecture Guide](docs/ARCHITECTURE.md) - Library context system architecture
 - Updated [README.md](README.md) - Browser Library benefits and usage
 - Updated [.env.example](src/backend/.env.example) - Inline documentation of library options
@@ -43,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - **SeleniumLibrary support** - Browser Library (Playwright) is now the sole target; `ROBOT_LIBRARY=selenium` fails fast at startup
+- **`docs/PROMPT_ENGINEERING.md`, `docs/ROADMAP.md`** - both documented the Element Identifier and Code Validator agents as live pipeline stages and shipped SeleniumLibrary examples. Neither carried a deprecation note, so both read as current
+- **`docs/OPTIMIZATION.md`, `docs/OPTIMIZATION_DEVELOPER_GUIDE.md`** - written against the SQLite + ChromaDB learning stack that the Postgres/pgvector migration replaced; never updated
 
 ### Breaking Changes
 - ⚠️ Generated tests now require Browser Library - migrate any `ROBOT_LIBRARY=selenium` configuration to `ROBOT_LIBRARY=browser`

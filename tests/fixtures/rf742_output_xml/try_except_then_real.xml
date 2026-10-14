@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:43.122478" rpa="false" schemaversion="5">
+<suite id="s1" name="Try Except Then Real" source="/w/try_except_then_real.robot">
+<test id="s1-t1" name="Try Except Then Real" line="2">
+<try>
+<branch type="TRY">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:43.161541" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#in-try")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:43.161260" elapsed="0.000351">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:43.161059" elapsed="0.000599">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#in-try")</status>
+</branch>
+<branch type="EXCEPT" pattern_type="GLOB">
+<pattern>*</pattern>
+<kw name="Log" owner="BuiltIn">
+<msg time="2026-09-21T18:17:43.161883" level="INFO">handled</msg>
+<arg>handled</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="PASS" start="2026-09-21T18:17:43.161780" elapsed="0.000127"/>
+</kw>
+<status status="PASS" start="2026-09-21T18:17:43.161731" elapsed="0.000193"/>
+</branch>
+<status status="PASS" start="2026-09-21T18:17:43.161022" elapsed="0.000917"/>
+</try>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:43.162139" level="FAIL">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#after-try")</msg>
+<arg>TimeoutError: locator.fill: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#after-try")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:43.161994" elapsed="0.000175">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#after-try")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:43.160884" elapsed="0.001350">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#after-try")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:43.123345" elapsed="0.039052"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Try Except Then Real" id="s1" pass="0" fail="1" skip="0">Try Except Then Real</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

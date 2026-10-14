@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:36.565034" rpa="false" schemaversion="5">
+<suite id="s1" name="Several Failures" source="/w/several_failures.robot">
+<test id="s1-t1" name="Several Failures" line="2">
+<kw name="Run Keyword And Continue On Failure" owner="BuiltIn">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:36.604455" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#first")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#first")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:36.604265" elapsed="0.000257">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#first")</status>
+</kw>
+<arg>Fail</arg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#first")</arg>
+<doc>Runs the keyword and continues execution even if a failure occurs.</doc>
+<status status="FAIL" start="2026-09-21T18:17:36.604075" elapsed="0.000489">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#first")</status>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:36.604719" level="FAIL">Error: second failure</msg>
+<arg>Error: second failure</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:36.604612" elapsed="0.000135">Error: second failure</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:36.603769" elapsed="0.001048">Several failures occurred:
+
+1) TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#first")
+
+2) Error: second failure</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:36.565830" elapsed="0.039165"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Several Failures" id="s1" pass="0" fail="1" skip="0">Several Failures</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

@@ -1,0 +1,303 @@
+"""A misconfigured provider must produce an instruction, not a JSON dump.
+
+Every string below was captured from a real litellm failure (2026-08-17) rather
+than invented, so the matching cannot drift away from what the SDK actually
+raises. Before this mapping existed, an invalid API key — the single most common
+first-run mistake — rendered ~15 lines of google.rpc.ErrorInfo in the UI with no
+mention of which setting was wrong or where to fix it.
+"""
+import json
+
+import litellm
+import pytest
+
+from src.backend.core.provider_errors import friendly_setup_error, friendly_provider_error
+from src.backend.crew_ai.provider_retry import RetryReport, attach_report
+
+# --- verbatim captures -------------------------------------------------------
+
+AI_STUDIO_BAD_KEY = (
+    'litellm.AuthenticationError: geminiException - {   "error": {     "code": 400,'
+    '     "message": "API key not valid. Please pass a valid API key.",'
+    '     "status": "INVALID_ARGUMENT",     "details": [       {'
+    '         "@type": "type.googleapis.com/google.rpc.ErrorInfo",'
+    '         "reason": "API_KEY_INVALID",         "domain": "googleapis.com",'
+    '         "metadata": {           "service": "generativelanguage.googleapis.com" } } ] } }'
+)
+
+VERTEX_MISSING_CREDENTIALS = (
+    "litellm.APIConnectionError: Unable to load vertex credentials from environment. "
+    "Got=/app/credentials.json Traceback (most recent call last): ..."
+)
+
+VERTEX_BILLING_DISABLED = (
+    'litellm.BadRequestError: VertexAIException BadRequestError - {   "error": {'
+    '     "code": 403,     "message": "This API method requires billing to be enabled.'
+    ' Please enable billing on project #proj-123 by visiting'
+    ' https://console.developers.google.com/billing/enable?project=proj-123 then retry.",'
+    '     "status": "PERMISSION_DENIED" } }'
+)
+
+
+class TestRecognisedMisconfigurations:
+    def test_invalid_ai_studio_key_names_the_setting_and_the_file(self):
+        msg = friendly_setup_error(Exception(AI_STUDIO_BAD_KEY))
+        assert msg is not None
+        assert "GEMINI_API_KEY" in msg
+        assert "src/backend/.env" in msg
+        assert "aistudio.google.com" in msg
+        # The raw SDK noise must not be forwarded to the user.
+        assert "google.rpc.ErrorInfo" not in msg
+        assert "INVALID_ARGUMENT" not in msg
+
+    def test_missing_vertex_credentials_points_at_the_key_file(self):
+        msg = friendly_setup_error(Exception(VERTEX_MISSING_CREDENTIALS))
+        assert msg is not None
+        assert "credentials.json" in msg
+        # The compose overlay is exactly what a user forgets to pass.
+        assert "docker-compose.vertex.yml" in msg
+
+    def test_billing_disabled_is_explained_not_dumped(self):
+        msg = friendly_setup_error(Exception(VERTEX_BILLING_DISABLED))
+        assert msg is not None
+        assert "billing" in msg.lower()
+        assert "PERMISSION_DENIED" not in msg
+
+    def test_vertex_api_not_enabled(self):
+        raw = (
+            'VertexAIException - {"error": {"code": 403, "message": '
+            '"Vertex AI API has not been used in project 12345 before or it is disabled.", '
+            '"status": "PERMISSION_DENIED", "details": [{"reason": "SERVICE_DISABLED"}]}}'
+        )
+        msg = friendly_setup_error(Exception(raw))
+        assert msg is not None
+        assert "aiplatform.googleapis.com" in msg or "Vertex AI API" in msg
+
+    def test_rate_limit_is_explained(self):
+        raw = "litellm.RateLimitError: VertexAIException - 429 Resource exhausted, quota exceeded"
+        msg = friendly_setup_error(Exception(raw))
+        assert msg is not None
+        assert "rate" in msg.lower() or "quota" in msg.lower()
+
+
+class TestDoesNotMisdiagnose:
+    """A wrong instruction is worse than a raw error — it sends the user to fix
+    something that was never broken. These are all shapes that a substring match
+    on '429' or 'permission denied' would have mislabelled."""
+
+    @pytest.mark.parametrize("raw", [
+        "Workflow 429abc-def failed to assemble code",
+        "completion_tokens=4290 exceeded budget",
+        "Run id 8996de27-429f-4b92 produced no output.xml",
+    ])
+    def test_a_bare_429_substring_is_not_a_rate_limit(self, raw):
+        assert friendly_setup_error(Exception(raw)) is None
+
+    @pytest.mark.parametrize("raw", [
+        "PermissionError: [Errno 13] Permission denied: '/app/robot_tests/run-1'",
+        "docker: permission denied while trying to connect to the Docker daemon socket",
+    ])
+    def test_filesystem_permission_errors_are_not_vertex_iam(self, raw):
+        # A Linux bind-mount ownership problem is common and has nothing to do
+        # with roles/aiplatform.user.
+        assert friendly_setup_error(Exception(raw)) is None
+
+    def test_a_real_vertex_permission_error_is_still_caught(self):
+        raw = ('VertexAIException - {"error": {"code": 403, "message": "Permission '
+               '\'aiplatform.endpoints.predict\' denied", "status": "PERMISSION_DENIED"}}')
+        msg = friendly_setup_error(Exception(raw))
+        assert msg is not None
+        assert "aiplatform.user" in msg
+
+    def test_a_real_rate_limit_is_still_caught(self):
+        for raw in ("litellm.RateLimitError: 429 Resource exhausted",
+                    'VertexAIException - {"code": 429, "status": "RESOURCE_EXHAUSTED"}'):
+            msg = friendly_setup_error(Exception(raw))
+            assert msg is not None, raw
+            assert "rate" in msg.lower() or "quota" in msg.lower()
+
+
+class TestPassthrough:
+    @pytest.mark.parametrize("raw", [
+        "Failed to generate valid Robot Framework code: unexpected token",
+        "runner-exec unreachable: Read timed out",
+        "",
+    ])
+    def test_unrecognised_errors_return_none(self, raw):
+        # Not every failure is a setup problem. Anything unrecognised must fall
+        # through to the existing message rather than be mislabelled.
+        assert friendly_setup_error(Exception(raw)) is None
+
+    def test_secrets_never_survive_into_a_friendly_message(self):
+        leaky = (
+            "API key not valid. Please pass a valid API key. reason: API_KEY_INVALID "
+            "url ...generateContent?key=AIzaSy" + "C" * 33
+        )
+        msg = friendly_setup_error(Exception(leaky))
+        assert msg is not None
+        assert "AIzaSy" not in msg
+
+
+class TestGoogleAiStudioDailyQuota:
+    def _429(self, quota_id):
+        """A Google AI Studio 429 as litellm 1.75.3 wraps it (body shape: inspect_ai#5526)."""
+        body = {"error": {
+            "code": 429,
+            "message": "You exceeded your current quota, please check your plan and billing details.",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                 "violations": [{"quotaId": quota_id}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "34s"},
+            ],
+        }}
+        return litellm.RateLimitError(message="VertexAIException - " + json.dumps(body, indent=2),
+                                      llm_provider="gemini", model="gemini-3.5-flash")
+
+    def test_per_day_quota_says_when_it_resets(self):
+        msg = friendly_setup_error(self._429("GenerateRequestsPerDayPerProjectPerModel-FreeTier"))
+        assert "daily quota for this model is used up" in msg
+        assert "midnight Pacific time" in msg
+
+    def test_per_minute_quota_keeps_the_rate_limit_message(self):
+        msg = friendly_setup_error(self._429("GenerateRequestsPerMinutePerProjectPerModel-FreeTier"))
+        assert msg.startswith("The model provider rate-limited this request")
+
+    def test_per_day_quota_is_provider_neutral_for_vertex(self):
+        exc = self._429("GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+        exc.llm_provider = "vertex_ai"
+        msg = friendly_setup_error(exc)
+        assert "switch MODEL_PROVIDER to vertex" not in msg
+        assert "(Google AI Studio free tier)" not in msg
+        assert "retrying now will not help" in msg
+        assert "midnight Pacific time" in msg
+
+
+class TestProviderDidNotAnswer:
+    def _timeout(self, report=True):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="gemini-3.5-flash", llm_provider="vertex_ai")
+        if report:
+            attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 3, 3, 0,
+                                           (60.0, 120.0, 240.0), 420.4, "Timeout"))
+        return exc
+
+    def test_timeout_after_all_tries_names_the_provider_and_the_waits(self):
+        msg = friendly_provider_error(self._timeout())
+        assert msg.startswith("The model provider did not answer.")
+        assert "vertex_ai/gemini-3.5-flash" in msg
+        assert "3 tries over 7 min 0 s" in msg
+        assert "60 s, 120 s and 240 s" in msg
+        assert "Connection timed out after None seconds" not in msg
+        assert "waited" not in msg
+
+    def test_timeout_wording_reports_limits_not_waits_plural(self):
+        msg = friendly_provider_error(self._timeout())
+        assert "the tries that timed out had limits of 60 s, 120 s and 240 s" in msg
+        assert "waited" not in msg
+
+    def test_timeout_wording_reports_limit_not_wait_singular(self):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="gemini-3.5-flash", llm_provider="vertex_ai")
+        attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 3, 1, 2,
+                                       (60.0,), 61.0, "Timeout"))
+        msg = friendly_provider_error(exc)
+        assert "the try that timed out had a limit of 60 s" in msg
+        assert "waited" not in msg
+
+    def test_unavailable_503_after_rejections(self):
+        exc = litellm.ServiceUnavailableError(
+            message='VertexAIException - {"error": {"code": 503, "status": "UNAVAILABLE"}}',
+            llm_provider="vertex_ai", model="gemini-3.5-flash")
+        attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 5, 0, 5, (), 16.2,
+                                       "ServiceUnavailableError"))
+        msg = friendly_provider_error(exc)
+        assert msg.startswith("The model provider did not answer.")
+        assert "unavailable (HTTP 503)" in msg
+        assert "5 tries over 16 s" in msg
+        assert '"code": 503' not in msg
+
+    def test_without_a_report_it_still_says_so_without_numbers(self):
+        msg = friendly_provider_error(self._timeout(report=False))
+        assert msg.startswith("The model provider did not answer.")
+        assert "tries" not in msg
+
+    @pytest.mark.parametrize("exc", [
+        litellm.RateLimitError(message="429", llm_provider="vertex_ai", model="m"),
+        litellm.APIConnectionError(message="unmapped", llm_provider="vertex_ai", model="m"),
+        litellm.BadRequestError(message="400", model="m", llm_provider="vertex_ai"),
+        RuntimeError("boom"),
+    ])
+    def test_everything_else_is_left_to_the_other_rules(self, exc):
+        assert friendly_provider_error(exc) is None
+
+    def test_a_vertex_timeout_still_blames_the_provider(self):
+        msg = friendly_provider_error(self._timeout())
+        assert msg.startswith("The model provider did not answer.")
+
+    def test_an_ollama_timeout_blames_the_local_machine_not_the_provider(self):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="llama3", llm_provider="ollama")
+        msg = friendly_provider_error(exc)
+        assert msg.startswith("Your local model did not answer.")
+        assert "ollama/llama3 gave no reply." in msg
+        assert "provider's side" not in msg
+
+    def test_an_ollama_chat_timeout_is_also_local(self):
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="llama3", llm_provider="ollama_chat")
+        msg = friendly_provider_error(exc)
+        assert msg.startswith("Your local model did not answer.")
+
+
+VERTEX_RATE_LIMITED = (
+    "Vertex AI is out of capacity for this model right now (HTTP 429). Wait a minute and "
+    "try again. If it keeps happening, set VERTEXAI_LOCATION in src/backend/.env to global "
+    "unless your data must stay in one region (Google then routes requests to whichever "
+    "region has capacity)."
+)
+AI_STUDIO_RATE_LIMITED = (
+    "The model provider rate-limited this request (quota exceeded). Wait a moment and try "
+    "again. If it keeps happening, the free tier is likely too small for back-to-back runs "
+    "— switch MODEL_PROVIDER to vertex in src/backend/.env, or request more quota."
+)
+NEUTRAL_RATE_LIMITED = (
+    "The model provider rate-limited this request (quota exceeded). Wait a moment and try again."
+)
+
+
+class TestRateLimitSentencePerProvider:
+    """W5.1 Task 2b: the 429 sentence follows the run's own model_provider. It used to
+    tell every user, Vertex users included, to switch MODEL_PROVIDER to vertex."""
+
+    VERTEX_429 = "litellm.RateLimitError: VertexAIException - 429 Resource exhausted, quota exceeded"
+
+    def _ai_studio_429(self, quota_id):
+        body = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+             "violations": [{"quotaId": quota_id}]}]}}
+        # LiteLLM labels a Google AI Studio error "vertex_ai" too: the label is no guide.
+        return litellm.RateLimitError(message="VertexAIException - " + json.dumps(body),
+                                      llm_provider="vertex_ai", model="gemini-3.5-flash")
+
+    def test_vertex_is_never_told_to_switch_to_vertex(self):
+        assert friendly_setup_error(Exception(self.VERTEX_429), provider="vertex") == VERTEX_RATE_LIMITED
+
+    def test_gemini_per_minute_keeps_the_free_tier_advice(self):
+        exc = self._ai_studio_429("GenerateRequestsPerMinutePerProjectPerModel-FreeTier")
+        assert friendly_setup_error(exc, provider="gemini") == AI_STUDIO_RATE_LIMITED
+
+    @pytest.mark.parametrize("provider", ["gemini", "vertex", "local", None])
+    def test_a_per_day_quota_is_still_matched_first(self, provider):
+        exc = self._ai_studio_429("GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+        msg = friendly_setup_error(exc, provider=provider)
+        assert msg.startswith("The model provider's daily quota for this model is used up")
+
+    @pytest.mark.parametrize("provider", ["local", None, "something-else"])
+    def test_no_provider_advice_without_a_known_cloud_provider(self, provider):
+        assert friendly_setup_error(Exception(self.VERTEX_429), provider=provider) == NEUTRAL_RATE_LIMITED
+
+    def test_other_setup_sentences_do_not_depend_on_the_provider(self):
+        for provider in ("vertex", "gemini", "local", None):
+            msg = friendly_setup_error(Exception(AI_STUDIO_BAD_KEY), provider=provider)
+            assert "GEMINI_API_KEY" in msg

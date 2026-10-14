@@ -18,6 +18,7 @@ Covered (§5):
     was refactored out of
 """
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from unittest.mock import patch, MagicMock
@@ -270,7 +271,7 @@ class TestValidateAndRepair:
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
-                          side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001})) as mock_repair, \
+                          side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code",
                           side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
@@ -293,7 +294,7 @@ class TestValidateAndRepair:
         with patch.object(ds, "settings", self._settings(max_fixes=2)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
-                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001})), \
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})), \
              patch.object(ds, "extract_and_normalize_robot_code", return_value="fixed code"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.side_effect = results
@@ -307,7 +308,7 @@ class TestValidateAndRepair:
         with patch.object(ds, "settings", self._settings(max_fixes=3)), \
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code",
-                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001})) as mock_repair, \
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code", return_value="same code"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
@@ -368,6 +369,126 @@ class TestValidateAndRepair:
             msgs.append(q.get_nowait())
         # at least the "Verifying generated test..." push (progress 88)
         assert any(m.get("progress") == 88 for m in msgs)
+
+
+class TestGateCounters:
+    """The gate returns its own counters instead of leaving them to be scraped.
+
+    Before this, the only record of a repair round was the SSE progress string
+    "🔧 Fixing test code..." — bench/bench_lib.py counts occurrences of it to
+    compute dryrun_repairs, which makes a quality gate depend on a UI message.
+    """
+
+    def _settings(self, enabled=True, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = enabled
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _repair(self, guardrails=None):
+        """A repair_robot_code stand-in returning the full 3-tuple."""
+        return lambda rid, code, errs, *a, **k: (
+            MagicMock(), {"llm_calls": 1, "cost": 0.001},
+            guardrails if guardrails is not None else {"repair_output": 1},
+        )
+
+    def test_skipped_reports_zero_attempts(self):
+        with patch.object(ds, "settings", self._settings(enabled=False)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client"):
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "skipped"
+        assert out["dryrun_attempts"] == 0
+        assert out["dryrun_repairs"] == 0
+        assert out["guardrail_attempts"] == {}
+
+    def test_unverified_before_any_dryrun_reports_zero_attempts(self):
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.side_effect = ds.RunnerExecUnavailable("no executor")
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "unverified"
+        assert out["dryrun_attempts"] == 0
+        assert out["dryrun_repairs"] == 0
+
+    def test_passed_first_try_counts_one_attempt_no_repair(self):
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "passed"
+        assert out["dryrun_attempts"] == 1
+        assert out["dryrun_repairs"] == 0
+
+    def test_failed_counts_every_attempt_and_repair(self):
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=self._repair()), \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
+        assert out["dryrun_status"] == "failed"
+        assert out["dryrun_attempts"] == 3   # MAX_DRYRUN_FIXES + 1
+        assert out["dryrun_repairs"] == 2
+
+    def test_attempt_that_raises_is_still_counted(self):
+        """An attempt that times out was still attempted. Counting after the
+        call would report 0 for a run that spawned a container and waited."""
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = RuntimeError("timed out")
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "unverified"
+        assert out["dryrun_attempts"] == 1
+
+    def test_repair_that_raises_is_still_counted(self):
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=RuntimeError("LLM down")):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert out["dryrun_status"] == "failed"
+        assert out["dryrun_repairs"] == 1
+
+    def test_guardrail_attempts_come_back_from_the_repair_crew(self):
+        """The repair mini-crew builds its own RobotTasks, so its guardrail
+        counter is unreachable except through this return value."""
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          side_effect=self._repair(guardrails={"repair_output": 2})), \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
+        # Two repair rounds, each reporting 2 → summed across rounds.
+        assert out["guardrail_attempts"] == {"repair_output": 4}
+
+    def test_repair_duration_present_only_when_a_repair_ran(self):
+        """Angle D: workflow_service composes crew_stage_metrics['repair'] from
+        repair_usage plus this duration."""
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc:
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": True, "errors": "", "exit_code": 0}
+            passed = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert passed["repair_duration_s"] == 0.0
+
+        with patch.object(ds, "settings", self._settings(max_fixes=1)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=self._repair()), \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value="fixed"):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad", "exit_code": 1}
+            repaired = ds.validate_and_repair("rid", "code", "gemini", "m", None)
+        assert repaired["repair_duration_s"] >= 0.0
+        assert repaired["repair_usage"]["llm_calls"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -468,10 +589,400 @@ class TestExtractAndNormalize:
         assert second == first
         assert second.count("timeout=") == 1
 
+    def test_visibility_check_rewritten_by_the_pipeline(self):
+        """The rewrite is only worth anything if it is actually wired in here.
+
+        Without this test, deleting the rewrite call from the pipeline leaves
+        the whole suite green. The bare `#heading` also proves the `css=`
+        prefixing still applies to the rewritten line.
+        """
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    #login\n"
+               "    Get Element States    #heading    contains    visible")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "    Wait For Elements State    css=#heading    visible" in out
+        assert "Get Element States" not in out
+
+    def test_visibility_check_rewrite_survives_a_repair_round_trip(self):
+        """This function runs on BOTH the generation path and the dryrun repair
+        path; a repair pass re-running cleanup on its own output must leave
+        the rewritten line exactly as it was."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Get Element States    ${h}    not contains    visible")
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "    Wait For Elements State    ${h}    hidden" in first
+        assert second == first
+
+    def test_visibility_check_on_the_last_line_survives_a_leaked_json_brace(self):
+        """The model sometimes leaks `"}` after the code; the pipeline strips it.
+        The rewrite must see the stripped line, or the last-line check — where
+        a "verify X is visible" step usually sits — ships unchanged."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Click    id=go\n"
+               '    Get Element States    ${h}    contains    visible"}')
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert out.endswith("\n    Wait For Elements State    ${h}    visible")
+
+    # The q08 file as the assembler writes it (bench run 0ee28976-9924-4385-90ae-6a7259235cb2),
+    # with the read locator left BARE so the pipeline's css= prefixing runs first.
+    _Q08_RAW = ("*** Settings ***\nLibrary    Browser\nLibrary    BuiltIn\nLibrary    Collections\n\n"
+                "*** Variables ***\n${browser}    chromium\n${headless}    True\n"
+                "${url}    https://the-internet.herokuapp.com/dropdown\n"
+                "${dropdown_locator}    id=dropdown\n\n"
+                "*** Test Cases ***\nGenerated Test\n"
+                "    [Documentation]    Auto-generated test case\n"
+                "    New Browser    ${browser}    headless=${headless}\n"
+                "    New Context    viewport={'width': 1920, 'height': 1080}\n"
+                "    New Page    ${url}\n"
+                "    Select Options By    ${dropdown_locator}    label    Option 2\n"
+                "    ${selected_option}=    Get Text    #dropdown\n"
+                "    Should Contain    ${selected_option}    Option 2\n"
+                "    Close Browser")
+
+    def test_select_text_read_rewritten_by_the_pipeline(self):
+        """The rewrite is only worth anything if it is actually wired in here.
+
+        Without this test, deleting the rewrite call from the pipeline leaves the
+        whole suite green. The bare `#dropdown` also proves the rewrite sees the
+        line AFTER normalize_robot_code made it `css=#dropdown`, which is what lets
+        it match the select's `id=dropdown`.
+        """
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=self._Q08_RAW))
+        assert "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n" in out
+        assert "Get Text" not in out
+
+    def test_select_text_read_rewrite_survives_a_repair_round_trip(self):
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=self._Q08_RAW))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "Get Selected Options" in first
+        assert second == first
+
+    def test_select_text_read_on_the_last_line_survives_a_leaked_json_brace(self):
+        raw = (self._Q08_RAW.replace(
+            "    ${selected_option}=    Get Text    #dropdown\n    Should Contain    ${selected_option}    Option 2\n"
+            "    Close Browser", "    Get Text    #dropdown    contains    Option 2") + '"}')
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert out.endswith("\n    Get Selected Options    css=#dropdown    label    contains    Option 2")
+
+    def test_typed_value_read_rewritten_by_the_pipeline(self):
+        """Bench run 8adaa3c8-ab51-4f78-8f69-38f161ba8360's shape: typed, then the
+        value ATTRIBUTE read back ('' — the run failed). Wired in, and stable
+        across a repair round."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+               "${customer_city_locator}    id=customer.address.city\n\n"
+               "*** Test Cases ***\nT\n"
+               "    Fill Text    ${customer_city_locator}    NewYork\n"
+               "    ${city_value}=    Get Attribute    ${customer_city_locator}    value\n"
+               "    Should Be True    '${city_value}' == 'NewYork'")
+        first = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        second = ds.extract_and_normalize_robot_code(self._task_output(raw=first))
+        assert "    ${city_value}=    Get Property    ${customer_city_locator}    value\n" in first
+        assert second == first
+
+    def test_text_check_rewritten_by_the_pipeline_after_the_select_rewrite(self):
+        """An AssemblyOutput holding q08's select check AND a plain text check: the select read becomes
+        Get Selected Options and its Should Contain stays (a list, not text); the text check becomes a
+        whole-word, any-letter-case Should Match Regexp. Wired in, and stable across a repair round."""
+        code = self._Q08_RAW.replace(
+            "    New Page    ${url}\n",
+            "    New Page    ${url}\n"
+            "    ${heading}=    Get Text    css=h3\n"
+            "    Should Contain    ${heading}    Dropdown List    ignore_case=True\n",
+        ).replace("    Should Contain    ${selected_option}    Option 2\n",
+                  "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n")
+        first = ds.extract_and_normalize_robot_code(self._task_output(pydantic=code))
+        second = ds.extract_and_normalize_robot_code(self._task_output(pydantic=first))
+        assert "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n" in first
+        assert "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n" in first
+        assert ("    Should Match Regexp    ${heading}    (?i)(?<![0-9a-z_])Dropdown List(?![0-9a-z_])    "
+                "msg='${heading}' does not contain 'Dropdown List' (whole words, any letter case)    "
+                "values=False\n") in first
+        assert "Should Contain    ${heading}" not in first
+        assert second == first
+
+    def test_a_select_check_in_another_spelling_stays_for_the_pass_checker(self):
+        """q08 with the select as `css=select#dropdown` and its read as `id=dropdown`: the select rewrite does
+        not see one element, and the text-check rewrite must leave the cannot-fail check as the Should Contain
+        the History drawer's checker reads. Wired in: the check line stays and the suggestion is still made."""
+        from src.backend.core.pass_quality import pass_suggestions
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${dropdown_trigger}    css=select#dropdown\n"
+                "${dropdown_verification}    id=dropdown\n\n"
+                "*** Test Cases ***\nGenerated Test\n"
+                "    New Browser    chromium    headless=True\n"
+                "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n"
+                "    Close Browser\n")
+        query = ("Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, "
+                 "and verify Option 2 is selected")
+        out = ds.extract_and_normalize_robot_code(self._task_output(pydantic=code))
+        assert "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n" in out
+        assert "Should Match Regexp" not in out
+        assert pass_suggestions(out, query) == [
+            "The check reads the whole dropdown's text, which lists every option. "
+            "Consider checking the selected option instead."]
+
+    # The read rewrites and the text-check rewrite are optional and skip-only: one that raises must cost only its
+    # own rewrite, never the paid-for generation. The rest of cleanup (the other rewrites, the Browser timeout) still runs.
+    _N1_RAW = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+               "${customer_city_locator}    id=customer.address.city\n\n"
+               "*** Test Cases ***\nT\n"
+               "    Fill Text    ${customer_city_locator}    NewYork\n"
+               "    ${city_value}=    Get Attribute    ${customer_city_locator}    value\n"
+               "    Should Be True    '${city_value}' == 'NewYork'")
+
+    @pytest.mark.parametrize("failing, raw, still_rewritten", [
+        ("rewrite_select_text_reads", _N1_RAW,
+         "    ${city_value}=    Get Property    ${customer_city_locator}    value\n"),
+        ("rewrite_typed_value_reads", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+        ("rewrite_text_checks_whole_word", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+    ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises"])
+    def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
+            self, caplog, failing, raw, still_rewritten):
+        with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),
+              caplog.at_level(logging.WARNING, logger="src.backend.services.dryrun_service")):
+            out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Library    Browser    timeout=30s" in out
+        assert still_rewritten in out
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert [r.getMessage() for r in warnings] == [
+            f"{failing} failed; code left unchanged by it (non-blocking)"]
+        assert warnings[0].exc_info is not None
+
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert "timeout=" not in out
+
+
+# ---------------------------------------------------------------------------
+# F1 change-wait — the two never-failing lines on every repair round, and
+# surviving the shared cleanup pipeline
+# ---------------------------------------------------------------------------
+
+_CW_HEAD = (
+    "*** Settings ***\n"
+    "Library    Browser    timeout=30s\n"
+    "Library    BuiltIn\n"
+    "\n"
+    "*** Variables ***\n"
+    "${url}    https://example.com\n"
+    "${btn_locator}    id=go\n"
+    "${total_locator}    css=#total\n"
+    "${banner}    id=banner\n"
+    "\n"
+    "*** Test Cases ***\n"
+    "Generated Test\n"
+    "    New Browser    chromium    headless=True\n"
+    "    New Page    ${url}\n"
+    "    Click    ${btn_locator}\n"
+    "    ${total}=    Get Text    ${total_locator}\n"
+)
+_CW_BASE = _CW_HEAD + "    Log    ${total}\n    Close Browser\n"
+_CW_WAITS = ({"read_locator": "css=#total", "action_locator": "id=go"},)
+_CW_BEFORE = ("    ${total_locator_before}=    Run Keyword And Ignore Error    "
+              "Get Text    ${total_locator}")
+_CW_WAIT = ("    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms"
+            "    Get Text    ${total_locator}    !=    ${total_locator_before}[1]")
+
+
+def _cw_inserted(code: str) -> str:
+    from src.backend.crew_ai.robot_code_normalizer import insert_change_waits
+    return insert_change_waits(code, _CW_WAITS)
+
+
+class TestChangeWaitsOnRepair:
+    """validate_and_repair puts the pair into every repaired test it re-checks and returns."""
+
+    def _settings(self, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = True
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _gate(self, robot_code, repaired, **kwargs):
+        """One failed dryrun, one repair that extracts to `repaired`, then a pass."""
+        with patch.object(ds, "settings", self._settings()), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})), \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=repaired):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [
+                {"passed": False, "errors": "bad kw", "exit_code": 1},
+                {"passed": True, "errors": "", "exit_code": 0},
+            ]
+            out = ds.validate_and_repair("rid", robot_code, "gemini", "m", None, **kwargs)
+        return out, mock_rc
+
+    def test_a_repair_without_the_pair_gets_it_before_the_gate_re_checks_it(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: the pair really is placed in this file
+        out, mock_rc = self._gate(inserted.replace("Click", "Cilck"), _CW_BASE,
+                                  change_waits=_CW_WAITS)
+        assert out["dryrun_status"] == "passed"
+        assert out["code"] == inserted
+        assert out["code"].count(_CW_BEFORE) == 1
+        assert out["code"].count(_CW_WAIT) == 1
+        # the dryrun re-ran on the text WITH the pair, not on the bare repair
+        assert mock_rc.dryrun.call_args_list[1].args[1] == inserted
+
+    def test_a_repair_that_already_holds_the_pair_still_has_it_exactly_once(self):
+        inserted = _cw_inserted(_CW_BASE)
+        out, mock_rc = self._gate(inserted.replace("Click", "Cilck"), inserted,
+                                  change_waits=_CW_WAITS)
+        assert out["code"] == inserted
+        assert out["code"].count(_CW_BEFORE) == 1
+        assert out["code"].count(_CW_WAIT) == 1
+        assert mock_rc.dryrun.call_args_list[1].args[1] == inserted
+
+    def test_no_change_waits_leaves_the_repaired_code_exactly_as_extracted(self):
+        for kwargs in ({}, {"change_waits": None}, {"change_waits": ()}):
+            out, mock_rc = self._gate(_CW_BASE.replace("Click", "Cilck"), _CW_BASE, **kwargs)
+            assert out["code"] == _CW_BASE, kwargs
+            assert mock_rc.dryrun.call_args_list[1].args[1] == _CW_BASE, kwargs
+
+    def test_a_repair_that_only_lacks_the_pair_is_no_progress(self):
+        """The no-change check compares what the gate would re-check, so a repair
+        that differs from the current code only by the missing pair stops the loop
+        instead of burning a container run on identical text."""
+        inserted = _cw_inserted(_CW_BASE)
+        with patch.object(ds, "settings", self._settings(max_fixes=3)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})), \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=_CW_BASE):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", inserted, "gemini", "m", None,
+                                         change_waits=_CW_WAITS)
+        assert out["dryrun_status"] == "failed"
+        assert mock_rc.dryrun.call_count == 1
+        assert out["code"] == inserted
+
+
+class TestRepairLlmIsHandedTheTestWithoutThePair:
+    """The repair LLM never sees the two inserted lines; the gate still checks the code WITH them."""
+
+    def _settings(self, max_fixes=2):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = True
+        s.MAX_DRYRUN_FIXES = max_fixes
+        s.DRYRUN_TIMEOUT = 120
+        return s
+
+    def _gate(self, robot_code, repaired, dryruns, max_fixes=2, **kwargs):
+        with patch.object(ds, "settings", self._settings(max_fixes)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=repaired):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = dryruns
+            out = ds.validate_and_repair("rid", robot_code, "gemini", "m", None, **kwargs)
+        return out, mock_rc, mock_repair
+
+    _FAIL = {"passed": False, "errors": "bad kw", "exit_code": 1}
+    _PASS = {"passed": True, "errors": "", "exit_code": 0}
+
+    def test_the_repair_gets_the_code_without_the_pair_and_the_dryrun_got_it_with(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: there is a pair to hide
+        repaired = _CW_BASE.replace("Log    ${total}", "Log    total=${total}")  # a proven step, edited
+        out, mock_rc, mock_repair = self._gate(
+            inserted, repaired, [self._FAIL, self._PASS], change_waits=_CW_WAITS)
+        assert mock_rc.dryrun.call_args_list[0].args[1] == inserted
+        assert mock_repair.call_args.args[1] == _CW_BASE
+        assert _CW_BEFORE not in mock_repair.call_args.args[1]
+        assert _CW_WAIT not in mock_repair.call_args.args[1]
+        # the repaired code comes back with the pair, and that is what the gate re-checked and returned
+        assert out["code"] == _cw_inserted(repaired)
+        assert out["code"].count(_CW_BEFORE) == 1 and out["code"].count(_CW_WAIT) == 1
+        assert mock_rc.dryrun.call_args_list[1].args[1] == out["code"]
+        assert out["dryrun_status"] == "passed"
+
+    def test_a_repair_that_returns_exactly_the_hidden_text_is_no_progress(self):
+        inserted = _cw_inserted(_CW_BASE)
+        out, mock_rc, mock_repair = self._gate(
+            inserted, _CW_BASE, [self._FAIL, self._FAIL, self._FAIL], max_fixes=3, change_waits=_CW_WAITS)
+        assert mock_repair.call_args.args[1] == _CW_BASE
+        assert mock_repair.call_count == 1
+        assert mock_rc.dryrun.call_count == 1          # re-inserted, equal to `code`: stopped before a re-check
+        assert out["dryrun_status"] == "failed"
+        assert out["code"] == inserted
+
+    def test_without_change_waits_the_repair_is_handed_the_code_exactly_as_it_is(self):
+        # No marks means no pair of ours: whatever lines the code holds are not ours to hide.
+        inserted = _cw_inserted(_CW_BASE)
+        for kwargs in ({}, {"change_waits": None}, {"change_waits": ()}):
+            _, _, mock_repair = self._gate(inserted, _CW_BASE, [self._FAIL, self._PASS], **kwargs)
+            assert mock_repair.call_args.args[1] == inserted, kwargs
+
+    def test_code_without_a_pair_is_handed_over_unchanged(self):
+        _, _, mock_repair = self._gate(
+            _CW_BASE, _CW_BASE.replace("Log    ${total}", "Log    total=${total}"), [self._FAIL, self._PASS],
+            change_waits=_CW_WAITS)
+        assert mock_repair.call_args.args[1] == _CW_BASE
+
+    def test_every_repair_round_hides_the_pair_again(self):
+        inserted = _cw_inserted(_CW_BASE)
+        first = _CW_BASE.replace("Log    ${total}", "Log    total=${total}")
+        with patch.object(ds, "settings", self._settings(3)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code",
+                          side_effect=[first, first.replace("total=", "value=")]):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [self._FAIL, self._FAIL, self._PASS]
+            out = ds.validate_and_repair("rid", inserted, "gemini", "m", None, change_waits=_CW_WAITS)
+        assert [c.args[1] for c in mock_repair.call_args_list] == [_CW_BASE, first]
+        assert all(c.args[1].count("Wait Until Keyword Succeeds") == 0 for c in mock_repair.call_args_list)
+        assert out["code"].count(_CW_WAIT) == 1
+
+
+class TestChangeWaitsSurviveTheCleanup:
+    """A repair round normalizes code that already holds the pair."""
+
+    def _task_output(self, raw):
+        out = MagicMock()
+        out.pydantic = None
+        out.json_dict = None
+        out.raw = raw
+        return out
+
+    def test_the_pair_comes_through_extract_and_normalize_byte_identical(self):
+        inserted = _cw_inserted(_CW_BASE)
+        assert inserted != _CW_BASE  # control: there is a pair to survive
+        out = ds.extract_and_normalize_robot_code(self._task_output(inserted))
+        assert out == inserted.rstrip("\n")  # the pipeline's own end-of-file trim, nothing else
+        assert out.count(_CW_BEFORE + "\n") == 1
+        assert out.count(_CW_WAIT + "\n") == 1
+
+    def test_the_other_rewrites_still_fire_beside_the_pair(self):
+        banner = "    Get Element States    ${banner}    contains    visible\n"
+        # the banner check sits BEFORE the first action line: after it, a Get other than Get Text refuses the file
+        click = "    Click    ${btn_locator}\n"
+        base = _CW_HEAD.replace(click, banner + click) + "    Close Browser\n"
+        with_pair = _cw_inserted(base)
+        assert with_pair != base  # control: the pair is placed in this file too
+        out_with = ds.extract_and_normalize_robot_code(self._task_output(with_pair))
+        out_without = ds.extract_and_normalize_robot_code(self._task_output(base))
+        wait_banner = "    Wait For Elements State    ${banner}    visible\n"
+        # control: the visibility rewrite fires in BOTH files
+        assert wait_banner in out_without and "Get Element States" not in out_without
+        assert wait_banner in out_with and "Get Element States" not in out_with
+        # the pair is there once, and the same file without it differs by exactly those two lines
+        assert out_with.count(_CW_BEFORE + "\n") == 1
+        assert out_with.count(_CW_WAIT + "\n") == 1
+        assert (out_with.replace(_CW_BEFORE + "\n", "").replace(_CW_WAIT + "\n", "")
+                == out_without)
 
 
 # ---------------------------------------------------------------------------
@@ -537,3 +1048,42 @@ def test_validate_and_repair_passes_via_client(monkeypatch):
             "gemini", "gemini-2.5-flash", progress_queue=None)
     assert out["dryrun_status"] == "passed"
     rc.dryrun.assert_called_once()
+
+
+def test_dryrun_container_mounts_only_the_runs_dryrun_directory(tmp_path):
+    """Same tenant boundary as run_test_in_container: the gate container gets
+    the run's dryrun/ directory and nothing else, at the in-container path the
+    robot --dryrun command already uses."""
+    captured = {}
+    client = MagicMock()
+
+    def _capture(**kw):
+        captured.update(kw)
+        raise _Captured()
+    client.containers.run.side_effect = _capture
+
+    store = MagicMock()
+    store.run_dir.return_value = tmp_path / "r1"
+
+    with patch.object(ds, "get_artifact_store", return_value=store), \
+         patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch.object(ds, "_force_remove_stale_container"):
+        try:
+            ds.run_dryrun_in_container(client, "r1", "*** Test Cases ***\n")
+        except _Captured:
+            pass
+
+    assert captured["volumes"] == {
+        os.path.join(str(tmp_path), "r1", "dryrun"): {
+            "bind": "/app/robot_tests/r1/dryrun", "mode": "rw"},
+    }
+    assert captured["command"] == [
+        "robot", "--dryrun",
+        "--outputdir", "/app/robot_tests/r1/dryrun",
+        "/app/robot_tests/r1/dryrun/dryrun.robot",
+    ]
+    # The mount is only correct if the file the command names is inside it.
+    # Asserting the config dict alone passes even when the two paths disagree.
+    mount_source = next(iter(captured["volumes"]))
+    assert os.path.exists(os.path.join(mount_source, "dryrun.robot"))

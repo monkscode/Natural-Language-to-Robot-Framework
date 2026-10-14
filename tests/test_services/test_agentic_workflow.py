@@ -39,6 +39,8 @@ import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
 
+from src.backend.crew_ai.crew import RunCrewResult
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -65,8 +67,9 @@ def _make_run_crew_result(
     json_dict_code=None,
     raw_code=None,
 ):
-    """Build the 5-tuple returned by run_crew() — the single-task ASSEMBLER
-    crew (Task 16). Delivered code comes from tasks[-1] (the assembler)."""
+    """Build the RunCrewResult returned by run_crew() — the single-task
+    ASSEMBLER crew (Task 16). Delivered code comes from tasks[-1] (the
+    assembler)."""
     # ---- tasks[-1]: robot code output ----
     task2 = MagicMock()
     if pydantic_code is not None:
@@ -94,7 +97,20 @@ def _make_run_crew_result(
     llm_monitor = MagicMock()
     llm_monitor.get_numeric_stats.return_value = {}
 
-    return (MagicMock(), crew, None, {}, llm_monitor)
+    shared_llm = MagicMock()
+    shared_llm.get_workflow_usage.return_value = {
+        "llm_calls": 8, "prompt_tokens": 160, "completion_tokens": 40,
+        "tokens": 200, "cost": 0.0008,
+    }
+    stage_metrics = {
+        "planner": {"duration_s": 1.0, "llm_calls": 3, "prompt_tokens": 60,
+                    "completion_tokens": 15, "tokens": 75, "cost": 0.0003},
+        "assembler": {"duration_s": 2.0, "llm_calls": 5, "prompt_tokens": 100,
+                      "completion_tokens": 25, "tokens": 125, "cost": 0.0005},
+    }
+
+    return RunCrewResult(MagicMock(), crew, None, {}, llm_monitor,
+                         stage_metrics, shared_llm, {"assembly_output": 1})
 
 
 def _run_workflow(query="login to github.com", provider="gemini", model="gemini-2.5-flash",
@@ -301,6 +317,28 @@ class TestRunWorkflowInThread:
         assert event["status"] == "error"
         assert "boom" in event["message"]
 
+    def test_secret_redacted_in_queued_error_message(self):
+        """A secret in the raised exception's text never reaches the SSE queue.
+
+        The queued message goes straight to the user's browser, unlike the
+        logging.error call on the line above it (which has its own redacting
+        log filter, out of scope here).
+        """
+        releaser = MagicMock()
+        leaked_key = "AIza" + "x" * 35
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   side_effect=RuntimeError(f"call failed: key={leaked_key}")):
+            from src.backend.services.workflow_service import run_workflow_in_thread
+            q = Queue()
+            run_workflow_in_thread(q, "query", "gemini", "model", releaser=releaser)
+
+        event = q.get_nowait()
+        assert event["status"] == "error"
+        assert event["message"].startswith("Workflow thread failed: ")
+        assert leaked_key not in event["message"]
+        assert "[REDACTED]" in event["message"]
+        releaser.done.assert_called_once()
+
     def test_releaser_done_called_in_finally(self):
         """releaser.done() is called regardless of success or failure."""
         releaser = MagicMock()
@@ -489,17 +527,67 @@ class TestWorkflowCompletionPaths:
         assert complete["robot_code"]
         assert "error" not in _event_statuses(events)
 
+    def test_unverified_gate_forwards_the_real_reason(self):
+        """The gate's own reason must reach the client.
+
+        'unverified' covers several causes — the executor hop being down, the
+        runner image missing, the container producing no output.xml — and the
+        gate records which one in `message`. It was dropped here, so the UI had
+        nothing to show and asserted a single hard-coded cause ("Docker
+        unavailable"). That actively misdirects: the permission bug fixed in
+        2dff0c4 made the gate fail with Docker perfectly healthy.
+
+        dryrun_errors cannot carry it — only the 'failed' exit sets that key.
+        """
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": "dryrun produced no output.xml — treating as "
+                               "infrastructure failure",
+                    "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next((e for e in events if e.get("status") == "complete"), None)
+        assert complete is not None
+        assert complete["dryrun_status"] == "unverified"
+        assert "no output.xml" in complete["dryrun_message"]
+
+    def test_gate_reason_is_redacted_before_it_reaches_the_client(self):
+        """The reason is runner/executor text; the execute path redacts the same
+        text, so the generation stream must too."""
+        fake_key = "AIzaSy" + "B" * 33  # shaped like a Google API key, not a real one
+
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": f"GEMINI_API_KEY={fake_key} rejected by the runner",
+                    "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert fake_key not in complete["dryrun_message"]
+        assert "[REDACTED]" in complete["dryrun_message"]
+        assert "rejected by the runner" in complete["dryrun_message"]
+
+    def test_plain_gate_reason_arrives_unchanged(self):
+        message = "dryrun produced no output.xml — treating as infrastructure failure"
+
+        def unverified_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "unverified",
+                    "message": message, "repair_usage": {}}
+        events = _run_workflow(gate=unverified_gate)
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["dryrun_message"] == message
+
+    def test_passed_gate_carries_no_dryrun_message(self):
+        """A clean run must not grow a warning field the UI would render."""
+        events = _run_workflow()
+        complete = next((e for e in events if e.get("status") == "complete"), None)
+        assert "dryrun_message" not in complete
+
     def test_repair_cost_folded_into_crewai_and_total_metrics(self):
         """The gate's repair_usage is added into crewai_*/total_* WorkflowMetrics
         and the main-crew calls are NOT double-counted (decision 5 / §5)."""
-        from src.backend.core.workflow_metrics import calculate_crewai_cost
-
-        # Baseline crewai metrics from the mocked crew usage (200 tokens, 8 calls).
-        base = calculate_crewai_cost(
-            {'total_tokens': 200, 'prompt_tokens': 160, 'completion_tokens': 40,
-             'successful_requests': 8},
-            model_name="gemini-2.5-flash",
-        )
+        # Baseline crewai metrics now come from the shared wrapper's
+        # get_workflow_usage(), not the assembler crew's calculate_usage_metrics()
+        # — same numbers in production, but the mock defines them here.
+        base = _make_run_crew_result().shared_llm.get_workflow_usage()
         repair_usage = {'llm_calls': 2, 'cost': 0.004, 'tokens': 50,
                         'prompt_tokens': 40, 'completion_tokens': 10}
 
@@ -534,6 +622,113 @@ class TestWorkflowCompletionPaths:
         # Totals derive from the CrewAI bucket, so they include the repair cost too.
         assert m.total_llm_calls == base['llm_calls'] + 2
         assert abs(m.total_cost - round(base['cost'] + 0.004, 6)) < 1e-9
+
+    def test_observability_fields_land_on_the_metrics_row(self):
+        """The T3/T5 payloads reach WorkflowMetrics, not just the log."""
+        gate_out = {
+            "code": VALID_ROBOT_CODE, "dryrun_status": "failed",
+            "dryrun_errors": "No keyword with name 'Cilck' found",
+            "dryrun_attempts": 3, "dryrun_repairs": 2,
+            "repair_duration_s": 4.25,
+            "repair_usage": {"llm_calls": 2, "cost": 0.004, "tokens": 50,
+                             "prompt_tokens": 40, "completion_tokens": 10},
+            "guardrail_attempts": {"repair_output": 3},
+        }
+        captured = {}
+
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=lambda wid, code, *a, **k: gate_out), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = (
+                lambda metrics, **kw: captured.__setitem__("m", metrics))
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        m = captured["m"]
+        assert m.dryrun_status == "failed"
+        assert m.dryrun_attempts == 3
+        assert m.dryrun_repairs == 2
+        # Wall time of the whole run — distinct from execution_time, which is
+        # the browser-use figure and is 0 here (no browser metrics).
+        assert m.workflow_duration_s is not None and m.workflow_duration_s >= 0.0
+
+        # Angle D: repair is a third stage alongside planner and assembler.
+        assert set(m.crew_stage_metrics) == {"planner", "assembler", "repair"}
+        assert m.crew_stage_metrics["repair"]["duration_s"] == 4.25
+        assert m.crew_stage_metrics["repair"]["llm_calls"] == 2
+
+        # Both RobotTasks counters merged: main crew + repair mini-crew.
+        assert m.guardrail_attempts == {"assembly_output": 1, "repair_output": 3}
+
+    def test_stage_metrics_omit_repair_when_none_ran(self):
+        captured = {}
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=_passthrough_gate), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = (
+                lambda metrics, **kw: captured.__setitem__("m", metrics))
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        assert set(captured["m"].crew_stage_metrics) == {"planner", "assembler"}
+
+    def test_repair_stage_survives_a_usage_collection_failure(self):
+        """A repair that spent wall time must appear even with no usage figures.
+
+        dryrun_service increments dryrun_repairs BEFORE invoking the repair
+        crew and bills repair_duration_s in a `finally`, so a repair that
+        raised, or one whose usage extraction failed, still consumed real
+        time. _repair_usage_dict() swallows its own errors and returns {} —
+        cost tracking must never break the gate — so keying the stage off
+        repair_usage drops the entire stage on that path. The seconds then
+        vanish from the per-stage panel while remaining inside
+        workflow_duration_s, which is exactly the kind of quiet mismatch the
+        stage breakdown exists to prevent.
+
+        Zero-filling keeps the key set identical to planner and assembler, so
+        `GROUP BY stage` on the Grafana panel still needs no special case.
+        """
+        gate_out = {
+            "code": VALID_ROBOT_CODE, "dryrun_status": "passed",
+            "dryrun_attempts": 2, "dryrun_repairs": 1,
+            "repair_duration_s": 12.5,
+            "repair_usage": {},  # usage collection failed; the repair still ran
+        }
+        captured = {}
+        with patch("src.backend.services.workflow_service.run_crew",
+                   return_value=_make_run_crew_result()), \
+             patch("src.backend.services.workflow_service.validate_and_repair",
+                   side_effect=lambda wid, code, *a, **k: gate_out), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+            mock_s.return_value.read_browser_metrics.return_value = {}
+            mock_coll.return_value.record_workflow.side_effect = (
+                lambda metrics, **kw: captured.__setitem__("m", metrics))
+
+            from src.backend.services.workflow_service import run_agentic_workflow
+            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
+
+        stages = captured["m"].crew_stage_metrics
+        assert set(stages) == {"planner", "assembler", "repair"}
+        assert stages["repair"]["duration_s"] == 12.5
+        # Same keys as the other two stages, zeroed rather than absent.
+        assert set(stages["repair"]) == set(stages["planner"])
+        assert stages["repair"]["llm_calls"] == 0
+        assert stages["repair"]["cost"] == 0.0
+        assert stages["repair"]["tokens"] == 0
 
     def test_run_crew_exception_yields_error_event(self):
         """If run_crew() raises, the generator yields an error event."""
@@ -579,21 +774,21 @@ class TestWorkflowCompletionPaths:
         """When run_crew returns hint_metadata, it is placed in _hint_metadata_cache.
 
         run_agentic_workflow (generate-only path) stores hint_metadata but does NOT
-        consume it — that happens later in stream_execute_only via _process_learning.
+        consume it — that happens later in stream_execute_only via _process_learning_record.
         The cache entry must exist under the workflow_id emitted in the complete event,
         and its data (minus the internal _stored_at timestamp) must match hint_data.
         """
         import src.backend.services.workflow_service as ws
         # Full production schema: count (injected), available (candidates before cap), sources.
-        # _process_learning reads both count and available; omitting available causes it to
+        # _process_learning_record reads both count and available; omitting available causes it to
         # silently fall back to count, masking a regression in the generation contract.
         hint_data = {"planner": {"count": 3, "available": 7, "sources": ["structural"]}}
 
         # Build a run_crew mock that returns non-empty hint_metadata
         crew_result = _make_run_crew_result()
-        # Override the hint_metadata element (4th in the 5-tuple)
-        crew_result_with_hints = (crew_result[0], crew_result[1], crew_result[2],
-                                  hint_data, crew_result[4])
+        # Override just hint_metadata; _replace keeps the other members intact
+        # so this test does not break when run_crew's arity changes.
+        crew_result_with_hints = crew_result._replace(hint_metadata=hint_data)
 
         with patch("src.backend.services.workflow_service.run_crew",
                    return_value=crew_result_with_hints), \
@@ -628,14 +823,23 @@ class TestWorkflowCompletionPaths:
         ws._hint_metadata_cache.pop(workflow_id, None)
 
     def test_metrics_collection_failure_does_not_abort_workflow(self):
-        """If calculate_usage_metrics() fails, the workflow still completes."""
+        """If the usage read fails, the workflow still completes.
+
+        This used to raise from crew.calculate_usage_metrics(), which the
+        metrics block stopped calling — it reads shared_llm.get_workflow_usage()
+        instead, one wrapper per workflow being exact whatever the crew shape.
+        Nothing raised, so the test passed while exercising none of the failure
+        path it is named for. Raise from the method actually on the path.
+        """
         result = _make_run_crew_result()
-        # Make calculate_usage_metrics raise
-        result[1].calculate_usage_metrics.side_effect = Exception("metrics error")
+        result.shared_llm.get_workflow_usage.side_effect = Exception("metrics error")
 
         events = _run_workflow(crew_result=result)
         # Should still complete — metrics failures are non-fatal
         assert any(e.get("status") == "complete" for e in events)
+        # Pins the test to a live path: if the metrics block stops calling this
+        # too, the assertion above would pass again without anything raising.
+        assert result.shared_llm.get_workflow_usage.called
 
 
 class TestTotalLlmCallsUsesActualCalls:
@@ -718,3 +922,141 @@ class TestTotalLlmCallsUsesActualCalls:
             m = self._capture_metrics(
                 {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': bad}})
             assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"
+
+
+class TestChangeWaitsReachTheGate:
+    """F1: the marks run_crew returns become the two inserted lines, and reach the gate."""
+
+    CODE = (
+        "*** Settings ***\n"
+        "Library    Browser    timeout=30s\n"
+        "Library    BuiltIn\n"
+        "\n"
+        "*** Variables ***\n"
+        "${url}    https://example.com\n"
+        "${btn_locator}    id=go\n"
+        "${total_locator}    css=#total\n"
+        "\n"
+        "*** Test Cases ***\n"
+        "Generated Test\n"
+        "    New Browser    chromium    headless=True\n"
+        "    New Page    ${url}\n"
+        "    Click    ${btn_locator}\n"
+        "    ${total}=    Get Text    ${total_locator}\n"
+        "    Log    ${total}\n"
+        "    Close Browser\n"
+    )
+    WAITS = ({"read_locator": "css=#total", "action_locator": "id=go"},)
+    BEFORE = ("    ${total_locator_before}=    Run Keyword And Ignore Error    "
+              "Get Text    ${total_locator}\n")
+    WAIT = ("    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms"
+            "    Get Text    ${total_locator}    !=    ${total_locator_before}[1]\n")
+
+    def _run(self, crew_result):
+        seen = {}
+
+        def gate(workflow_id, code, *a, **k):
+            seen["code"] = code
+            seen["kwargs"] = k
+            return {"code": code, "dryrun_status": "passed", "repair_usage": {}}
+
+        events = _run_workflow(crew_result=crew_result, gate=gate)
+        return seen, events
+
+    def _normalized(self, crew_result):
+        from src.backend.services.dryrun_service import extract_and_normalize_robot_code
+        return extract_and_normalize_robot_code(crew_result.crew.tasks[-1].output)
+
+    def test_a_result_carrying_a_wait_puts_the_pair_into_the_code_and_forwards_the_wait(self):
+        crew_result = _make_run_crew_result(raw_code=self.CODE)._replace(change_waits=self.WAITS)
+        bare = self._normalized(crew_result)
+        seen, events = self._run(crew_result)
+
+        assert seen["code"] != bare  # control: the pair is placed in this file
+        assert seen["code"].count(self.BEFORE) == 1
+        assert seen["code"].count(self.WAIT) == 1
+        assert seen["code"].replace(self.BEFORE, "").replace(self.WAIT, "") == bare
+        assert seen["kwargs"]["change_waits"] == self.WAITS
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["robot_code"] == seen["code"]
+
+    def test_an_eight_member_result_still_works_and_changes_nothing(self):
+        crew_result = tuple(_make_run_crew_result(raw_code=self.CODE))[:8]
+        assert len(crew_result) == 8
+        seen, events = self._run(crew_result)
+
+        assert seen["code"] == self._normalized(_make_run_crew_result(raw_code=self.CODE))
+        assert seen["kwargs"]["change_waits"] == ()
+        assert "error" not in _event_statuses(events)
+
+    def test_a_result_built_without_the_field_reads_as_no_waits(self):
+        crew_result = _make_run_crew_result(raw_code=self.CODE)
+        assert crew_result.change_waits == ()
+        seen, _events = self._run(crew_result)
+
+        assert seen["code"] == self._normalized(crew_result)
+        assert self.BEFORE not in seen["code"]
+        assert seen["kwargs"]["change_waits"] == ()
+
+
+class TestProviderDidNotAnswerReachesTheStream:
+    def test_final_timeout_becomes_a_plain_sentence(self):
+        import litellm
+
+        from src.backend.crew_ai.provider_retry import RetryReport, attach_report
+
+        exc = litellm.Timeout(message="litellm.Timeout: Connection timed out after None seconds.",
+                              model="gemini-3.5-flash", llm_provider="vertex_ai")
+        attach_report(exc, RetryReport("vertex_ai/gemini-3.5-flash", 3, 3, 0,
+                                       (60.0, 120.0, 240.0), 420.4, "Timeout"))
+        with patch("src.backend.services.workflow_service.run_crew", side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            from src.backend.services.workflow_service import run_agentic_workflow
+            events = list(run_agentic_workflow("login to github.com", "gemini", "gemini-2.5-flash"))
+        error = next(e for e in events if e.get("status") == "error")
+        assert error["message"].startswith("The model provider did not answer.")
+        assert "workflow_id" in error
+
+
+class TestRateLimitSentenceFollowsTheRunsProvider:
+    """W5.1 Task 2b: the 429 sentence comes from run_agentic_workflow's model_provider,
+    not from exc.llm_provider (LiteLLM labels Google AI Studio errors "vertex_ai" too)
+    and not from settings (a caller may pass another provider for one run)."""
+
+    def _error_message(self, provider, tmp_path):
+        import litellm
+
+        from src.backend.services import workflow_service
+
+        exc = litellm.RateLimitError(message="VertexAIException - 429 Resource exhausted, quota exceeded",
+                                     llm_provider="vertex_ai", model="gemini-3.5-flash")
+        credentials = tmp_path / "credentials.json"
+        credentials.write_text("{}", encoding="utf-8")
+        with patch("src.backend.services.workflow_service.run_crew", side_effect=exc), \
+             patch("src.backend.services.workflow_service.get_temp_metrics_storage"), \
+             patch("src.backend.services.workflow_service.get_workflow_metrics_collector"), \
+             patch.object(workflow_service.settings, "VERTEXAI_PROJECT", "p"), \
+             patch.object(workflow_service.settings, "VERTEXAI_LOCATION", "global"), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key",
+                                     "VERTEXAI_CREDENTIALS": str(credentials)}):
+            events = list(workflow_service.run_agentic_workflow(
+                "login to github.com", provider, "gemini-3.5-flash"))
+        error = next(e for e in events if e.get("status") == "error")
+        assert "workflow_id" in error
+        return error["message"]
+
+    def test_vertex_is_not_told_to_switch_to_vertex(self, tmp_path):
+        msg = self._error_message("vertex", tmp_path)
+        assert msg.startswith("Vertex AI is out of capacity for this model")
+        assert "switch MODEL_PROVIDER" not in msg
+
+    def test_gemini_keeps_the_free_tier_advice(self, tmp_path):
+        msg = self._error_message("gemini", tmp_path)
+        assert "switch MODEL_PROVIDER to vertex" in msg
+
+    def test_local_gets_no_provider_advice(self, tmp_path):
+        msg = self._error_message("local", tmp_path)
+        assert msg == ("The model provider rate-limited this request (quota exceeded). "
+                       "Wait a moment and try again.")

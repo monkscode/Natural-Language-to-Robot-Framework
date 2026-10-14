@@ -222,14 +222,19 @@ class TestHistoryEndpoint:
         ids = {r["run_id"] for r in body["runs"]}
         assert ids == {"run-u1-a", "run-u1-b"}
         # Identity columns are not echoed back to non-admins.
-        assert all("user_email" not in r and "user_id" not in r for r in body["runs"])
+        # The internal user id stays admin-only; the EMAIL now ships to every
+        # caller. A folder is shared, so a member's table carries colleagues'
+        # runs, and an unattributed row would leave the org unable to say who
+        # wrote what (decision D8, 2026-08-23).
+        assert all("user_id" not in r for r in body["runs"])
+        assert all(r.get("user_email") for r in body["runs"])
         by_id = {r["run_id"]: r for r in body["runs"]}
         assert by_id["run-u1-a"]["has_report"] is True      # passed -> artifacts
         assert by_id["run-u1-b"]["has_report"] is False     # generated -> none
 
     def test_admin_sees_all_runs_with_user_column(self, seeded):
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=True
+            "src.backend.api.history_scope.is_validated_admin", return_value=True
         ):
             client = _client(seeded, _ADMIN)
             try:
@@ -245,7 +250,7 @@ class TestHistoryEndpoint:
         # Token says admin, but the users table no longer agrees (demoted or
         # deactivated): scope degrades to the user's own rows.
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=False
+            "src.backend.api.history_scope.is_validated_admin", return_value=False
         ):
             client = _client(seeded, {**_ADMIN, "user_id": "u2"})
             try:
@@ -497,7 +502,12 @@ def _feedback_client(registry, user, validated_admin=False):
     app.dependency_overrides[require_user] = lambda: user
 
     mock_fb = MagicMock()
-    mock_fb.process_user_feedback.return_value = {"category": "locator"}
+    # "outcome" is part of process_user_feedback's contract, and the
+    # endpoint refuses to report success without it — a triage dict alone
+    # is not evidence the correction was applied.
+    mock_fb.process_user_feedback.return_value = {
+        "category": "locator", "outcome": "processed",
+    }
 
     patchers = [
         patch("src.backend.api.endpoints.get_run_registry", return_value=registry),
@@ -741,7 +751,8 @@ class TestRunDetailEndpoint:
         assert body["robot_code"] == "*** Code 1 ***"
         assert body["has_report"] is True
         # Identity columns are not echoed back to non-admins.
-        assert "user_id" not in body and "user_email" not in body
+        assert "user_id" not in body      # internal id stays admin-only
+        assert body.get("user_email")     # the author does not — see the list test
 
     def test_foreign_run_is_404_for_users(self, detail_seeded):
         client = _client(detail_seeded, _USER1)
@@ -753,7 +764,7 @@ class TestRunDetailEndpoint:
 
     def test_admin_sees_any_run_with_identity(self, detail_seeded):
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=True
+            "src.backend.api.history_scope.is_validated_admin", return_value=True
         ):
             client = _client(detail_seeded, _ADMIN)
             try:
@@ -772,7 +783,7 @@ class TestRunDetailEndpoint:
         assert user_resp.status_code == 404
 
         with patch(
-            "src.backend.api.history_endpoints.is_validated_admin", return_value=True
+            "src.backend.api.history_scope.is_validated_admin", return_value=True
         ):
             client = _client(detail_seeded, _ADMIN)
             try:
@@ -827,6 +838,224 @@ class TestRunDetailEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/history/{run_id} — pass-quality suggestions (passed runs only)
+# ---------------------------------------------------------------------------
+
+_RID_SUG_HOLLOW = "a1111111-1111-4111-8111-111111111111"
+_RID_SUG_CLEAN = "a2222222-2222-4222-8222-222222222222"
+_RID_SUG_FAILED = "a3333333-3333-4333-8333-333333333333"
+_RID_SUG_ERROR = "a4444444-4444-4444-8444-444444444444"
+_RID_SUG_RUNNING = "a5555555-5555-4555-8555-555555555555"
+_RID_SUG_PASTED = "a6666666-6666-4666-8666-666666666666"
+_RID_SUG_DISK = "a7777777-7777-4777-8777-777777777777"
+_RID_SUG_NOCODE = "a8888888-8888-4888-8888-888888888888"
+
+_SUG_QUERY = "Go to https://the-internet.herokuapp.com/tables and click the first edit link"
+_SUG_OPEN_ONLY = (
+    "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nGenerated Test\n"
+    "    New Browser    chromium    headless=True\n"
+    "    New Page    https://the-internet.herokuapp.com/tables\n"
+    "    Close Browser\n"
+)
+_SUG_CLICKS = (
+    "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nGenerated Test\n"
+    "    New Browser    chromium    headless=True\n"
+    "    New Page    https://the-internet.herokuapp.com/tables\n"
+    "    Click    css=table#table1 tr:nth-child(1) a\n"
+    "    Close Browser\n"
+)
+_SUG_EMPTY_SENTENCE = (
+    "This test only opens the page. Consider adding the steps you need."
+)
+
+
+@pytest.fixture
+def suggestion_seeded(registry):
+    registry.record_start(_RID_SUG_HOLLOW, _USER1, _SUG_QUERY, "passed", robot_code=_SUG_OPEN_ONLY)
+    registry.record_start(_RID_SUG_CLEAN, _USER1, _SUG_QUERY, "passed", robot_code=_SUG_CLICKS)
+    registry.record_start(_RID_SUG_FAILED, _USER1, _SUG_QUERY, "failed", robot_code=_SUG_OPEN_ONLY)
+    registry.record_start(_RID_SUG_ERROR, _USER1, _SUG_QUERY, "error", robot_code=_SUG_OPEN_ONLY)
+    registry.record_start(_RID_SUG_RUNNING, _USER1, _SUG_QUERY, "running", robot_code=_SUG_OPEN_ONLY)
+    registry.record_start(_RID_SUG_PASTED, _USER1, None, "passed", robot_code=_SUG_OPEN_ONLY)
+    registry.record_start(_RID_SUG_DISK, _USER1, _SUG_QUERY, "passed")
+    registry.record_start(_RID_SUG_NOCODE, _USER1, _SUG_QUERY, "passed")
+    return registry
+
+
+def _suggestion_detail(registry, run_id, store_root=None):
+    """GET the detail of one run; `store_root` stands in for the artifact store (the DB column is NULL
+    for the runs that read from it)."""
+    from src.backend.core.artifact_store import LocalArtifactStore
+    import src.backend.api.history_endpoints as he_mod
+    store = LocalArtifactStore(store_root) if store_root is not None else None
+    with patch.object(he_mod, "get_artifact_store", return_value=store):
+        client = _client(registry, _USER1)
+        try:
+            return client.get(f"/api/history/{run_id}")
+        finally:
+            _close(client)
+
+
+class TestRunDetailSuggestions:
+    def test_passed_run_with_a_hollow_test_carries_the_sentence(self, suggestion_seeded):
+        resp = _suggestion_detail(suggestion_seeded, _RID_SUG_HOLLOW)
+        assert resp.status_code == 200
+        assert resp.json()["suggestions"] == [_SUG_EMPTY_SENTENCE]
+
+    def test_passed_run_with_a_clean_test_carries_an_empty_list(self, suggestion_seeded):
+        body = _suggestion_detail(suggestion_seeded, _RID_SUG_CLEAN).json()
+        assert body["suggestions"] == []
+
+    @pytest.mark.parametrize("run_id", [_RID_SUG_FAILED, _RID_SUG_ERROR, _RID_SUG_RUNNING])
+    def test_a_run_that_did_not_pass_has_no_suggestions_key(self, suggestion_seeded, run_id):
+        resp = _suggestion_detail(suggestion_seeded, run_id)
+        assert resp.status_code == 200
+        assert "suggestions" not in resp.json()
+
+    def test_pasted_code_with_an_empty_test_gets_the_empty_test_sentence(self, suggestion_seeded):
+        body = _suggestion_detail(suggestion_seeded, _RID_SUG_PASTED).json()
+        assert body["user_query"] is None
+        assert body["suggestions"] == [_SUG_EMPTY_SENTENCE]
+
+    def test_the_code_resolved_from_the_artifact_store_is_the_code_judged(self, suggestion_seeded, tmp_path):
+        run_dir = tmp_path / _RID_SUG_DISK
+        run_dir.mkdir()
+        (run_dir / "test.robot").write_text(_SUG_OPEN_ONLY, encoding="utf-8")
+        body = _suggestion_detail(suggestion_seeded, _RID_SUG_DISK, tmp_path).json()
+        assert body["robot_code"] == _SUG_OPEN_ONLY
+        assert body["suggestions"] == [_SUG_EMPTY_SENTENCE]
+
+    def test_clean_code_in_the_artifact_store_is_judged_clean(self, suggestion_seeded, tmp_path):
+        run_dir = tmp_path / _RID_SUG_DISK
+        run_dir.mkdir()
+        (run_dir / "test.robot").write_text(_SUG_CLICKS, encoding="utf-8")
+        body = _suggestion_detail(suggestion_seeded, _RID_SUG_DISK, tmp_path).json()
+        assert body["suggestions"] == []
+
+    def test_a_passed_run_with_no_code_anywhere_has_no_suggestions_key(self, suggestion_seeded, tmp_path):
+        body = _suggestion_detail(suggestion_seeded, _RID_SUG_NOCODE, tmp_path).json()
+        assert body["robot_code"] is None
+        assert "suggestions" not in body
+
+    def test_the_checker_is_given_the_stored_code_and_the_rows_query(self, suggestion_seeded):
+        with patch("src.backend.api.history_endpoints.pass_suggestions",
+                   return_value=["x"]) as checker:
+            body = _suggestion_detail(suggestion_seeded, _RID_SUG_HOLLOW).json()
+        checker.assert_called_once_with(_SUG_OPEN_ONLY, _SUG_QUERY)
+        assert body["suggestions"] == ["x"]
+
+    def test_a_checker_that_raises_never_fails_the_request(self, suggestion_seeded, caplog):
+        with patch("src.backend.api.history_endpoints.pass_suggestions",
+                   side_effect=RuntimeError("boom")):
+            with caplog.at_level("WARNING", logger="src.backend.api.history_endpoints"):
+                resp = _suggestion_detail(suggestion_seeded, _RID_SUG_HOLLOW)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "suggestions" not in body
+        assert body["robot_code"] == _SUG_OPEN_ONLY       # the rest of the payload is intact
+        warnings = [r for r in caplog.records
+                    if r.levelname == "WARNING" and r.name == "src.backend.api.history_endpoints"]
+        assert len(warnings) == 1
+        text = warnings[0].getMessage()
+        assert _RID_SUG_HOLLOW in text
+        assert "New Page" not in text and _SUG_QUERY not in text    # neither the code nor the query
+
+
+# ---------------------------------------------------------------------------
+# GET /api/history/{run_id} — failure reason (error_message + failure_sentence)
+# ---------------------------------------------------------------------------
+
+_RID_FAILED = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"    # user1's, classifiable
+_RID_ERRORED = "f1111111-1111-4111-8111-111111111111"   # user1's, status "error"
+_RID_UNCLASSIFIABLE = "f2222222-2222-4222-8222-222222222222"  # user1's, failed
+_RID_PASSED_STALE_MSG = "f3333333-3333-4333-8333-333333333333"  # passed, stale msg
+_RID_FOREIGN_FAILED = "f4444444-4444-4444-8444-444444444444"    # user2's, failed
+
+
+@pytest.fixture
+def failure_seeded(registry):
+    registry.record_start(_RID_FAILED, _USER1, "q", "generated")
+    registry.set_status(
+        _RID_FAILED, "failed",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    registry.record_start(_RID_ERRORED, _USER1, "q", "generated")
+    registry.set_status(
+        _RID_ERRORED, "error",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    registry.record_start(_RID_UNCLASSIFIABLE, _USER1, "q", "generated")
+    registry.set_status(
+        _RID_UNCLASSIFIABLE, "failed",
+        error_message="Something entirely unclassifiable happened here.",
+    )
+    # Seed a message on the row via record_start's newest-non-NULL-wins, then
+    # advance to "passed" via set_status with no message — set_status writes
+    # EXACTLY what it is given, so the brief's "passed with a message still on
+    # the row" case is seeded through record_start instead (its own
+    # newest-non-NULL-wins rule), matching the controller note verbatim.
+    registry.record_start(
+        _RID_PASSED_STALE_MSG, _USER1, "q", "passed",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    registry.record_start(_RID_FOREIGN_FAILED, _USER2, "q", "generated")
+    registry.set_status(
+        _RID_FOREIGN_FAILED, "failed",
+        error_message="No keyword with name 'Clikc Button' found.",
+    )
+    return registry
+
+
+class TestRunDetailFailureReason:
+    def test_failed_run_returns_both_fields(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_FAILED}").json()
+        finally:
+            _close(client)
+        assert body["error_message"] == "No keyword with name 'Clikc Button' found."
+        assert body["failure_sentence"] == (
+            "The test calls a keyword that Robot Framework does not recognize — "
+            "check the keyword name for a typo or a missing library import."
+        )
+
+    def test_errored_run_returns_both_fields(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_ERRORED}").json()
+        finally:
+            _close(client)
+        assert body["error_message"] == "No keyword with name 'Clikc Button' found."
+        assert body["failure_sentence"] is not None
+
+    def test_passed_run_with_stale_message_returns_neither_key(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_PASSED_STALE_MSG}").json()
+        finally:
+            _close(client)
+        assert "error_message" not in body
+        assert "failure_sentence" not in body
+
+    def test_unclassifiable_message_is_raw_text_with_null_sentence(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            body = client.get(f"/api/history/{_RID_UNCLASSIFIABLE}").json()
+        finally:
+            _close(client)
+        assert body["error_message"] == "Something entirely unclassifiable happened here."
+        assert body["failure_sentence"] is None
+
+    def test_caller_who_cannot_see_the_run_is_refused(self, failure_seeded):
+        client = _client(failure_seeded, _USER1)
+        try:
+            resp = client.get(f"/api/history/{_RID_FOREIGN_FAILED}")
+        finally:
+            _close(client)
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # POST /execute-test {rerun_of} — re-execute stored code, learning skipped
 # ---------------------------------------------------------------------------
 
@@ -842,17 +1071,25 @@ def _rerun_client(registry, user, validated_admin=False):
     captured = {}
 
     async def fake_stream(robot_code, user_query=None, workflow_id=None,
-                          user=None, history_query=None, rerun_of=None):
+                          user=None, history_query=None, rerun_of=None,
+                          group_id=None, is_platform_admin=None):
         captured.update(
             robot_code=robot_code, user_query=user_query,
             workflow_id=workflow_id, user=user, history_query=history_query,
-            rerun_of=rerun_of,
+            rerun_of=rerun_of, group_id=group_id,
+            is_platform_admin=is_platform_admin,
         )
         yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
 
     patchers = [
         patch("src.backend.api.endpoints.get_run_registry", return_value=registry),
-        patch("src.backend.api.endpoints.is_validated_admin", return_value=validated_admin),
+        # The rerun path takes its admin flag off history_scope now, so the
+        # patch belongs where history_scope reads it. _feedback_client above
+        # deliberately keeps the endpoints target: submit_feedback still calls
+        # is_validated_admin directly (it needs no scope), so the two clients
+        # patch two different symbols on purpose.
+        patch("src.backend.api.history_scope.is_validated_admin",
+              return_value=validated_admin),
         patch("src.backend.api.endpoints.stream_execute_only", fake_stream),
     ]
     for p in patchers:
@@ -879,6 +1116,10 @@ class TestRerunEndpoint:
         assert captured["user"] == _USER1
         # Lineage anchor: the new row links back to the source run.
         assert captured["rerun_of"] == _RID_OWNED
+        # Finding 1: the rerun route's own history_scope() call already
+        # re-validated this caller as non-admin; stream_execute_only must
+        # receive that answer rather than recompute it.
+        assert captured["is_platform_admin"] is False
 
     def test_chain_rerun_flattens_to_the_original(self, detail_seeded):
         # _RID_CHAIN is itself a re-run of _RID_OWNED. Re-running it must
@@ -915,6 +1156,9 @@ class TestRerunEndpoint:
             _close_feedback(client)
         assert resp.status_code == 200
         assert captured["robot_code"] == "*** Code 2 ***"
+        # Finding 1: history_scope()'s re-validated admin flag must reach
+        # stream_execute_only, not be recomputed a second time downstream.
+        assert captured["is_platform_admin"] is True
 
     def test_run_without_stored_code_is_409(self, detail_seeded, tmp_path):
         from src.backend.core.artifact_store import LocalArtifactStore
@@ -993,6 +1237,60 @@ class TestRerunServicePlumbing:
         assert row["user_id"] == "u2"                      # attributed to clicker
         assert row["rerun_of"] == "root-run-id"            # lineage for feedback
         assert seen["learning_query"] is None              # learning skipped
+
+    def test_is_validated_admin_runs_once_end_to_end_on_the_real_rerun_route(
+            self, detail_seeded):
+        """Finding 1 (round 1 review). endpoints.py's history_scope() call and
+        workflow_service.stream_execute_only's own (now-conditional)
+        computation must not BOTH read the users table for one rerun request.
+        Unlike every other rerun test in this file, stream_execute_only is
+        NOT faked here — only its Docker leg is — so this drives the real
+        conditional-computation branch this finding is about, through the
+        real /execute-test {rerun_of} route.
+
+        is_validated_admin is counted at BOTH of its import sites —
+        api.history_scope and services.workflow_service each bind their own
+        module-level reference via `from ... import is_validated_admin`, so
+        patching only one would silently miss a regression on the other."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.backend.api.endpoints import router as api_router
+        from src.backend.services import workflow_service as ws
+
+        admin_calls = {"n": 0}
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            return u is not None and u.get("role") == "admin"
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot):
+            release_slot()
+            yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
+
+        app = FastAPI()
+        app.include_router(api_router)
+        app.dependency_overrides[require_user] = lambda: _ADMIN
+
+        patchers = [
+            patch("src.backend.api.endpoints.get_run_registry", return_value=detail_seeded),
+            patch.object(ws, "get_run_registry", return_value=detail_seeded),
+            patch.object(ws, "_stream_docker_execution", fake_docker),
+            patch("src.backend.api.history_scope.is_validated_admin",
+                  side_effect=_count_admin_calls),
+            patch.object(ws, "is_validated_admin", side_effect=_count_admin_calls),
+        ]
+        for p in patchers:
+            p.start()
+        client = TestClient(app)
+        try:
+            resp = client.post("/execute-test", json={"rerun_of": _RID_FOREIGN})
+        finally:
+            for p in patchers:
+                p.stop()
+            client.close()
+
+        assert resp.status_code == 200
+        assert admin_calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------

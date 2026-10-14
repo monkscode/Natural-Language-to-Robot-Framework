@@ -27,7 +27,8 @@ fed ONLY by the real run (never by dryrun).
 Referenced by: src/backend/services/workflow_service.py (run_agentic_workflow gate)
 Depends on: src/backend/services/docker_service (container plumbing + mount resolution),
             src/backend/crew_ai/agents.RobotAgents + tasks.RobotTasks (repair crew),
-            src/backend/crew_ai/robot_code_normalizer.normalize_robot_code,
+            src/backend/crew_ai/robot_code_normalizer.normalize_robot_code
+            (and insert_change_waits / remove_change_waits for the F1 change-wait lines),
             src/backend/core/workflow_metrics.calculate_crewai_cost (repair cost shape),
             src/backend/core/config.settings (DRYRUN_ENABLED / MAX_DRYRUN_FIXES / DRYRUN_TIMEOUT)
 """
@@ -36,6 +37,7 @@ import json
 import logging
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 
 import docker
@@ -45,10 +47,16 @@ from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
+    insert_change_waits,
     normalize_robot_code,
+    remove_change_waits,
+    rewrite_select_text_reads,
+    rewrite_text_checks_whole_word,
+    rewrite_typed_value_reads,
+    rewrite_visibility_checks_to_wait,
     strip_redundant_css_prefix,
 )
-from src.backend.core.artifact_store import get_artifact_store
+from src.backend.core.artifact_store import get_artifact_store, make_shared_dir
 from src.backend.services.docker_service import (
     IMAGE_TAG,
     normalize_docker_mount_source,
@@ -82,8 +90,10 @@ def extract_and_normalize_robot_code(task_output) -> str:
       Strategy 1 — output.pydantic.code (AssemblyOutput)
       Strategy 2 — output.json_dict['code']
       Strategy 3 — raw JSON {"code": "..."} → code, else raw output as-is
-      then: escaped-newline/tab fix → normalize_robot_code → Settings-block trim →
-            trailing-empty-line strip → trailing-JSON-artifact strip.
+      then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
+            Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
+            rewrite_visibility_checks_to_wait → rewrite_select_text_reads →
+            rewrite_typed_value_reads → rewrite_text_checks_whole_word → ensure_browser_timeout.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -171,6 +181,31 @@ def extract_and_normalize_robot_code(task_output) -> str:
         if robot_code.endswith(pattern):
             robot_code = robot_code[:-len(pattern)].strip()
             logger.info(f"✅ Stripped trailing JSON artifact: {pattern}")
+
+    # Rewrite `Get Element States … contains visible` to Wait For Elements State:
+    # Get Element States waits only 250ms + a 1s assertion retry, the Browser
+    # import's timeout never applies to it (see robot_code_normalizer). Runs
+    # after the trailing-JSON strip so a last-line check is not hidden behind a
+    # leaked `"}`.
+    robot_code = rewrite_visibility_checks_to_wait(robot_code)
+
+    # Two reads that cannot see what the test just did to the element (see
+    # robot_code_normalizer): `Get Text` on a <select> the test just set returns
+    # every option, so its Should Contain cannot fail (q08); `Get Attribute …
+    # value` after typing returns the initial value, not the typed one (N1).
+    # Then a text check on a Get Text read becomes a whole-word, any-letter-case
+    # Should Match Regexp — after the select rewrite, which must see the
+    # select's Should Contain first.
+    # Same place as the visibility rewrite, for the same reason: every repair
+    # round passes through here too. All three are optional and skip-only, so one
+    # that raises costs only its own rewrite, never the generation.
+    for name, rewrite in (("rewrite_select_text_reads", rewrite_select_text_reads),
+                          ("rewrite_typed_value_reads", rewrite_typed_value_reads),
+                          ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word)):
+        try:
+            robot_code = rewrite(robot_code)
+        except Exception:
+            logger.warning("%s failed; code left unchanged by it (non-blocking)", name, exc_info=True)
 
     # Step 4: Raise the Browser Library timeout ceiling off its 10s import default.
     # Runs here, after the Settings block is resolved, so BOTH the generation path
@@ -301,8 +336,14 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
     """
     container_name = f"robot-test-dryrun-{run_id}"
     dryrun_filename = "dryrun.robot"
-    dryrun_dir = str(get_artifact_store().run_dir(run_id) / "dryrun")
-    os.makedirs(dryrun_dir, exist_ok=True)
+    # Shared mode, same reason as the run directory itself: the runner writes
+    # this dryrun output.xml as root WITHOUT CAP_DAC_OVERRIDE (cap_drop ALL), so
+    # a default-0755 directory owned by appuser makes the gate fail to produce
+    # output.xml at all — which degrades every run to dryrun_status='unverified'
+    # instead of raising, so it is silent.
+    dryrun_dir_path = get_artifact_store().run_dir(run_id, create=True) / "dryrun"
+    make_shared_dir(dryrun_dir_path)
+    dryrun_dir = str(dryrun_dir_path)
     dryrun_filepath = os.path.join(dryrun_dir, dryrun_filename)
     output_xml_path = os.path.join(dryrun_dir, "output.xml")
 
@@ -326,11 +367,19 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
     ]
     host_robot_tests_dir = resolve_host_robot_tests_dir(client)
     normalized_host_robot_tests_dir = normalize_docker_mount_source(host_robot_tests_dir)
+    # This run's dryrun/ directory ONLY — same tenant boundary as
+    # docker_service.run_test_in_container, and for the same reason: the code
+    # under test is arbitrary user-supplied Robot, so the mount is the limit of
+    # what it can read and write. Narrower than the real run's mount because
+    # the gate writes nothing outside dryrun/ (that isolation is what keeps it
+    # from clobbering the run's own output.xml). make_shared_dir above has
+    # already created it, so Docker never auto-creates it as root.
+    host_dryrun_dir = os.path.join(normalized_host_robot_tests_dir, run_id, "dryrun")
 
     container_config = {
         "image": IMAGE_TAG,
         "command": robot_command,
-        "volumes": {normalized_host_robot_tests_dir: {'bind': '/app/robot_tests', 'mode': 'rw'}},
+        "volumes": {host_dryrun_dir: {'bind': f'/app/robot_tests/{run_id}/dryrun', 'mode': 'rw'}},
         "working_dir": "/app",
         "detach": True,
         "auto_remove": False,
@@ -439,6 +488,10 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
     # knowledge (§8.2).
     agents = RobotAgents(model_provider, model_name, library_context)
     tasks = RobotTasks(library_context)
+    # run_id == workflow_id. These calls run after the workflow OTel span has
+    # closed, so metadata is the ONLY thing that can attribute them.
+    agents.llm.set_workflow_id(run_id)
+    agents.planner_llm.set_workflow_id(run_id)
     assembler = agents.code_assembler_agent()
     # Bound the repair agent's internal iterations. Also keeps MAX_AGENT_ITERATIONS
     # a live consumer now that the validator agent (its previous consumer) is gone.
@@ -449,7 +502,7 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
         agents=[assembler],
         tasks=[fix_task],
         process=Process.sequential,
-        verbose=True,
+        verbose=settings.CREWAI_VERBOSE,
         output_log_file=None,  # §8.5 — keep repair noise out of logs/crewai.log
         embedder=None,
         # No step_callback/task_callback and NOT registered in progress_events:
@@ -461,7 +514,10 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
     repair_crew.kickoff()
     task_output = repair_crew.tasks[0].output
     usage = _repair_usage_dict(repair_crew, model_name)
-    return task_output, usage
+    # `tasks` is local to this call, so its guardrail counter dies here unless
+    # it is returned. The main crew's drain never sees these — this mini-crew
+    # builds its own RobotTasks by design (§5, no double-count).
+    return task_output, usage, dict(tasks.guardrail_attempts)
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +556,15 @@ def _push_progress(progress_queue, message: str, progress: int | None = None) ->
         logger.warning("🔬 DRYRUN: progress push failed (non-blocking): %s", e)
 
 
-def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue) -> dict:
+def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue,
+                        change_waits=None) -> dict:
     """Soft dryrun gate + bounded Assembler repair loop (generation path only).
+
+    `change_waits` (browser-service's marks, as `RunCrewResult.change_waits`) is applied to every
+    repaired test before it is re-checked, so the repair cannot drop the two inserted lines;
+    None / empty leaves the repaired code exactly as extracted. The dryrun gate checks the code WITH
+    the two lines, but the repair LLM is handed it WITHOUT them (`remove_change_waits`), so it can
+    neither edit nor copy them; when no marks exist the code is handed over exactly as it is.
 
     Returns a dict ALWAYS (never raises — a gate exception must never reach the
     outer workflow handler, which would convert a deliverable result into a hard
@@ -509,7 +572,15 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
         {"code": <possibly-repaired code>,
          "dryrun_status": "passed" | "failed" | "unverified" | "skipped",
          "dryrun_errors": <str, only when failed>,
-         "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>}
+         "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>,
+         "dryrun_attempts": <int, dryruns invoked>,
+         "dryrun_repairs": <int, repair rounds invoked>,
+         "guardrail_attempts": <dict, summed across repair rounds; {} when none>,
+         "repair_duration_s": <float, wall time in repair; 0.0 when none>}
+
+    The four counters are present on EVERY exit. They are the metrics row's only
+    record of what the gate did: before this, dryrun_repairs was recovered by
+    counting "🔧 Fixing test code..." occurrences in the SSE stream.
 
     Flow:
       1. DRYRUN_ENABLED off OR empty/whitespace code → skipped (no container; §8.4).
@@ -526,6 +597,20 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     learning DB; only the real Docker run feeds learning.
     """
     repair_usage: dict = {}
+    # Counted BEFORE each invocation, never after: an attempt that times out or
+    # whose container dies was still attempted, and a run that reported 0 for it
+    # would look like a run that never verified at all.
+    counters = {"dryrun_attempts": 0, "dryrun_repairs": 0}
+    guardrail_attempts: dict = {}
+    repair_duration_s = 0.0
+
+    def _result(**fields) -> dict:
+        """Every exit carries the counters — the four outcomes are equally
+        interesting and a missing key would read as zero downstream."""
+        return {"repair_usage": repair_usage,
+                "guardrail_attempts": guardrail_attempts,
+                "repair_duration_s": round(repair_duration_s, 3),
+                **counters, **fields}
 
     # The assembler's 80% checkpoint. Its TaskCompletedEvent is lost to the
     # event-bus handler race (see progress_events._on_task_started); the gate
@@ -538,7 +623,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
     if not settings.DRYRUN_ENABLED or not robot_code or not robot_code.strip():
         reason = "DRYRUN_ENABLED=False" if not settings.DRYRUN_ENABLED else "empty code"
         logger.info("🔬 DRYRUN: skipping gate (%s) for run_id=%s", reason, run_id)
-        return {"code": robot_code, "dryrun_status": "skipped", "repair_usage": repair_usage}
+        return _result(code=robot_code, dryrun_status="skipped")
 
     # learn-6 — ensure the runner image via the executor hop. Any failure (incl.
     # executor unreachable) degrades to 'unverified' and STILL delivers the code.
@@ -550,8 +635,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             "🔬 DRYRUN: executor/image unavailable — delivering unverified: %s",
             e, exc_info=True,
         )
-        return {"code": robot_code, "dryrun_status": "unverified",
-                "message": f"Verification unavailable: {e}", "repair_usage": repair_usage}
+        return _result(code=robot_code, dryrun_status="unverified",
+                       message=f"Verification unavailable: {e}")
 
     code = robot_code
     last_result = None
@@ -561,24 +646,33 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             # repair hold the bar (progress=None) so it never moves backwards.
             _push_progress(progress_queue, "🔬 Verifying generated test...",
                            88 if attempt == 0 else None)
+            counters["dryrun_attempts"] += 1
             last_result = runner_exec_client.dryrun(run_id, code)
 
             if last_result["passed"]:
                 logger.info("🔬 DRYRUN: passed for run_id=%s (attempt %d)", run_id, attempt)
-                return {"code": code, "dryrun_status": "passed", "repair_usage": repair_usage}
+                return _result(code=code, dryrun_status="passed")
 
             # Failed — repair only if attempts remain.
             if attempt < settings.MAX_DRYRUN_FIXES:
                 _push_progress(progress_queue, "🔧 Fixing test code...", 92)
+                counters["dryrun_repairs"] += 1
+                _repair_t0 = time.monotonic()
                 try:
-                    task_output, attempt_usage = repair_robot_code(
-                        run_id, code, last_result["errors"],
-                        model_provider, model_name,
+                    # The repair LLM is handed the test WITHOUT the two change-wait
+                    # lines (it would edit, copy or "fix" them); the pair goes back
+                    # below. Only when marks exist: no marks, no pair of ours.
+                    task_output, attempt_usage, attempt_guardrails = repair_robot_code(
+                        run_id, remove_change_waits(code) if change_waits else code,
+                        last_result["errors"], model_provider, model_name,
                     )
                     # Count the repair cost as soon as it is known, before
                     # extraction, so it is not lost if extraction later fails.
                     _accumulate_usage(repair_usage, attempt_usage)
+                    for _name, _count in (attempt_guardrails or {}).items():
+                        guardrail_attempts[_name] = guardrail_attempts.get(_name, 0) + _count
                     new_code = extract_and_normalize_robot_code(task_output)
+                    new_code = insert_change_waits(new_code, change_waits)
                 except Exception as e:
                     # §8.3 — repair fault isolation: degrade with current code,
                     # never propagate to the outer handler.
@@ -587,6 +681,10 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                         e, exc_info=True,
                     )
                     break
+                finally:
+                    # finally, not the success path: a repair that raised still
+                    # spent the wall time, and Angle D bills it to the stage.
+                    repair_duration_s += time.monotonic() - _repair_t0
                 if not new_code or not new_code.strip():
                     logger.warning("🔬 DRYRUN: repair produced empty code — stopping")
                     break
@@ -603,10 +701,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
             "🔬 DRYRUN: dryrun execution error — delivering unverified (non-blocking): %s",
             e, exc_info=True,
         )
-        return {"code": code, "dryrun_status": "unverified",
-                "message": str(e), "repair_usage": repair_usage}
+        return _result(code=code, dryrun_status="unverified", message=str(e))
 
     # Loop exhausted (or broke early) without a pass → failed, but STILL delivered.
-    return {"code": code, "dryrun_status": "failed",
-            "dryrun_errors": last_result["errors"] if last_result else "",
-            "repair_usage": repair_usage}
+    return _result(code=code, dryrun_status="failed",
+                   dryrun_errors=last_result["errors"] if last_result else "")

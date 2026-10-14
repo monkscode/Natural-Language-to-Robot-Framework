@@ -3,11 +3,14 @@ import { useRef } from 'react'
 import { ThemeProvider } from '@/components/theme-provider'
 import { AuthProvider, useAuth } from '@/auth/AuthContext'
 import { RequireAuth } from '@/auth/guards'
+import { gateAllowed, type Gate } from '@/auth/pageGates'
 import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar'
 import { AppSidebar } from '@/components/app-sidebar'
 import { AppHeader } from '@/components/app-header'
+import { RunGroupsProvider } from '@/components/history/RunGroupsContext'
 import GeneratePage from '@/pages/GeneratePage'
 import HistoryPage from '@/pages/HistoryPage'
+import TestsPage from '@/pages/TestsPage'
 import MetricsPage from '@/pages/MetricsPage'
 import SettingsPage from '@/pages/SettingsPage'
 import LearningPage from '@/pages/LearningPage'
@@ -31,20 +34,23 @@ import TeamPage from '@/pages/TeamPage'
  * starts clean, and logout unmounts the whole layout (state never leaks
  * across sessions).
  *
- * Role gating: each page can require admin (`admin: true`) and/or org-admin
- * (`orgAdmin: true`) access; a page is only ever mounted when
- * `(!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)` holds, via the
- * `allowed(p)` helper below. A user lacking the required role who navigates
- * to a gated path (e.g. an admin-only page, or the org-admin-only `/team`)
- * is bounced to /generate — the exact behaviour RequireAdmin had when each
- * route owned its element. The redirect renders only for the ACTIVE path,
- * so a cached page can never hijack navigation.
+ * Role gating: each page can require admin (`admin: true`), org-admin
+ * (`orgAdmin: true`) and/or the Learning-dashboard viewer flag
+ * (`viewLearning: true`) access; a page is only ever mounted when
+ * gateAllowed(p, ...) holds, via the `allowed(p)` helper below (gateAllowed
+ * itself lives in auth/pageGates.ts, shared with app-sidebar.tsx). A user
+ * lacking the required role who navigates to a gated path (e.g. an
+ * admin-only page, or the org-admin-only `/team`) is bounced to /generate —
+ * the exact behaviour RequireAdmin had when each route owned its element.
+ * The redirect renders only for the ACTIVE path, so a cached page can never
+ * hijack navigation.
  */
-const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JSX.Element }> = [
+export const PAGES: Array<Gate & { path: string; node: JSX.Element }> = [
+  { path: '/tests', node: <TestsPage /> },
   { path: '/generate', node: <GeneratePage /> },
   { path: '/history', node: <HistoryPage /> },
   { path: '/metrics', admin: true, node: <MetricsPage /> },
-  { path: '/learning', admin: true, node: <LearningPage /> },
+  { path: '/learning', viewLearning: true, node: <LearningPage /> },
   { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
   { path: '/team', orgAdmin: true, node: <TeamPage /> },
@@ -52,9 +58,8 @@ const PAGES: Array<{ path: string; admin?: boolean; orgAdmin?: boolean; node: JS
 
 function KeepAlivePages() {
   const { pathname } = useLocation()
-  const { isAdmin, isOrgAdmin } = useAuth()
-  const allowed = (p: { admin?: boolean; orgAdmin?: boolean }) =>
-    (!p.admin || isAdmin) && (!p.orgAdmin || isOrgAdmin)
+  const { isAdmin, isOrgAdmin, canViewLearning } = useAuth()
+  const allowed = (p: Gate) => gateAllowed(p, { isAdmin, isOrgAdmin, canViewLearning })
   const visited = useRef(new Set<string>())
 
   const active = PAGES.find(p => p.path === pathname)
@@ -80,22 +85,29 @@ function KeepAlivePages() {
   )
 }
 
-/** Full app layout: sidebar + topbar + keep-alive page content */
+/** Full app layout: sidebar + topbar + keep-alive page content.
+ *
+ * RunGroupsProvider sits above BOTH the sidebar and the pages: the sidebar's
+ * group quick-access, the Tests page and the Activity page filter by the same
+ * folder, so they read and write one shared filter instead of copies that
+ * could disagree. */
 function AppLayout() {
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>
-        <AppHeader />
-        {/* Page content — SidebarInset provides the responsive padding offset.
-            KeepAlivePages renders the actual pages; the Outlet only carries
-            the index / catch-all redirects (page routes are element={null}). */}
-        <div className="flex flex-1 flex-col p-6 pt-4 overflow-auto">
-          <KeepAlivePages />
-          <Outlet />
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+    <RunGroupsProvider>
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset>
+          <AppHeader />
+          {/* Page content — SidebarInset provides the responsive padding offset.
+              KeepAlivePages renders the actual pages; the Outlet only carries
+              the index / catch-all redirects (page routes are element={null}). */}
+          <div className="flex flex-1 flex-col p-6 pt-4 overflow-auto">
+            <KeepAlivePages />
+            <Outlet />
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
+    </RunGroupsProvider>
   )
 }
 
@@ -121,8 +133,13 @@ export default function App() {
                 routes render null: KeepAlivePages (in AppLayout) owns the
                 page elements so they persist across navigation. */}
             <Route element={<RequireAuth><GatedLayout /></RequireAuth>}>
-              <Route index            element={<Navigate to="/generate" replace />} />
-              {/* Every authenticated user gets Generate + their own History */}
+              {/* HOME, and the one place that says where it is: sign-in,
+                  sign-up, the Google callback and the logo all go to "/".
+                  Tests, because a returning user opens the product asking
+                  "what do I have, and what is broken" (spec 7.1). */}
+              <Route index            element={<Navigate to="/tests" replace />} />
+              {/* Every authenticated user gets Tests, Generate and Activity */}
+              <Route path="/tests"    element={null} />
               <Route path="/generate" element={null} />
               <Route path="/history"  element={null} />
               {/* Admin-only pages (gated inside KeepAlivePages) */}
@@ -131,7 +148,8 @@ export default function App() {
               <Route path="/settings"  element={null} />
               <Route path="/access" element={null} />
               <Route path="/team"   element={null} />
-              {/* catch-all */}
+              {/* catch-all — an unknown address, not a landing choice, so it
+                  stays on Generate rather than following home */}
               <Route path="*"          element={<Navigate to="/generate" replace />} />
             </Route>
           </Routes>

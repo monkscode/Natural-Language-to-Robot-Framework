@@ -313,6 +313,15 @@ Measured on the 30-query benchmark, 2026-07-11 (Vertex, gemini-flash pins):
 - **LLM calls per run**: median 4 (planner 1, assembler 1, browser-use ~2-3)
 - **LLM cost per run**: median ~$0.07
 
+Each successful run writes one `workflow_metrics` row (JSONB). Alongside the cost and
+locator totals it carries `workflow_duration_s` (whole-run wall time — distinct from
+`execution_time`, which is the browser-use figure), the dryrun gate's own
+`dryrun_status`/`dryrun_attempts`/`dryrun_repairs`, `crew_stage_metrics` (duration and
+LLM usage for `planner`, `assembler`, and `repair` when the gate re-prompted), and
+`guardrail_attempts` per attachment site. Generation *failures* write no metrics row —
+they are recorded in `test_runs` with status `'error'` and an `error_message`. See
+[OBSERVABILITY_GRAFANA.md](OBSERVABILITY_GRAFANA.md) for the queries.
+
 ## Scalability
 
 - Up to `MAX_CONCURRENT_WORKFLOWS` (default 10, see `config.py`) workflows in parallel
@@ -322,7 +331,9 @@ Measured on the 30-query benchmark, 2026-07-11 (Vertex, gemini-flash pins):
 ## Security Model
 
 - **JWT authentication** on the API (`require_user` / `require_admin`,
-  `src/backend/auth/`); the app refuses to start with a placeholder `JWT_SECRET_KEY`
+  `src/backend/auth/`); with `ENVIRONMENT=production` the app refuses to start
+  without an explicit `JWT_SECRET_KEY`, and in development it generates one into
+  `data/jwt_secret` on first boot
 - **Persistence in PostgreSQL**: auth/users, learning store, LLM traces, workflow
   metrics (the system is NOT stateless)
 - Docker isolation for test execution
@@ -454,6 +465,11 @@ Stage 2 — Element identification (deterministic Python, NOT an agent):
     locator pipeline classifies/generates/scores/validates locators
   → polls GET /query/{task_id} until complete
   → merges returned locator_mapping into the steps
+  → change_waits_from(): browser-service marks a read whose value the action
+    before it changed (it keeps the page before every action it performs and
+    evaluates the read's own locator there); the marks travel BESIDE the steps
+    and never reach the assembler. Any read flagged "came back" or uncheckable
+    drops every mark of the test
 
 Stage 3 — Code Assembler (LLM agent, own single-task crew):
   Input:  Steps with validated locators
@@ -466,8 +482,16 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 
 #### Phase 4: Dryrun Gate, Code Saving & Docker Execution
 ```
-12. workflow_service.py: robot --dryrun validate-and-repair loop
-    (dryrun_service.validate_and_repair — deterministic; unrepairable → loud fail)
+12. workflow_service.py: insert_change_waits() (robot_code_normalizer.py, deterministic)
+    adds two lines per marked read, neither of which can fail the test: a before-read
+    above the action and, above the read, a wait until Get Text differs from it (both
+    wrapped in Run Keyword And Ignore Error). Anything not proven safe (a later step
+    browser-service never performs — a Wait For Elements State excepted —, a repeated
+    action, a test timeout, a loop) leaves the file unchanged + one WARNING.
+    Then the robot --dryrun validate-and-repair loop
+    (dryrun_service.validate_and_repair — deterministic; unrepairable → loud fail);
+    the repair LLM is handed the test WITHOUT the two lines, and the insert runs again
+    on every repaired file
 13. Generates run_id: uuid.uuid4()
 14. Saves: robot_tests/{run_id}/test.robot
 15. docker_service.py: get_docker_client()
@@ -490,8 +514,14 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 26. SSE stream sends to browser
 27. React SPA receives events, updates UI
 28. Shows links: /reports/{run_id}/log.html
-29. Learning (when ON): workflow_service._process_learning() records the
-    execution via the LearningWriteQueue — never blocks the pipeline
+29. Learning (when ON) runs in two halves around artifact persistence:
+    workflow_service._process_learning_record() submits this run's execution
+    record right after the result event (so a feedback POST finds the row),
+    then _process_learning_attribution() runs after persist_run, because its
+    hint-attribution LLM call takes 5-30s and must not delay a durable
+    report. Both write via the LearningWriteQueue — never blocks the pipeline.
+    Both halves receive the test WITHOUT the inserted change-wait lines
+    (remove_change_waits); History, the runner and test_runs keep them
 ```
 
 ### Key Architectural Decisions
@@ -534,8 +564,9 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 
 ### Security Considerations
 
-1. **API authentication**: JWT (`require_user`/`require_admin`); startup fails
-   on placeholder `JWT_SECRET_KEY`.
+1. **API authentication**: JWT (`require_user`/`require_admin`); production
+   startup fails without an explicit `JWT_SECRET_KEY`, development provisions
+   one into `data/jwt_secret`.
 2. **API key isolation**: provider credentials live in `.env` / service-account
    files, never hardcoded.
 3. **Docker isolation**: each test runs in a clean, isolated container.

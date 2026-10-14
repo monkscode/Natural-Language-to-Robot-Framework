@@ -1,0 +1,1487 @@
+"""Tests for src/backend/core/pass_quality.py — the static hollow-pass checker.
+
+Every snippet is hand-written to reproduce one captured bench shape (the run it
+mirrors is named); no bench data is committed. The corpus replay that shows the
+same verdicts on the real captures is bench/private/gate/pass_quality_corpus_replay.py.
+"""
+
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+import src.backend.core.pass_quality as pass_quality
+from src.backend.core.pass_quality import (
+    EMPTY_TEST,
+    FRAGILE_NUMERIC_ID,
+    READ_LOCATOR_IS_THE_ANSWER,
+    READ_NOT_PERFORMED,
+    SELECT_CHECK_CANNOT_FAIL,
+    VERIFY_WITHOUT_ASSERTION,
+    Finding,
+    check_pass_quality,
+    hollow_shapes,
+    norm_locator,
+    pass_suggestions,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+Q01 = "Navigate to GitHub using url https://github.com/monkscode, and then get the name of the Pinned project"
+Q04 = ('Go to https://the-internet.herokuapp.com/tables and click on the first table "edit" link '
+       'in the row containing "Smith"')
+Q05 = ("Go to https://the-internet.herokuapp.com/tables and get the text from the first row, "
+       "second column of Table 1")
+Q07 = ("Go to https://www.saucedemo.com, type standard_user in the username field, type "
+       "secret_sauce in the password field, click the Login button, and verify the products "
+       "page shows the Products heading")
+Q08 = ("Go to https://the-internet.herokuapp.com/dropdown, select Option 2 from the dropdown, "
+       "and verify Option 2 is selected")
+Q09 = ("Go to https://www.w3schools.com/tags/tryit.asp?filename=tryhtml5_global_contenteditable, "
+       "type Hello Bench into the editable paragraph inside the iframe, and verify the paragraph "
+       "contains Hello Bench")
+Q10 = ("Go to https://books.toscrape.com, get the titles of all books on the first page, and "
+       "verify there are 20 books")
+
+
+def robot(variables: str, body: str, extra: str = "") -> str:
+    """A generated-test-shaped file: the assembler's fixed header, the given body, Close Browser."""
+    return ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+            "${browser}    chromium\n${headless}    True\n" + variables
+            + "\n*** Test Cases ***\nGenerated Test\n"
+            "    [Documentation]    Auto-generated test case\n"
+            "    New Browser    ${browser}    headless=${headless}\n"
+            "    New Context    viewport={'width': 1920, 'height': 1080}\n"
+            + body + "    Close Browser\n" + extra)
+
+
+def shapes(code: str, query: str | None) -> set[str]:
+    return {f.shape for f in check_pass_quality(code, query)}
+
+
+GET_ELEMENTS = "    @{elements}=    Get Elements    ${books_locator}\n"
+GET_LENGTH = GET_ELEMENTS + "    ${elements_count}=    Get Length    ${elements}\n"
+GET_COUNT = "    ${count}=    Get Element Count    ${books_locator}\n"
+
+
+def books(body: str, variables: str = "") -> str:
+    """The books page opened, then `body` (q10's generated shape)."""
+    return robot("${url}    https://books.toscrape.com\n${books_locator}    ol > li\n" + variables,
+                 "    New Page    ${url}\n" + body)
+
+
+class TestReadNotPerformed:
+    @pytest.mark.parametrize("body, variables", [
+        # mirrors 041606ee-dd82-4dad-9e4b-858f6081b61d (118 of the 124 stored count-only tests)
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n", "", id="get-length"),
+        # mirrors 04dd81c7-6a94-4e6e-8b48-7b75e4652fb1
+        pytest.param(GET_ELEMENTS + GET_COUNT + "    Should Be Equal As Integers    ${count}    20\n", "",
+                     id="count-as-integers"),
+        # mirrors 3a563d81-737c-4888-ac49-4db024a471aa
+        pytest.param("    @{books}=    Get Elements    ${books_locator}\n"
+                     "    Should Be True    len($books) == 20\n", "", id="python-len"),
+        # mirrors 4bab7a83-790c-41c6-a9d4-1146ad2a3dd0: the list variable is also declared, empty
+        pytest.param("    ${titles}=    Get Elements    ${books_locator}\n"
+                     "    Should Be True    len(${titles}) == 20\n", "${titles}\n", id="declared-list"),
+        pytest.param("    Get Element Count    ${books_locator}    ==    20\n", "", id="inline-operator"),
+        pytest.param(GET_ELEMENTS + "    Length Should Be    ${elements}    20\n", "", id="length-should-be"),
+        pytest.param(GET_COUNT + "    Should Be Equal    ${count}    ${20}\n", "", id="integer-literal"),
+        pytest.param(GET_COUNT + "    Should Be Equal As Integers    ${count}    ${expected_count}\n",
+                     "${expected_count}    20\n", id="number-in-a-variable"),
+        pytest.param(GET_ELEMENTS + "    ${n}=    Evaluate    len($elements)\n"
+                     "    Should Be Equal As Integers    ${n}    20\n", "", id="count-through-evaluate"),
+    ])
+    def test_a_count_request_whose_count_is_asserted_is_not_flagged(self, body, variables):
+        assert shapes(books(body, variables), Q10) == set()
+
+    @pytest.mark.parametrize("body, expected", [
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} == 10\n",
+                     {READ_NOT_PERFORMED}, id="another-number"),
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} == 120\n",
+                     {READ_NOT_PERFORMED}, id="inside-a-longer-number"),
+        pytest.param(GET_LENGTH + "    Should Be True    ${elements_count} > 20.5\n",
+                     {READ_NOT_PERFORMED}, id="inside-a-decimal"),
+        pytest.param(GET_LENGTH + "    Log    ${elements_count}\n",
+                     {READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION}, id="count-only-logged"),
+        # the assertion that holds 20 is about an element, not about the count
+        pytest.param(GET_COUNT + "    Log    ${count}\n"
+                     "    Wait For Elements State    xpath=(//article)[20]    visible    timeout=10s\n",
+                     {READ_NOT_PERFORMED}, id="number-in-an-unrelated-assertion"),
+        pytest.param("    Get Element Count    css=li:nth-child(20)    >    0\n",
+                     {READ_NOT_PERFORMED}, id="number-in-the-counted-locator"),
+        pytest.param("    ${n}=    Evaluate JavaScript    ${books_locator}    (all) => all.length"
+                     "    all_elements=True\n    Should Be Equal As Integers    ${n}    20\n",
+                     {READ_NOT_PERFORMED}, id="no-counting-keyword"),
+        pytest.param(GET_COUNT + "    Log    Found ${count} books, expected 20\n",
+                     {READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION}, id="number-only-in-a-log-message"),
+    ])
+    def test_a_count_request_whose_count_is_not_asserted_is_still_flagged(self, body, expected):
+        assert shapes(books(body), Q10) == expected
+
+    @pytest.mark.parametrize("query", [
+        pytest.param(Q10.replace("20 books", "twenty books"), id="a-number-word"),
+        pytest.param(Q10.replace("20 books", "20,000 books"), id="a-longer-number"),
+        pytest.param("Go to https://books.toscrape.com, verify the page is open and get the titles of "
+                     "all the 20 books", id="the-number-is-in-another-clause"),
+        pytest.param("Go to https://books.toscrape.com and get the titles of all the 20 books",
+                     id="no-verify-clause"),
+    ])
+    def test_only_a_number_the_query_asks_to_verify_waives_the_read(self, query):
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    BASKET_COUNT = ("    ${count}=    Get Element Count    ${basket_locator}\n"
+                    "    Should Be Equal As Integers    ${count}    1\n")
+
+    @pytest.mark.parametrize("query, body", [
+        pytest.param("Go to https://books.toscrape.com, get the price of the first book and verify "
+                     "there is 1 item in the basket", BASKET_COUNT, id="one-book-asked-for"),
+        pytest.param("Go to https://the-internet.herokuapp.com/checkboxes, check checkbox 2 and get its label",
+                     "    Click    css=#checkboxes input >> nth=1\n"
+                     "    ${count}=    Get Element Count    ${boxes_locator}\n"
+                     "    Should Be Equal As Integers    ${count}    2\n", id="check-is-the-verify-word"),
+        pytest.param("Go to https://books.toscrape.com, accept all cookies, get the price of the first book "
+                     "and verify there is 1 item in the basket", BASKET_COUNT,
+                     id="collection-word-in-another-clause"),
+        pytest.param("Go to https://books.toscrape.com, get the price of the small book and verify there "
+                     "is 1 item in the basket", BASKET_COUNT, id="word-that-only-contains-all"),
+    ])
+    def test_a_count_waives_the_read_only_for_a_request_for_a_whole_collection(self, query, body):
+        assert shapes(robot("", "    New Page    https://books.toscrape.com\n" + body), query) == {
+            READ_NOT_PERFORMED}
+
+    @pytest.mark.parametrize("word", ["every", "each"])
+    def test_every_and_each_ask_for_a_whole_collection_like_all(self, word):
+        query = Q10.replace("titles of all books", f"titles of {word} book")
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == set()
+
+    def test_a_declared_start_value_is_not_the_number_compared(self):
+        # ${error_count} is declared as 0 and then assigned at run time: `< 5` does not check 0
+        code = robot("${error_count}    0\n",
+                     "    New Page    https://shop.example.com\n"
+                     "    ${error_count}=    Get Element Count    css=.error\n"
+                     "    Should Be True    ${error_count} < 5\n")
+        query = "Open https://shop.example.com, get all the error messages and verify there are 0 errors"
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_the_same_request_with_no_count_and_no_assertion_is_still_flagged(self):
+        # mirrors d6965269-4143-43c4-bb8d-5597690c2c6c: the page is opened, nothing else
+        assert shapes(books(""), Q10) == {READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION, EMPTY_TEST}
+
+    def test_a_read_request_with_no_reader_is_still_flagged(self):
+        # mirrors 5b33729e-a6ca-496e-86e4-9c425da5439d and 474a0f7c-5ea7-406f-a723-d9e98e05916d
+        opened = robot("", "    New Page    https://example.com/\n")
+        assert shapes(opened, "Open https://example.com and get the page title") == {
+            READ_NOT_PERFORMED, EMPTY_TEST}
+        assert shapes(robot("", ""), Q01) == {READ_NOT_PERFORMED, EMPTY_TEST}
+
+    def test_titles_read_in_a_loop_is_not_flagged(self):  # mirrors 34b47637-f785-4a41-9b2a-f6e517f4070a
+        code = robot("${url}    https://books.toscrape.com\n${book_titles_locator}    css=h3 a\n",
+                     "    New Page    ${url}\n"
+                     "    @{books}=    Get Elements    ${book_titles_locator}\n"
+                     "    FOR    ${element}    IN    @{books}\n"
+                     "        ${text}=    Get Text    ${element}\n"
+                     "        Log    Book Title: ${text}\n"
+                     "    END\n"
+                     "    ${books_count}=    Get Length    ${books}\n"
+                     "    Should Be True    ${books_count} == 20\n")
+        assert shapes(code, Q10) == set()
+
+    def test_get_title_is_a_read(self):  # first-cut false positive (live execution_records id 126)
+        code = robot("", "    New Page    https://example.com\n    ${title}=    Get Title\n")
+        assert READ_NOT_PERFORMED not in shapes(code, "Open https://example.com and get the page title")
+
+    def test_get_element_count_is_not_a_read(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    Get Element Count    css=h3 a    ==    20\n")
+        query = "Go to https://books.toscrape.com and get the titles of all books on the first page"
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_query_without_a_read_verb_is_never_flagged(self):
+        code = robot("", "    New Page    https://example.com\n    Click    id=go\n")
+        assert READ_NOT_PERFORMED not in shapes(code, "Open https://example.com and click Go, target the button")
+
+    def test_a_number_too_long_to_be_a_count_is_no_number_and_raises_nothing(self):
+        # Python refuses int() of a 5,000-digit string: the number must never reach int()
+        query = Q10.replace("20 books", "9" * 5000 + " books")
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_whole_number_has_at_most_eighteen_digits(self):
+        assert pass_quality._whole_numbers("there are " + "1" * 18 + " books") == {int("1" * 18)}
+        assert pass_quality._whole_numbers("there are " + "1" * 19 + " books") == set()
+        assert pass_quality._whole_numbers("there are " + "1" * 5000 + " books") == set()
+
+
+class TestSelectCheckCannotFail:
+    SELECT_VARS = ("${url}    https://the-internet.herokuapp.com/dropdown\n"
+                   "${dropdown_trigger}    id=dropdown\n${dropdown_verification}    css=#dropdown\n"
+                   "${selected_option}    \n")
+
+    def test_get_text_on_the_whole_select_is_flagged(self):  # mirrors 7c4811db-3a72-4791-b22d-476f6e631507
+        code = robot(self.SELECT_VARS,
+                     "    New Page    ${url}\n"
+                     "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                     "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                     "    Should Contain    ${selected_option}    Option 2\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
+    def test_a_case_insensitive_check_is_still_flagged(self):
+        # Pin: the planner's `ignore_case=True` third cell changes nothing for the checker.
+        code = robot(self.SELECT_VARS,
+                     "    New Page    ${url}\n"
+                     "    Select Options By    ${dropdown_trigger}    label    Option 2\n"
+                     "    ${selected_option}=    Get Text    ${dropdown_verification}\n"
+                     "    Should Contain    ${selected_option}    Option 2    ignore_case=True\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
+    LETTER_CASE_HEAD = ("    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                        "    Select Options By    id=dropdown    label    Option 2\n"
+                        "    ${s}=    Get Text    id=dropdown\n")
+
+    def test_a_case_insensitive_check_in_another_letter_case_is_flagged(self):
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    option 2    ignore_case=True\n")
+        found = check_pass_quality(code, Q08)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert found[0].detail == "id=dropdown"
+
+    def test_another_letter_case_without_the_flag_is_not_flagged(self):
+        # A case mismatch without `ignore_case=True` fails loudly at run time: not hollow.
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    option 2\n")
+        assert shapes(code, Q08) == set()
+
+    def test_the_flag_on_a_value_that_is_not_selected_is_not_flagged(self):
+        code = robot("", self.LETTER_CASE_HEAD + "    Should Contain    ${s}    Option 1    ignore_case=True\n")
+        query = "Go to the dropdown page, select Option 2, and verify Option 1 is still listed"
+        assert shapes(code, query) == set()
+
+    def test_get_selected_options_is_not_flagged(self):  # mirrors 8e37b6e1-6450-4c80-888a-c7f56bbc4738
+        code = robot("${dropdown_locator}    id=dropdown\n",
+                     "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                     "    Select Options By    ${dropdown_locator}    label    Option 2\n"
+                     "    ${selected_options}=    Get Selected Options    ${dropdown_locator}\n"
+                     "    Should Be Equal    ${selected_options}[0]    Option 2\n")
+        assert shapes(code, Q08) == set()
+
+    def test_the_inline_contains_form_is_flagged(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                         "    Select Options By    id=dropdown    label    Option 2\n"
+                         "    Get Text    css=#dropdown    contains    Option 2\n")
+        assert shapes(code, Q08) == {SELECT_CHECK_CANNOT_FAIL}
+
+    def test_reading_another_element_is_not_flagged(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                         "    Select Options By    id=dropdown    label    Option 2\n"
+                         "    ${msg}=    Get Text    id=result\n"
+                         "    Should Contain    ${msg}    Option 2\n")
+        assert shapes(code, Q08) == set()
+
+    def test_a_presence_check_of_another_option_is_not_flagged(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                         "    Select Options By    id=dropdown    label    Option 2\n"
+                         "    ${all}=    Get Text    id=dropdown\n"
+                         "    Should Contain    ${all}    Option 1\n")
+        query = "Go to the dropdown page, select Option 2, and verify Option 1 is still listed"
+        assert shapes(code, query) == set()
+
+    def test_the_spellings_of_one_id_share_one_key(self):
+        spellings = ["#x", "css=#x", "css=select#x", "id=x", 'css=[id="x"]', "xpath=//select[@id='x']"]
+        assert {norm_locator(spelling) for spelling in spellings} == {"id=x"}
+        # A class after the id and a select without an id name no single id: left as they are.
+        assert norm_locator("css=#a.b") == "css=#a.b"
+        assert norm_locator("xpath=//form/select") == "xpath=//form/select"
+
+
+class TestReadLocatorIsTheAnswer:
+    def test_text_literal_not_in_the_query_is_flagged(self):  # mirrors eb45684f-3d1b-42df-801e-279408398660
+        code = robot("${cell_row_1_col_2_locator}    text=\"John\" >> nth=0\n",
+                     "    New Page    https://the-internet.herokuapp.com/tables\n"
+                     "    ${first_row_second_col_text}=    Get Text    ${cell_row_1_col_2_locator}\n"
+                     "    Log    Retrieved: ${first_row_second_col_text}\n")
+        found = check_pass_quality(code, Q05)
+        assert [f.shape for f in found] == [READ_LOCATOR_IS_THE_ANSWER]
+        assert found[0].detail == "John"
+
+    def test_positional_xpath_is_not_flagged(self):  # mirrors 48f7f6f4-6f6e-4010-847b-496cf437b71d
+        code = robot("${cell}    xpath=//table[@id='table1']/tbody/tr[1]/td[2]\n",
+                     "    New Page    https://the-internet.herokuapp.com/tables\n"
+                     "    ${result_text}=    Get Text    ${cell}\n"
+                     "    Log    Retrieved: ${result_text}\n")
+        assert shapes(code, Q05) == set()
+
+    def test_a_literal_the_query_names_is_not_flagged(self):
+        code = robot("", "    New Page    https://www.saucedemo.com\n"
+                         "    ${h}=    Get Text    text=Products\n")
+        assert shapes(code, "Log in to saucedemo and get the text of the Products heading") == set()
+
+    def test_a_bare_name_attribute_is_not_a_literal(self):  # first-cut FP, 27d6d46c-5719-4de4-844f-912ed3a7f1cc
+        code = robot("${p}    css=iframe[name=\"iframeResult\"] >>> p[contenteditable=\"true\"]\n",
+                     "    New Page    https://www.w3schools.com/tags/tryit.asp\n"
+                     "    ${t}=    Get Text    ${p}\n")
+        assert READ_LOCATOR_IS_THE_ANSWER not in shapes(code, "Open the w3schools page and get the paragraph text")
+
+    def test_only_read_queries_are_checked(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/tables\n"
+                         "    ${t}=    Get Text    text=\"John\" >> nth=0\n"
+                         "    Should Be Equal    ${t}    John\n")
+        assert shapes(code, "Go to the tables page and verify the first row shows a name") == set()
+
+    def test_reading_the_literals_own_attribute_is_flagged(self):  # mirrors f40300ac-f9d0-47f6-81e3-f2b95c8a2b8c
+        code = robot("${url}        https://books.toscrape.com\n"
+                     "${book_title_locator}    [title=\"A Light in the Attic\"]\n",
+                     "    New Page    ${url}\n"
+                     "    ${titles}=    Get Attribute    ${book_title_locator}    title\n"
+                     "    Should Be True    len(${titles}) == 20\n")
+        assert check_pass_quality(code, Q10) == [Finding(READ_LOCATOR_IS_THE_ANSWER, "A Light in the Attic")]
+
+    def test_reading_another_attribute_of_a_text_located_element_is_not_flagged(self):
+        code = robot("", "    New Page    https://shop.example.com\n"
+                         "    ${link}=    Get Attribute    text=\"Nike Air Max\"    href\n")
+        assert shapes(code, "Open the shop and get the link of the first product") == set()
+
+    def test_reading_the_value_of_an_aria_label_located_input_is_not_flagged(self):
+        code = robot("", "    New Page    https://www.amazon.in\n"
+                         "    Fill Text    css=input[aria-label=\"Search Amazon\"]    shoes\n"
+                         "    ${v}=    Get Property    css=input[aria-label=\"Search Amazon\"]    value\n")
+        query = "Open amazon, type shoes in the search box and get the typed value"
+        assert shapes(code, query) == set()
+
+    def test_a_literal_on_an_ancestor_part_of_a_chain_is_not_flagged(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/tables\n"
+                         "    ${t}=    Get Text    css=table:has-text(\"Last Name\") >> tbody tr >> nth=0"
+                         " >> td >> nth=1\n")
+        assert shapes(code, Q05) == set()
+
+    def test_a_literal_on_the_frame_part_is_not_flagged(self):
+        code = robot("", "    New Page    https://editor.example.com\n"
+                         "    ${t}=    Get Text    css=iframe[title=\"Rich Text Area\"] >>> p\n")
+        assert shapes(code, "Open the editor page and get the paragraph text") == set()
+
+
+class TestVerifyWithoutAssertion:
+    SAUCE = ("${username_locator}    css=#user-name\n${password_locator}    css=input[type='password']\n"
+             "${login_button_locator}    css=#login-button\n${products_heading_locator}    css=span.title\n")
+    LOGIN = ("    New Page    https://www.saucedemo.com\n"
+             "    Fill Text    ${username_locator}    standard_user\n"
+             "    Fill Text    ${password_locator}    secret_sauce\n"
+             "    Click    ${login_button_locator}\n")
+
+    def test_get_text_and_log_only_is_flagged(self):  # mirrors 03f1f94c-f1c5-4489-932b-0038d341fe7f
+        code = robot(self.SAUCE, self.LOGIN
+                     + "    ${products_heading}=    Get Text    ${products_heading_locator}\n"
+                     "    Log    Retrieved: ${products_heading}\n")
+        assert shapes(code, Q07) == {VERIFY_WITHOUT_ASSERTION}
+
+    def heading_read(self, locator: str, reader: str = "Get Text    ${products_heading_locator}") -> str:
+        """The saucedemo login, then the heading read by `locator` and only logged."""
+        return robot(self.SAUCE.replace("css=span.title", locator), self.LOGIN
+                     + "    ${result}=    " + reader + "\n    Log    Retrieved: ${result}\n")
+
+    @pytest.mark.parametrize("build, query", [
+        # mirrors d2762c18-8a5f-4714-b6cc-8b372e76bf53
+        pytest.param(lambda t: t.heading_read("text=Products"), Q07,
+                     id="text-locator-of-the-word-to-verify"),
+        pytest.param(lambda t: t.heading_read('text="PRODUCTS"'), Q07,
+                     id="same-text-in-another-case"),
+        pytest.param(lambda t: t.heading_read(
+            "text=Products", "Get Attribute    ${products_heading_locator}    class"), Q07,
+            id="get-attribute-on-that-text"),
+        pytest.param(lambda t: t.heading_read("text=Swag Labs"), Q07,
+                     id="text-the-query-does-not-hold"),
+        pytest.param(lambda t: t.heading_read("text=Login"), Q07,
+                     id="text-from-another-clause"),
+        pytest.param(lambda t: t.heading_read('css=div:has-text("Products") >> span'), Q07,
+                     id="text-on-an-ancestor-part"),
+        # Get Element States returns `detached` instead of failing, so it proves nothing
+        pytest.param(lambda t: t.heading_read(
+            "text=Products", "Get Element States    ${products_heading_locator}"), Q07,
+            id="get-element-states"),
+        pytest.param(lambda t: robot("${dropdown_locator}    id=dropdown\n",
+                                     "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                                     "    Select Options By    ${dropdown_locator}    label    Option 2\n"
+                                     "    ${selected_option}=    Get Text    text=Option 2\n"
+                                     "    Log    Retrieved: ${selected_option}\n"), Q08,
+                     id="state-request-read-by-its-text"),
+    ])
+    def test_a_read_that_is_only_logged_is_flagged_whatever_its_locator(self, build, query):
+        assert shapes(build(self), query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_typed_value_read_and_only_logged_is_flagged(self):
+        # mirrors 41f4f78d-7007-42b8-86c4-ddb28e978472 and 5db3e7ed-a987-44df-8a73-411f01084e4a
+        typed = robot('${editable_p_locator}    iframe[id="iframeResult"] >>> xpath=//body/p\n',
+                      "    New Page    https://www.w3schools.com/tags/tryit.asp\n"
+                      "    Fill Text    ${editable_p_locator}    Hello Bench\n"
+                      "    ${retrieved_text}=    Get Text    ${editable_p_locator}\n"
+                      "    Log    Retrieved: ${retrieved_text}\n")
+        assert shapes(typed, Q09) == {VERIFY_WITHOUT_ASSERTION}
+        selected = robot("${dropdown_locator}    id=dropdown\n"
+                         "${selected_option_locator}    id=dropdown >> option[selected]\n",
+                         "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                         "    Select Options By    ${dropdown_locator}    label    Option 2\n"
+                         "    ${selected_option}=    Get Text    ${selected_option_locator}\n"
+                         "    Log    Retrieved: ${selected_option}\n")
+        assert shapes(selected, Q08) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_should_contain_is_an_assertion(self):  # mirrors c5adb455-79cf-40cb-a1f1-88f6fbf96354
+        code = robot(self.SAUCE, self.LOGIN
+                     + "    ${heading_text}=    Get Text    ${products_heading_locator}\n"
+                     "    Should Contain    ${heading_text}    Products\n")
+        assert shapes(code, Q07) == set()
+
+    def test_an_operator_in_the_first_argument_is_an_assertion(self):
+        code = robot(self.SAUCE, self.LOGIN + "    Get Title    ==    Swag Labs\n")
+        assert shapes(code, Q07) == set()
+
+    def test_a_should_keyword_anywhere_in_the_name_is_an_assertion(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    ${titles}=    Get Texts    css=h3 a\n"
+                         "    Length Should Be    ${titles}    20\n")
+        assert shapes(code, Q10) == set()
+
+    def test_a_then_expression_is_not_an_assertion(self):
+        # `then` returns the evaluated expression and never fails.
+        code = robot("", "    New Page    https://example.com\n"
+                         "    ${h}=    Get Text    css=h1    then    value.strip()\n"
+                         "    Log    ${h}\n")
+        assert shapes(code, "Open https://example.com and verify the heading text") == {
+            VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_word_operator_is_an_assertion(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    Get Element Count    css=h3 a    greater than    0\n")
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(code, "Open the page and verify there are books")
+
+    def test_should_start_with_is_an_assertion(self):
+        code = robot("", "    New Page    https://example.com\n"
+                         "    Get Text    css=h1    should start with    Welcome\n")
+        assert shapes(code, "Open the page and verify the heading starts with Welcome") == set()
+
+    @pytest.mark.parametrize("keyword", [
+        "Run Keyword If Test Failed", "Run Keyword If Test Passed", "Run Keyword If Timeout Occurred",
+        "Run Keyword If All Tests Passed", "Run Keyword If Any Tests Failed"])
+    def test_a_teardown_keyword_that_tests_the_run_is_no_assertion(self, keyword):
+        code = robot(self.SAUCE, self.LOGIN
+                     + "    ${heading}=    Get Text    css=.title\n"
+                     "    Log    Retrieved: ${heading}\n"
+                     f"    [Teardown]    {keyword}    Take Screenshot\n")
+        assert shapes(code, Q07) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_run_keyword_if_on_a_value_is_still_an_assertion(self):
+        code = robot(self.SAUCE, self.LOGIN
+                     + "    ${heading}=    Get Text    css=.title\n"
+                     "    Run Keyword If    '${heading}' != 'Products'    Fail    Wrong heading\n")
+        assert shapes(code, Q07) == set()
+
+    def test_run_keyword_if_on_a_count_still_checks_the_count(self):
+        code = books(GET_LENGTH + "    Run Keyword If    ${elements_count} != 20    Fail\n")
+        assert shapes(code, Q10) == set()
+
+    def test_operators_match_browsers_assertion_operator_enum(self):
+        # Drift guard: the committed libdoc is the authority. `then` and `evaluate`
+        # are excluded because they return the evaluated expression and never fail.
+        libdoc = json.loads((REPO_ROOT / "data" / "libdocs" / "browser.json").read_text(encoding="utf-8"))
+        enum = next(t for t in libdoc["typedocs"] if t["name"] == "AssertionOperator")
+        can_fail = {m["name"] for m in enum["members"]} - {"then", "evaluate"}
+        assert set(pass_quality._OPERATORS) == can_fail
+
+
+class TestEmptyTest:
+    def test_open_and_close_only_is_flagged(self):  # mirrors f8fc9bd8-1379-42c8-bddb-2268d2295b1a
+        code = robot("${url}         https://the-internet.herokuapp.com/tables\n", "    New Page    ${url}\n")
+        assert shapes(code, Q04) == {EMPTY_TEST}
+
+    def test_an_open_only_query_is_satisfied_by_opening(self):
+        code = robot("", "    New Page    https://example.com\n")
+        assert shapes(code, "Open https://example.com") == set()
+
+    def test_pasted_open_only_code_is_flagged(self):
+        code = robot("", "    New Page    https://example.com\n")
+        assert shapes(code, "") == {EMPTY_TEST}
+
+
+class TestPastedCode:
+    def test_only_query_free_rules_run(self):
+        code = robot("${sel}    id=dropdown\n",
+                     "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                     "    Select Options By    ${sel}    label    Option 2\n"
+                     "    ${x}=    Get Text    ${sel}\n"
+                     "    Should Contain    ${x}    Option 2\n"
+                     "    ${cell}=    Get Text    text=\"John\" >> nth=0\n"
+                     "    ${repo}=    Get Text    id=880667900\n")
+        assert shapes(code, "") == {SELECT_CHECK_CANNOT_FAIL}
+        assert shapes(code, None) == {SELECT_CHECK_CANNOT_FAIL}
+
+
+class TestFragileNumericId:
+    def test_a_numeric_repository_id_is_reported_not_hollow(self):  # the q01 id=880667900 shape
+        code = robot("${pinned_project_locator}    id=880667900\n",
+                     "    New Page    https://github.com/monkscode\n"
+                     "    ${name}=    Get Text    ${pinned_project_locator}\n"
+                     "    Log    ${name}\n")
+        found = check_pass_quality(code, Q01)
+        assert found == [Finding(FRAGILE_NUMERIC_ID, "id=880667900")]
+        assert found[0].hollow is False
+        assert hollow_shapes(code, Q01) == set()
+
+
+class TestRobotSyntax:
+    def test_library_prefix_underscores_and_variable_spelling(self):
+        code = robot("${Title Locator}    css=h3 a\n",
+                     "    New Page    https://books.toscrape.com\n"
+                     "    ${t}=    Browser.Get_Text    ${title_locator}\n"
+                     "    Should Not Be Empty    ${t}\n")
+        assert shapes(code, Q10) == set()
+
+    def test_continuation_and_inline_comment(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    ${t}=    Get Text    # the first title\n"
+                         "    ...    css=h3 a\n"
+                         "    Should Be Equal    ${t}    A Light in the Attic\n")
+        assert shapes(code, Q10) == set()
+
+    def test_a_read_inside_a_user_keyword_counts(self):
+        extra = "\n*** Keywords ***\nRead Titles\n    ${t}=    Get Texts    css=h3 a\n    RETURN    ${t}\n"
+        code = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    ${titles}=    Read Titles\n"
+                         "    Length Should Be    ${titles}    20\n", extra)
+        assert shapes(code, Q10) == set()
+
+    def test_findings_follow_shape_order_one_per_shape(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n")
+        assert [f.shape for f in check_pass_quality(code, Q10)] == [
+            READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION, EMPTY_TEST]
+
+
+SENTENCE_READ_NOT_PERFORMED = ("The request asks to get a value, and this test does not read one. "
+                               "Consider adding a read step.")
+SENTENCE_SELECT_CHECK = ("The check reads the whole dropdown's text, which lists every option. "
+                         "Consider checking the selected option instead.")
+SENTENCE_VERIFY = ("The request asks to verify something, and this test never compares what it "
+                   "finds with the expected value. Consider adding a check.")
+SENTENCE_EMPTY = "This test only opens the page. Consider adding the steps you need."
+
+
+def locator_answer_sentence(text: str) -> str:
+    return (f'This test finds the element by its text "{text}". '
+            "If that text can change, consider locating it by position instead.")
+
+
+def answer_in_locator(literal: str) -> str:
+    """q05's shape: the cell is found by a text literal the query does not contain, then read."""
+    return robot("${cell}    text=\"" + literal + "\" >> nth=0\n",
+                 "    New Page    https://the-internet.herokuapp.com/tables\n"
+                 "    ${value}=    Get Text    ${cell}\n"
+                 "    Should Not Be Empty    ${value}\n")
+
+
+class TestPassSuggestions:
+    def test_each_hollow_shape_has_its_sentence(self):
+        select = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                           "    Select Options By    id=dropdown    label    Option 2\n"
+                           "    Get Text    css=#dropdown    contains    Option 2\n")
+        verify = robot("", "    New Page    https://www.saucedemo.com\n"
+                           "    Click    css=#login-button\n")
+        read = robot("", "    New Page    https://books.toscrape.com\n"
+                         "    Click    css=h3 a\n")
+        empty = robot("", "    New Page    https://the-internet.herokuapp.com/tables\n")
+        assert pass_suggestions(select, Q08) == [SENTENCE_SELECT_CHECK]
+        assert pass_suggestions(verify, "Go to https://www.saucedemo.com and verify the login button works") == [
+            SENTENCE_VERIFY]
+        assert pass_suggestions(read, "Go to https://books.toscrape.com and get the title of the first book") == [
+            SENTENCE_READ_NOT_PERFORMED]
+        assert pass_suggestions(empty, Q04) == [SENTENCE_EMPTY]
+        assert pass_suggestions(answer_in_locator("John"), Q05) == [locator_answer_sentence("John")]
+
+    def test_a_clean_test_has_no_sentence(self):
+        code = robot("", "    New Page    https://the-internet.herokuapp.com/dropdown\n"
+                         "    Select Options By    id=dropdown    label    Option 2\n"
+                         "    ${selected}=    Get Selected Options    id=dropdown\n"
+                         "    Should Be Equal    ${selected}[0]    Option 2\n")
+        assert pass_suggestions(code, Q08) == []
+
+    @pytest.mark.parametrize("literal, shown", [
+        pytest.param("X" * 39, "X" * 39, id="39-shown-whole"),
+        pytest.param("X" * 40, "X" * 40 + "…", id="40-treated-as-cut"),
+        pytest.param("X" * 41, "X" * 40 + "…", id="41-cut-at-40"),
+        pytest.param("HOTSTYLE Loafers , Running Shoes For Men (Black)",
+                     "HOTSTYLE Loafers , Running Shoes For Men…", id="real-product-title"),
+    ])
+    def test_the_text_is_cut_at_forty_characters_with_an_ellipsis(self, literal, shown):
+        assert pass_suggestions(answer_in_locator(literal), Q05) == [locator_answer_sentence(shown)]
+
+    def test_empty_test_is_shown_alone(self):
+        code = robot("", "    New Page    https://books.toscrape.com\n")
+        # the checker finds three shapes here; the user is told the one that explains the others
+        assert [f.shape for f in check_pass_quality(code, Q10)] == [
+            READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION, EMPTY_TEST]
+        assert pass_suggestions(code, Q10) == [SENTENCE_EMPTY]
+
+    def test_pasted_code_with_an_empty_test_gets_the_empty_sentence(self):
+        code = robot("", "    New Page    https://example.com\n")
+        assert pass_suggestions(code, None) == [SENTENCE_EMPTY]
+        assert pass_suggestions(code, "") == [SENTENCE_EMPTY]
+
+    def test_pasted_code_that_does_something_has_no_sentence(self):
+        code = robot("", "    New Page    https://example.com\n    Click    css=a\n")
+        assert pass_suggestions(code, None) == []
+
+    def test_two_shapes_come_in_the_checkers_order(self):
+        code = answer_in_locator("John").replace("    Should Not Be Empty    ${value}\n",
+                                                 "    Log    ${value}\n")
+        query = Q05 + " and verify it"
+        assert [f.shape for f in check_pass_quality(code, query)] == [
+            READ_LOCATOR_IS_THE_ANSWER, VERIFY_WITHOUT_ASSERTION]
+        assert pass_suggestions(code, query) == [locator_answer_sentence("John"), SENTENCE_VERIFY]
+
+    def test_a_read_that_is_missing_comes_before_a_missing_assertion(self):
+        code = books(GET_LENGTH + "    Log    ${elements_count}\n")
+        assert [f.shape for f in check_pass_quality(code, Q10)] == [
+            READ_NOT_PERFORMED, VERIFY_WITHOUT_ASSERTION]
+        assert pass_suggestions(code, Q10) == [SENTENCE_READ_NOT_PERFORMED, SENTENCE_VERIFY]
+
+    def test_a_fragile_numeric_id_alone_has_no_sentence(self):
+        code = robot("${pinned_project_locator}    id=880667900\n",
+                     "    New Page    https://github.com/monkscode\n"
+                     "    ${name}=    Get Text    ${pinned_project_locator}\n"
+                     "    Log    ${name}\n")
+        assert check_pass_quality(code, Q01) == [Finding(FRAGILE_NUMERIC_ID, "id=880667900")]
+        assert pass_suggestions(code, Q01) == []
+
+    def test_a_fragile_numeric_id_beside_a_hollow_shape_adds_no_sentence(self):
+        code = robot("${pinned_project_locator}    id=880667900\n",
+                     "    New Page    https://github.com/monkscode\n"
+                     "    ${name}=    Get Text    ${pinned_project_locator}\n"
+                     "    Log    ${name}\n")
+        query = Q01 + " and verify it"
+        assert [f.shape for f in check_pass_quality(code, query)] == [
+            VERIFY_WITHOUT_ASSERTION, FRAGILE_NUMERIC_ID]
+        assert pass_suggestions(code, query) == [SENTENCE_VERIFY]
+
+
+class TestWordsThatAreNotInstructions:
+    """A URL and a control's name hold words that look like instructions and are not."""
+
+    @staticmethod
+    def page(url: str, body: str = "") -> str:
+        return robot("", f"    New Page    {url}\n" + body)
+
+    @pytest.mark.parametrize("query, url", [
+        pytest.param("Open https://the-internet.herokuapp.com/login",
+                     "https://the-internet.herokuapp.com/login", id="login-path"),
+        pytest.param("Open https://the-internet.herokuapp.com/upload",
+                     "https://the-internet.herokuapp.com/upload", id="upload-path"),
+        pytest.param("Open www.example.com/login", "https://www.example.com/login", id="www-host"),
+        pytest.param("Open example.com/login", "https://example.com/login", id="host-and-path"),
+        pytest.param("Open https://example.com/get-started", "https://example.com/get-started",
+                     id="read-word-in-the-path"),
+        pytest.param("Open https://example.com/verify-email", "https://example.com/verify-email",
+                     id="verify-word-in-the-path"),
+        pytest.param("Open (https://example.com/login).", "https://example.com/login",
+                     id="url-in-brackets-then-a-full-stop"),
+    ])
+    def test_a_word_in_a_url_is_not_an_instruction(self, query, url):
+        assert shapes(self.page(url), query) == set()
+        assert pass_suggestions(self.page(url), query) == []
+
+    def test_a_real_instruction_beside_a_url_is_still_read(self):
+        query = "Open https://the-internet.herokuapp.com/login and log in as tomsmith"
+        assert shapes(self.page("https://the-internet.herokuapp.com/login"), query) == {EMPTY_TEST}
+
+    def test_a_click_beside_a_url_with_a_word_in_it_is_satisfied(self):
+        query = "Go to https://example.com/get-started and click the Sign up button"
+        code = self.page("https://example.com/get-started", "    Click    text=Sign up\n")
+        assert pass_suggestions(code, query) == []
+
+    def test_a_read_beside_a_url_with_a_word_in_it_is_still_asked_for(self):
+        query = "Go to https://example.com/get-started and get the page title"
+        code = self.page("https://example.com/get-started", "    Click    text=Go\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_the_literal_check_reads_the_whole_request_url_included(self):
+        code = self.page("https://shop.example.com/Nike-Air",
+                         '    ${name}=    Get Text    text="Nike-Air" >> nth=0\n')
+        assert shapes(code, "Open https://shop.example.com/Nike-Air and get the name of the first product") == set()
+        assert shapes(code, "Open https://shop.example.com and get the name of the first product") == {
+            READ_LOCATOR_IS_THE_ANSWER}
+
+    @pytest.mark.parametrize("query, body", [
+        pytest.param("Go to https://playwright.dev and click the Get started button",
+                     "    Click    text=Get started\n", id="get-in-a-button-name"),
+        pytest.param("Go to https://example.com/blog and click Read more on the first post",
+                     "    Click    text=Read more >> nth=0\n", id="read-in-a-link-name"),
+        pytest.param("Go to https://example.com/checkout and click Confirm",
+                     "    Click    id=confirm\n", id="confirm-is-a-button-name"),
+        pytest.param("Go to https://example.com and clicks the Verify email link",
+                     "    Click    text=Verify email\n", id="clicks"),
+        pytest.param("Go to https://example.com and press the Get started button",
+                     "    Click    text=Get started\n", id="press"),
+        pytest.param("Go to https://example.com and presses the Get started button",
+                     "    Click    text=Get started\n", id="presses"),
+        pytest.param("Go to https://example.com and tap the Get started button",
+                     "    Click    text=Get started\n", id="tap"),
+        pytest.param("Go to https://example.com and taps the Get started button",
+                     "    Click    text=Get started\n", id="taps"),
+        pytest.param("Go to https://example.com and hover the Read more link",
+                     "    Hover    text=Read more\n", id="hover"),
+        pytest.param("Go to https://example.com and hovers the Read more link",
+                     "    Hover    text=Read more\n", id="hovers"),
+    ])
+    def test_a_controls_name_is_not_an_instruction(self, query, body):
+        assert shapes(self.page("https://example.com", body), query) == set()
+
+    @pytest.mark.parametrize("verb", ["click", "clicks", "press", "presses", "tap", "taps", "hover", "hovers"])
+    def test_the_control_verb_still_asks_for_more_than_opening(self, verb):
+        query = f"Go to https://example.com and {verb} Login"
+        assert shapes(self.page("https://example.com"), query) == {EMPTY_TEST}
+        assert pass_suggestions(self.page("https://example.com"), query) == [SENTENCE_EMPTY]
+
+    @pytest.mark.parametrize("query", [
+        pytest.param("Go to https://playwright.dev, click the Get started button and get the page title",
+                     id="and"),
+        pytest.param("Go to https://playwright.dev, click the Get started button, get the page title",
+                     id="comma"),
+        pytest.param("Go to https://playwright.dev, click the Get started button then get the page title",
+                     id="then"),
+    ])
+    def test_a_request_after_the_controls_name_is_still_read(self, query):
+        code = self.page("https://playwright.dev", "    Click    text=Get started\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_verify_after_the_controls_name_is_still_read(self):
+        query = "Go to https://example.com, click Login and verify the dashboard is shown"
+        assert shapes(self.page("https://example.com", "    Click    text=Login\n"), query) == {
+            VERIFY_WITHOUT_ASSERTION}
+
+
+    LOGIN_PAGE = "https://example.com/login"
+
+    @pytest.mark.parametrize("query", [
+        pytest.param("1) Open https://example.com/login 2) Click Login 3) Verify the dashboard is shown",
+                     id="numbered-steps"),
+        pytest.param("(1) Open https://example.com/login (2) Click Login (3) Verify the dashboard is shown",
+                     id="numbers-in-brackets"),
+        pytest.param("Open https://example.com/login -> click Login -> verify the dashboard is shown",
+                     id="ascii-arrow"),
+        pytest.param("Open https://example.com/login → click Login → verify the dashboard is shown",
+                     id="unicode-arrow"),
+        pytest.param("Open https://example.com/login, click Login & verify the dashboard is shown",
+                     id="ampersand"),
+    ])
+    def test_a_step_marker_ends_a_controls_name(self, query):
+        code = self.page(self.LOGIN_PAGE, "    Click    text=Login\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_purpose_after_a_controls_name_is_still_read(self):
+        query = ("Go to https://www.amazon.in, type laptop in the search field and press Enter "
+                 "to verify results appear")
+        code = self.page("https://www.amazon.in", "    Fill Text    id=twotabsearchtextbox    laptop\n"
+                                                  "    Keyboard Key    press    Enter\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_read_purpose_after_a_controls_name_is_still_asked_for(self):
+        query = "Click the first product on https://www.saucedemo.com/inventory.html to read its price"
+        code = self.page("https://www.saucedemo.com/inventory.html", "    Click    css=.inventory_item_name\n")
+        assert shapes(code, query) == {READ_NOT_PERFORMED}
+
+    def test_a_to_that_is_not_a_purpose_stays_in_the_controls_name(self):
+        query = "Go to https://example.com and click Go to cart"
+        assert shapes(self.page("https://example.com", "    Click    text=Go to cart\n"), query) == set()
+
+    @pytest.mark.parametrize("query, body", [
+        pytest.param("Go to https://playwright.dev and click the Get started button",
+                     "    Click    text=Get started\n", id="get-in-a-button-name"),
+        pytest.param("Go to https://example.com/blog and click Read more on the first post",
+                     "    Click    text=Read more >> nth=0\n", id="read-in-a-link-name"),
+        pytest.param("Go to https://example.com/hotel, press the Check availability button and get the first price",
+                     "    Click    text=Check availability\n    ${price}=    Get Text    css=.price\n",
+                     id="check-in-a-button-name-then-a-read"),
+        pytest.param("Go to https://example.com/plans and click the 2.5 GB plan",
+                     "    Click    text=2.5 GB\n", id="a-decimal-is-no-step-marker"),
+        pytest.param("Go to https://example.com/plans and click the Python 3.12 plan",
+                     "    Click    text=Python 3.12\n", id="a-version-is-no-step-marker"),
+    ])
+    def test_a_controls_name_is_still_not_an_instruction(self, query, body):
+        assert shapes(self.page("https://example.com", body), query) == set()
+
+    def test_the_count_rule_still_reads_n_from_its_own_clause(self):
+        assert shapes(books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n"), Q10) == set()
+
+    def test_a_step_marker_ends_a_read_clause_and_a_verify_clause(self):
+        # a number in the next step is not the number to verify
+        query = "1) Get the titles of all books 2) Verify there are 20 books"
+        assert pass_quality._verify_clauses(query) == [" there are 20 books"]
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20\n")
+        assert shapes(code, query) == set()
+
+
+class TestCheckThatMeansTick:
+    """`check` is a verify word unless it ticks a box or means "check out"."""
+
+    BOXES = "https://the-internet.herokuapp.com/checkboxes"
+
+    @staticmethod
+    def page(url: str, body: str = "") -> str:
+        return robot("", f"    New Page    {url}\n" + body)
+
+    @pytest.mark.parametrize("query, url, body", [
+        pytest.param(f"Go to {BOXES} and check checkbox 1", BOXES,
+                     "    Check Checkbox    css=#checkboxes input >> nth=0\n", id="checkbox"),
+        pytest.param(f"Go to {BOXES} and checks checkbox 1", BOXES,
+                     "    Check Checkbox    css=#checkboxes input >> nth=0\n", id="checks"),
+        pytest.param("Go to https://example.com/login, check the Remember me box and click Login",
+                     "https://example.com/login",
+                     "    Check Checkbox    text=Remember me\n    Click    text=Login\n", id="box-then-a-click"),
+        pytest.param("Go to https://example.com/form and check the Male radio button",
+                     "https://example.com/form", "    Check Checkbox    css=#male\n", id="radio-button"),
+        pytest.param("Go to https://www.saucedemo.com, add the backpack to the cart and check out",
+                     "https://www.saucedemo.com",
+                     "    Click    id=add-to-cart-sauce-labs-backpack\n    Click    id=checkout\n", id="check-out"),
+    ])
+    def test_checking_a_box_or_checking_out_is_an_action_not_a_verify(self, query, url, body):
+        assert shapes(self.page(url, body), query) == set()
+
+    def test_an_action_check_still_asks_for_more_than_opening(self):
+        assert shapes(self.page(self.BOXES), f"Go to {self.BOXES} and check checkbox 1") == {EMPTY_TEST}
+        assert pass_suggestions(self.page(self.BOXES), f"Go to {self.BOXES} and check checkbox 1") == [
+            SENTENCE_EMPTY]
+
+    @pytest.mark.parametrize("query, url, body", [
+        pytest.param(f"Go to {BOXES}, check that checkbox 1 is checked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="that-and-is"),
+        pytest.param(f"Go to {BOXES}, check if checkbox 1 is ticked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="if"),
+        pytest.param(f"Go to {BOXES}, check whether the box is ticked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="whether"),
+        pytest.param(f"Go to {BOXES}, check the boxes are ticked", BOXES,
+                     "    Click    css=#checkboxes input >> nth=0\n", id="are"),
+        pytest.param("Open example.com and check the page title is not empty", "https://example.com",
+                     "    ${title}=    Get Title\n    Log    ${title}\n", id="no-box-at-all"),
+        pytest.param("Open example.com and check outside links work", "https://example.com",
+                     "    Click    text=Go\n", id="outside-is-not-out"),
+    ])
+    def test_a_check_that_states_something_is_still_a_verify(self, query, url, body):
+        assert shapes(self.page(url, body), query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_box_in_a_later_clause_does_not_make_this_check_an_action(self):
+        query = "Go to https://example.com, check the title is not empty and click the Remember me box"
+        code = self.page("https://example.com", "    Click    text=Remember me\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_verify_word_after_an_action_check_is_still_a_verify(self):
+        query = f"Go to {self.BOXES}, check checkbox 1 and verify it is ticked"
+        code = self.page(self.BOXES, "    Check Checkbox    css=#checkboxes input >> nth=0\n")
+        assert shapes(code, query) == {VERIFY_WITHOUT_ASSERTION}
+
+
+class TestLongRequests:
+    """A request has no length limit: reading it must take time in proportion to its length."""
+
+    CODE = robot("", "    New Page    https://example.com\n    Click    text=Go\n")
+
+    @pytest.mark.parametrize("word", ["get ", "verify ", "check ", "check box ", "click ", "https://a.com/get ",
+                                      "(", "a.", "https://a.com/get", "click to get ", "2) click ", "tap -> "])
+    def test_a_long_request_of_one_repeated_word_takes_under_two_seconds(self, word):
+        query = word * (80_000 // len(word))
+        start = time.perf_counter()
+        pass_suggestions(self.CODE, query)
+        assert time.perf_counter() - start < 2.0
+
+    def test_the_clause_of_each_verify_word_is_what_follows_it_up_to_the_clause_end(self):
+        query = "Go to x, verify there are 20 books, then verify 5 items and check the Total is 7. Done"
+        assert pass_quality._verify_clauses(query) == [
+            " there are 20 books", " 5 items ", " the total is 7"]
+
+
+class TestVariableExpansionIsBounded:
+    """A variable may name itself: `${loc}    ${loc} ${loc}` grows to k**5 copies in the five passes.
+
+    Never more than 16 self-references in a test here: without the bound 32 need about 235 MB.
+    """
+
+    @staticmethod
+    def naming_itself(times: int) -> str:
+        return " ".join(["${loc}"] * times)
+
+    @pytest.mark.parametrize("times", [12, 16])
+    def test_a_variable_naming_itself_stays_within_the_limit(self, times):
+        resolved = pass_quality._resolve("${loc}", {"loc": self.naming_itself(times)})
+        assert len(resolved) <= pass_quality._RESOLVE_LIMIT
+
+    def test_an_abandoned_pass_returns_the_text_as_it_stood_before_it(self):
+        # One pass that fans out: 50 values of 6,000 characters each. The pass before it stays.
+        variables = {"a": "x" * 6000, "b": "${a}" * 50}
+        assert pass_quality._resolve("${b}", variables) == "${a}" * 50
+
+    def test_small_values_resolve_as_before(self):
+        variables = {"url": "https://example.com", "page": "${url}/login", "loc": "css=a[href='${page}']"}
+        assert pass_quality._resolve("${loc}", variables) == "css=a[href='https://example.com/login']"
+        assert pass_quality._resolve("  css=h1  ", variables) == "css=h1"
+
+    def test_a_finding_names_no_locator_longer_than_the_limit(self):
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${loc}    " + self.naming_itself(12)
+                + "\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    ${loc}    label    Option 2\n"
+                "    ${v}=    Get Text    ${loc}\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [f.shape for f in found] == [SELECT_CHECK_CANNOT_FAIL]
+        assert len(found[0].detail) <= pass_quality._RESOLVE_LIMIT
+
+
+class TestTheVariableScanIsLinear:
+    """A run of `${` that never closes: the scan read on from every `${` to the next `}` or the end, so its time grew
+    with the square of the run. A name holds no `{` now, so each start stops at the next one.
+
+    Never more than 9,980 unclosed `${` in one value here. The values Robot gives were executed in the runner image
+    (Robot Framework 7.4.2).
+    """
+
+    @pytest.mark.parametrize("opened", [4_995, 9_980])
+    def test_an_unclosed_run_resolves_in_under_half_a_second(self, opened):
+        # 4,995: a 9,994-char value substituted on every pass (2.4 s with the old scan). 9,980: over the bound at once.
+        variables = {"a": "${a}" + "${" * opened}
+        start = time.perf_counter()
+        pass_quality._resolve("${a}", variables)
+        assert time.perf_counter() - start < 0.5
+
+    def test_a_nested_reference_resolves_from_the_inside_out(self):
+        # Robot resolves `${b}` first: with b = x, `${a${b}}` reads `${ax}`.
+        assert pass_quality._resolve("${a${b}}", {"b": "x", "ax": "Products"}) == "Products"
+
+    def test_a_nested_name_in_the_variables_section_is_declared_as_robot_resolves_it(self):
+        # Robot resolves a declared name with the variables declared above it; one declared below is an error.
+        variables, _ = pass_quality._parse("*** Variables ***\n${b}    x\n${p${b}}    v\n${q${c}}    w\n${c}    y\n")
+        assert variables == {"b": "x", "px": "v", "c": "y"}
+
+    def test_an_inline_python_cell_uses_the_variable_it_names(self):
+        # `${{ $count + 1 }}` is a Python expression that reads `${count}`, not a variable named `{ $count + 1 `.
+        assert pass_quality._used_variables(("${{ $count + 1 }}",)) == {"count"}
+
+    def test_an_item_access_uses_the_variable_before_the_brackets(self):
+        assert pass_quality._used_variables(("${books}[0]",)) == {"books"}
+
+    def test_an_environment_variable_names_one_element_for_both_steps(self):
+        # Robot reads %{DROPDOWN} from the environment for both steps: one element, so the check cannot fail.
+        code = robot("", "    Select Options By    %{DROPDOWN}    label    Option 2\n"
+                         "    Get Text    %{DROPDOWN}    contains    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "%{DROPDOWN}")]
+
+
+class TestAValueTheBoundStopsIsNotRead:
+    """A resolution the bound stops returns text that still holds references. The count and read-locator rules do
+    not read that text as resolved: they report nothing rather than guess (the files of review_probes/rr3_probe.py).
+    """
+
+    COUNT_QUERY = "Go to https://x, get the titles of all books and verify there are 20 books"
+    READ_QUERY = "Go to https://x and get the page heading"
+
+    @staticmethod
+    def count_file(pad: int) -> str:
+        return ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${expected}    20\n${pad}    " + "x" * pad + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}\n")
+
+    @pytest.mark.parametrize("pad", [9_000, 10_001])
+    def test_a_long_sibling_argument_hides_no_count(self, pad):
+        assert check_pass_quality(self.count_file(pad), self.COUNT_QUERY) == []
+
+    @pytest.mark.parametrize("pad, second, found", [
+        (6_000, 6_000, []),                       # 12,000 characters for one statement: stopped
+        (4_000, 4_000, [READ_NOT_PERFORMED]),     # 8,000: resolved, the same answer as each argument alone
+    ])
+    def test_the_arguments_of_one_statement_share_one_bound(self, pad, second, found):
+        # The count is compared with 5, not 20: resolved, the missing read is reported; stopped, the rule reports
+        # nothing rather than guess (here at the cost of that true report).
+        code = ("*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+                "*** Variables ***\n${expected}    5\n${pad}    " + "x" * pad + "\n${pad2}    " + "y" * second + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}    values=${pad2}\n")
+        assert [f.shape for f in check_pass_quality(code, self.COUNT_QUERY)] == found
+
+    def test_many_arguments_each_under_the_bound_are_not_all_resolved(self):
+        # The re-review's shape: 200 arguments, each a variable naming itself once beside 9,990 characters. Each pass
+        # of each argument stays under the bound, so each argument alone grows to about 50,000 characters (10 MB in
+        # all when every argument had a bound of its own).
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${a}    ${a}" + "x" * 9_990 + "\n\n"
+                "*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    Should Be Equal As Integers    ${count}    5    " + "    ".join(["${a}"] * 200) + "\n")
+        with patch.object(pass_quality, "_resolve_checked", wraps=pass_quality._resolve_checked) as resolve:
+            found = check_pass_quality(code, self.COUNT_QUERY)
+        assert len([c for c in resolve.call_args_list if c.args[0] == "${a}"]) <= 2
+        assert found == []      # stopped: the rule reports nothing rather than guess
+
+    def test_a_count_inside_a_value_the_bound_stops_is_not_reported_missing(self):
+        # Robot puts the value into the expression: `5 == 20 #xxx…` compares the count with 20 (`#` starts a comment).
+        code = books("    ${count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be True    ${count} == ${expected}\n",
+                     "${expected}    20 #" + "x" * 10_000 + "\n")
+        assert READ_NOT_PERFORMED not in shapes(code, Q10)
+
+    @pytest.mark.parametrize("size, flagged", [(9_000, True), (10_001, False)])
+    def test_a_read_locator_the_bound_stops_is_not_read_as_the_answer(self, size, flagged):
+        code = robot("${title}    " + "x" * size + "\n",
+                     "    New Page    https://x\n"
+                     "    ${heading}=    Get Text    text=\"${title}\"\n")
+        assert (READ_LOCATOR_IS_THE_ANSWER in shapes(code, self.READ_QUERY)) is flagged
+
+    def test_resolve_checked_says_when_the_bound_stopped_a_pass(self):
+        small = {"url": "https://example.com", "page": "${url}/login", "loc": "css=a[href='${page}']"}
+        for text in ("${loc}", "  css=h1  "):
+            assert pass_quality._resolve_checked(text, small) == (pass_quality._resolve(text, small), False)
+        fan_out = {"a": "x" * 6000, "b": "${a}" * 50}
+        assert pass_quality._resolve_checked("${b}", fan_out) == ("${a}" * 50, True)
+
+
+class TestTheVariablesSectionIsReadAsRobotReadsIt:
+    """The Variables section as Robot 7.4.2 reads it (executed in the runner image): a `...` line continues its own
+    declaration, never an earlier one; the FIRST declaration of a name wins, and a later one is skipped with its
+    continuation (no error is logged); a declared `${{ … }}` name returns its declared value, not the Python result.
+    """
+
+    COUNT_QUERY = "Go to https://x, get the titles of all books and verify there are 20 books"
+    READ_QUERY = "Go to https://x and get the page heading"
+    HEAD = "*** Settings ***\nLibrary    Browser    timeout=30s\n\n*** Variables ***\n"
+
+    @classmethod
+    def count_file(cls, variables: str, check: str) -> str:
+        return (cls.HEAD + variables + "\n*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${count}=    Get Element Count    css=li.book\n"
+                "    " + check + "\n")
+
+    @classmethod
+    def read_file(cls, variables: str, locator: str = "${title}") -> str:
+        return (cls.HEAD + variables + "\n*** Test Cases ***\nT\n"
+                "    New Page    https://x\n"
+                "    ${heading}=    Get Text    " + locator + "\n")
+
+    @pytest.mark.parametrize("variables", [
+        '${title}    css=h1\n${x${EMPTY}}    a\n...    text="Welcome back"\n',
+        '${title}    css=h1\n${q${later}}    a\n...    text="Welcome back"\n${later}    y\n',
+    ])
+    def test_a_continuation_after_a_name_the_checker_does_not_declare_joins_no_earlier_variable(self, variables):
+        # Robot: ${title} = css=h1. The checker declares neither nested name, so it drops their continuation.
+        assert check_pass_quality(self.read_file(variables), self.READ_QUERY) == []
+
+    def test_a_continuation_after_a_declared_name_still_joins_it(self):
+        # The control: Robot reads ${title} = css=h1 and ${x} = `a text="Welcome back"`.
+        code = self.read_file('${title}    css=h1\n${x}    a\n...    text="Welcome back"\n')
+        assert check_pass_quality(code, self.READ_QUERY) == []
+        assert pass_quality._parse(code)[0] == {"title": "css=h1", "x": 'a text="Welcome back"'}
+
+    def test_a_select_value_above_such_a_continuation_keeps_its_value(self):
+        code = (self.HEAD + "${opt}    Option 2\n${x${EMPTY}}    a\n...    b\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    id=dropdown    label    ${opt}\n"
+                "    ${v}=    Get Text    id=dropdown\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    @pytest.mark.parametrize("variables", [
+        "${ed}    ed\n${expected}    20\n${expect${ed}}    5\n",   # `${expect${ed}}` declares `${expected}` again
+        "${expected}    20\n${expected}    5\n",
+    ])
+    def test_the_first_declaration_of_a_name_wins(self, variables):
+        code = self.count_file(variables, "Should Be Equal As Integers    ${count}    ${expected}")
+        assert READ_NOT_PERFORMED not in shapes(code, self.COUNT_QUERY)
+
+    def test_a_later_declaration_is_skipped_with_its_continuation(self):
+        variables, _ = pass_quality._parse("*** Variables ***\n${expected}    20\n${expected}    5\n...    6\n")
+        assert variables == {"expected": "20"}
+
+    def test_a_declared_inline_python_name_in_the_count_assertion_is_not_read_as_python(self):
+        # Robot: the declared `${{ 1 + 1 }}` returns 20, so the count is compared with 20.
+        code = self.count_file("${{ 1 + 1 }}    20\n", "Should Be Equal As Integers    ${count}    ${{ 1 + 1 }}")
+        assert READ_NOT_PERFORMED not in shapes(code, self.COUNT_QUERY)
+
+    def test_a_declared_inline_python_name_in_a_read_locator_is_not_read_as_the_answer(self):
+        # Robot reads text="Welcome back", which the query names.
+        code = self.read_file("${{ 'w' }}    Welcome back\n", "text=\"${{ 'w' }}\"")
+        assert check_pass_quality(code, "Go to https://x and get the Welcome back heading") == []
+
+    @pytest.mark.parametrize("check, found", [
+        ("Should Be Equal As Integers    ${count}    ${{ 20 }}", []),             # Python's 20 is compared
+        ("Should Be True    ${{ $count > 0 }}", [READ_NOT_PERFORMED]),              # 20 is never compared
+    ])
+    def test_an_inline_python_cell_reads_as_before_in_a_file_that_declares_no_such_name(self, check, found):
+        # The same answers on develop (f84d713) and 574f060: only a file that declares a `${{ … }}` name changes.
+        assert [f.shape for f in check_pass_quality(self.count_file("", check), self.COUNT_QUERY)] == found
+
+
+class TestAVariablesLineRobotRejectsDeclaresNothing:
+    """A Variables line declares a name only when Robot accepts it (executed in the runner image, Robot Framework
+    7.4.2): one `$`, `@` or `&` reference and nothing else but an optional `=`. A rejected line sets nothing, so the
+    valid line of the same name below it is the one Robot uses. A `&{…}` line is rejected when one of its items is
+    neither `name=value` (an `=` no odd run of backslashes escapes) nor a dictionary variable. A type after the name's
+    last ": " (Robot 7.3+) is not part of the name: `${t: int}` declares `${t}`, `${t:int}` is a name of its own, and
+    a type Robot does not know rejects the line.
+    """
+
+    VARS = TestTheVariablesSectionIsReadAsRobotReadsIt
+    EQ = "Should Be Equal As Integers    ${count}    ${expected}"
+    REJECTED = ["${expected}x    5", "%{expected}    5", "${expected}[0]    5", "${expected} ${x}    5",
+                "&{expected}    notadict"]
+
+    @pytest.mark.parametrize("rejected", REJECTED)
+    def test_a_rejected_line_leaves_the_name_to_the_valid_line_below(self, rejected):
+        # Robot: ${expected} = 20, the number the request asks to verify.
+        code = self.VARS.count_file(rejected + "\n${expected}    20\n", self.EQ)
+        assert check_pass_quality(code, self.VARS.COUNT_QUERY) == []
+
+    def test_a_rejected_read_locator_line_leaves_the_locator_below(self):
+        # Robot: ${title} = css=h1, which holds no text literal.
+        code = self.VARS.read_file('${title}x    text="Welcome back"\n${title}    css=h1\n')
+        assert check_pass_quality(code, self.VARS.READ_QUERY) == []
+
+    def test_a_rejected_select_value_line_leaves_the_value_below(self):
+        # Robot: ${opt} = Option 2, so the whole <select>'s text is checked for the selected option.
+        code = (self.VARS.HEAD + "${opt}x    Option 9\n${opt}    Option 2\n\n*** Test Cases ***\nT\n"
+                "    Select Options By    id=dropdown    label    ${opt}\n"
+                "    ${v}=    Get Text    id=dropdown\n"
+                "    Should Contain    ${v}    Option 2\n")
+        found = check_pass_quality(code, None)
+        assert [(f.shape, f.detail) for f in found] == [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    def test_a_rejected_line_continues_nothing(self):
+        variables, _ = pass_quality._parse("*** Variables ***\n${expected}x    5\n...    6\n${expected}    20\n")
+        assert variables == {"expected": "20"}
+
+    @pytest.mark.parametrize("rejected", REJECTED)
+    def test_a_rejected_line_below_a_valid_one_changes_nothing(self, rejected):
+        code = self.VARS.count_file("${expected}    20\n" + rejected + "\n", self.EQ)
+        assert check_pass_quality(code, self.VARS.COUNT_QUERY) == []
+
+    def test_a_rejected_read_locator_line_below_the_valid_one_changes_nothing(self):
+        code = self.VARS.read_file('${title}    css=h1\n${title}x    text="Welcome back"\n')
+        assert check_pass_quality(code, self.VARS.READ_QUERY) == []
+
+    def test_dictionary_items_are_read_as_robot_reads_them(self):
+        # Runner: d2, d3 and d8 are rejected (the `${dN}    20` below them wins); the others keep their dictionary.
+        code = ("*** Variables ***\n&{other}    k=v\n"
+                "&{d1}    a=1    b=2\n${d1}    20\n"
+                "&{d2}    notadict\n${d2}    20\n"
+                "&{d3}    a\\=1\n${d3}    20\n"
+                "&{d4}    =1\n${d4}    20\n"
+                "&{d5}    &{other}\n${d5}    20\n"
+                "&{d6}    a\\\\=1\n${d6}    20\n"
+                "&{d7}    ${k}=v\n${d7}    20\n"
+                "&{d8}    a=1    notadict\n${d8}    20\n")
+        assert pass_quality._parse(code)[0] == {
+            "other": "k=v", "d1": "a=1 b=2", "d2": "20", "d3": "20", "d4": "=1", "d5": "&{other}",
+            "d6": "a\\\\=1", "d7": "${k}=v", "d8": "20"}
+
+    @pytest.mark.parametrize("dictionary, found", [
+        ("&{expected}    a\\=1", []),                     # rejected: ${expected} = 20, the line below
+        ("&{expected}    =1", [READ_NOT_PERFORMED]),      # accepted: the dictionary is compared, not 20
+    ])
+    def test_a_dictionary_line_before_the_count_number(self, dictionary, found):
+        code = self.VARS.count_file(dictionary + "\n${expected}    20\n", self.EQ)
+        assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
+
+    def test_typed_names_are_read_as_robot_reads_them(self):
+        # Runner: t = 5, u = 20 and u:int = 5, v = 5, y = 20 (unknown type), e1 = 5, a:b = 8 (type `int`; the
+        # `${a: b}` line has the unknown type `b`), t2 = 5 (`INT`), t3 = 5 (`int | None`).
+        code = ("*** Variables ***\n${t: int}    5\n${t}    20\n${u:int}    5\n${u}    20\n"
+                "${v: int}=    5\n${v}    20\n${y: nosuch}    5\n${y}    20\n${e1} =    5\n${e1}    20\n"
+                "${a: b: int}    8\n${a: b}    20\n${t2: INT}    5\n${t2}    20\n"
+                "${t3: int | None}    5\n${t3}    20\n")
+        assert pass_quality._parse(code)[0] == {
+            "t": "5", "u:int": "5", "u": "20", "v": "5", "y": "20", "e1": "5", "a:b": "8", "t2": "5", "t3": "5"}
+
+    @pytest.mark.parametrize("variables, found", [
+        ("${expected: int}    20\n", []),                                          # Robot: 20
+        ("${expected: int}    5\n${expected}    20\n", [READ_NOT_PERFORMED]),      # Robot: 5
+        ("${expected: nosuch}    5\n${expected}    20\n", []),                     # rejected: Robot 20
+    ])
+    def test_a_typed_name_before_the_count_number(self, variables, found):
+        code = self.VARS.count_file(variables, self.EQ)
+        assert [f.shape for f in check_pass_quality(code, self.VARS.COUNT_QUERY)] == found
+
+
+class TestTheSelectRuleFollowsARePointedLocator:
+    """The select rule reads each locator and value as it stands where it is used (Robot Framework 7.4.2, executed in
+    the runner image): `${loc}=    Set Variable    id=heading` between the select and the read sends Get Text to
+    id=heading, so that check can fail. Every body starts from the Variables section; `${x}=    Set Variable    <one
+    argument>` is followed, any other assignment leaves x a value the checker does not know (equal to nothing else).
+    A file holding a step that can re-point what the rule cannot follow reports no select check (deny by default).
+    """
+
+    HEAD = "*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n"
+    VARIABLES = "${loc}    id=dropdown\n${opt}    Option 2\n"
+    F1_PAIR = ("    ${loc_before}=    Run Keyword And Ignore Error    Get Text    ${loc}\n"
+               "    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    30s    250ms    Get Text    ${loc}"
+               "    !=    ${loc_before}[1]\n")
+
+    @classmethod
+    def select_file(cls, between: str = "", before: str = "", variables: str | None = None, after: str = "",
+                    locator: str = "${loc}", name: str = "T", check: str = "    Should Contain    ${v}    Option 2\n",
+                    settings: str = "") -> str:
+        return (cls.HEAD.replace("\n\n", settings + "\n\n") + (cls.VARIABLES if variables is None else variables)
+                + "\n*** Test Cases ***\n" + name + "\n" + before
+                + f"    Select Options By    {locator}    label    ${{opt}}\n" + between
+                + f"    ${{v}}=    Get Text    {locator}\n" + check + after)
+
+    @staticmethod
+    def select_found(code: str) -> list[tuple[str, str]]:
+        return [(f.shape, f.detail) for f in check_pass_quality(code, None) if f.shape == SELECT_CHECK_CANNOT_FAIL]
+
+    REPORTED = [(SELECT_CHECK_CANNOT_FAIL, "id=dropdown")]
+
+    def test_a_locator_re_pointed_between_the_select_and_the_read_is_not_reported(self):
+        assert self.select_found(self.select_file("    ${loc}=    Set Variable    id=heading\n")) == []
+
+    def test_the_same_file_without_the_re_point_is_reported(self):
+        assert self.select_found(self.select_file()) == self.REPORTED
+
+    @pytest.mark.parametrize("value", ["id=dropdown", "css=#dropdown"])
+    def test_a_re_point_to_the_same_element_is_reported(self, value):
+        assert self.select_found(self.select_file(f"    ${{loc}}=    Set Variable    {value}\n")) == self.REPORTED
+
+    def test_the_reads_variable_assigned_again_before_the_check_is_not_reported(self):
+        # Robot checks the text of id=result, which can fail.
+        code = self.select_file("", check="    ${v}=    Get Text    id=result\n    Should Contain    ${v}    Option 2\n")
+        assert self.select_found(code) == []
+
+    def test_the_selected_value_is_read_at_the_select_and_the_checked_value_at_the_check(self):
+        # The check compares Option 1, which is not the option selected: not this shape.
+        code = self.select_file(check="    ${opt}=    Set Variable    Option 1\n    Should Contain    ${v}    ${opt}\n")
+        assert self.select_found(code) == []
+        assert self.select_found(self.select_file(check="    Should Contain    ${v}    ${opt}\n")) == self.REPORTED
+
+    def test_a_locator_set_in_the_body_is_followed(self):
+        code = self.select_file(before="    ${dd}=    Set Variable    id=dropdown\n", variables="${opt}    Option 2\n",
+                                locator="${dd}")
+        assert self.select_found(code) == self.REPORTED
+
+    def test_one_value_the_checker_does_not_know_used_for_both_steps_is_reported(self):
+        code = self.select_file(before="    ${dd}=    Get Element    id=dropdown\n", variables="${opt}    Option 2\n",
+                                locator="${dd}")
+        assert self.select_found(code) == [(SELECT_CHECK_CANNOT_FAIL, "${dd}")]
+
+    def test_a_second_value_the_checker_does_not_know_between_is_not_reported(self):
+        code = self.select_file("    ${dd}=    Get Element    id=other\n",
+                                before="    ${dd}=    Get Element    id=dropdown\n",
+                                variables="${opt}    Option 2\n", locator="${dd}")
+        assert self.select_found(code) == []
+
+    @pytest.mark.parametrize("assignment", [
+        "    ${loc}=    Set Variable    id=dropdown    id=heading\n",      # another number of arguments
+        "    ${loc: str}=    Set Variable    id=dropdown\n",                # a type
+        "    ${loc}=    Catenate    id=dropdown\n",                         # another keyword
+        "    ${loc}=    Set Variable    ${{'id=dropdown'}}\n",              # a value the checker cannot resolve
+    ])
+    def test_any_other_assignment_between_is_a_value_the_checker_does_not_know(self, assignment):
+        assert self.select_found(self.select_file(assignment)) == []
+
+    @pytest.mark.parametrize("block", [
+        "    IF    $flag\n        ${loc}=    Set Variable    id=heading\n    ELSE\n"
+        "        ${loc}=    Set Variable    id=dropdown\n    END\n",
+        "    ${loc}=    Set Variable    id=heading\n    FOR    ${item}    IN    @{items}\n"
+        "        ${loc}=    Set Variable    id=dropdown\n    END\n",
+    ])
+    def test_a_set_variable_where_lines_do_not_run_in_order_is_not_followed(self, block):
+        # The last line written says id=dropdown, but Robot may skip it (an IF branch, an empty loop).
+        assert self.select_found(self.select_file(block)) == []
+
+    @pytest.mark.parametrize("variable_line", ["    FOR    ${loc}    IN    id=heading\n    END\n",
+                                               "    VAR    ${loc}    id=dropdown\n",
+                                               "    TRY\n        Fail    x\n    EXCEPT    AS    ${loc}\n    END\n"])
+    def test_a_for_variable_a_var_and_an_except_as_assign(self, variable_line):
+        assert self.select_found(self.select_file(variable_line)) == []
+
+    def test_a_variables_value_keeps_what_it_named_when_the_body_re_points_that_name(self):
+        # Robot resolves the Variables section from itself: ${loc} stays id=heading after `${a}=  Set Variable
+        # id=dropdown` (runner image), so the read is of another element and the check can fail.
+        code = self.select_file(before="    ${a}=    Set Variable    id=dropdown\n",
+                                variables="${a}    id=heading\n${loc}    ${a}\n${opt}    Option 2\n")
+        code = code.replace("    Select Options By    ${loc}", "    Select Options By    id=dropdown")
+        assert self.select_found(code) == []
+        assert self.select_found(code.replace("${loc}    ${a}", "${loc}    id=dropdown")) == self.REPORTED
+
+    def test_each_test_starts_from_the_variables_section(self):
+        # The second test's read is not the first test's re-pointed locator.
+        code = self.select_file("    ${loc}=    Set Variable    id=heading\n",
+                                after="\nSecond\n    ${v}=    Get Text    ${loc}\n    Should Contain    ${v}    Option 2\n")
+        assert self.select_found(code) == self.REPORTED
+
+    @pytest.mark.parametrize("between, after, settings", [
+        pytest.param("    Set Test Variable    ${loc}    id=heading\n", "", "", id="setter"),
+        pytest.param("    Set Task Variable    ${loc}    id=heading\n", "", "", id="setter-task"),
+        pytest.param("    SetTestVariable    ${loc}    id=heading\n", "", "", id="setter-without-spaces"),
+        pytest.param("    Given BuiltIn.Set Suite Variable    ${loc}    id=heading\n", "", "", id="setter-prefixed"),
+        pytest.param("    Run Keyword If    $flag    Set Test Variable    ${loc}    id=heading\n", "", "",
+                     id="setter-behind-run-keyword-if"),
+        pytest.param("    Run Keyword    ${kw}    \\${loc}    id=heading\n", "", "", id="run-keyword"),
+        pytest.param("    IF    $flag    Run Keyword    ${kw}    \\${loc}    id=heading\n", "", "",
+                     id="run-keyword-in-an-inline-if"),
+        pytest.param("    Wait Until Keyword Succeeds    2x    1s    ${kw}    \\${loc}    id=heading\n", "", "",
+                     id="wait-until-keyword-succeeds"),
+        pytest.param("    Import Variables    ${CURDIR}/v.py\n", "", "", id="import-variables"),
+        pytest.param("    Import Resource    ${CURDIR}/r.resource\n", "", "", id="import-resource"),
+        pytest.param("    Set Selector Prefix    iframe#f >>>\n", "", "", id="set-selector-prefix"),
+        pytest.param("    Repoint\n", "\n*** Keywords ***\nRepoint\n    VAR    ${loc}    id=heading    scope=TEST\n", "",
+                     id="var-with-a-scope"),
+        pytest.param("    ${loc}=    Set Variable    id=dropdown\n",
+                     "\n*** Keywords ***\nSet Variable\n    [Arguments]    ${value}\n    RETURN    id=heading\n", "",
+                     id="own-set-variable-keyword"),
+        pytest.param("", "\n*** Keywords ***\nGet ${what}\n    [Arguments]    ${locator}\n    RETURN    x\n", "",
+                     id="own-embedded-argument-keyword"),
+        pytest.param("    ${l${EMPTY}oc}=    Set Variable    id=heading\n", "", "", id="nested-assigned-name"),
+        pytest.param("    ${l$oc}=    Set Variable    id=heading\n", "", "", id="dollar-in-assigned-name"),
+        pytest.param("    ${loc}[0]=    Set Variable    id=heading\n", "", "", id="item-assignment"),
+        pytest.param(" ${loc}=    Set Variable    id=dropdown\n", "", "", id="one-space-line"),
+        pytest.param("    Log    x\n...    y\n", "", "", id="column-0-continuation"),
+        pytest.param("| | ${loc}= | Set Variable | id=heading |\n", "", "", id="pipe-separated-line"),
+        pytest.param("    [Template]    Log\n", "", "", id="template"),
+        pytest.param("", "", "\nTest Template    Log", id="test-template-setting"),
+    ])
+    def test_a_file_holding_what_the_rule_cannot_follow_reports_no_select_check(self, between, after, settings):
+        assert self.select_found(self.select_file(between, after=after, settings=settings)) == []
+
+    @pytest.mark.parametrize("name", ["T    ${loc}=    Set Variable    id=heading", "T\n    ...    No Operation"])
+    def test_a_step_on_the_name_line_reports_no_select_check(self, name):
+        assert self.select_found(self.select_file(name=name)) == []
+
+    def test_the_change_wait_pair_between_the_select_and_the_read_is_still_reported(self):
+        assert self.select_found(self.select_file(self.F1_PAIR)) == self.REPORTED
+
+    @pytest.mark.parametrize("line", [
+        "    Run Keyword And Ignore Error    Click    id=go\n",
+        "    Run Keyword And Ignore Error    Get Text    ${loc}    then    value\n",
+    ])
+    def test_another_run_keyword_and_ignore_error_reports_no_select_check(self, line):
+        assert self.select_found(self.select_file(line)) == []
+
+    # The reviewer's table (rr5 probe, section A): Robot reads id=heading after the re-point.
+    REPOINTED = "    ${loc}=    Set Variable    id=heading\n"
+
+    @pytest.mark.parametrize("junk, between, found", [
+        ("", REPOINTED, []),
+        ("not_a_var    a\n...    b\n", REPOINTED, []),
+        ("${x${EMPTY}}    a\n...    b\n", REPOINTED, []),
+        ("not_a_var    a\n...    b\n", "", REPORTED),
+    ])
+    def test_the_reviewers_table_reads_as_robot_reads_it(self, junk, between, found):
+        assert self.select_found(self.select_file(between, variables=self.VARIABLES + junk)) == found
+
+
+class TestTheChangeWaitPairDoesNotMoveTheAnswer:
+    """F1: `insert_change_waits` puts a before-read and a change-wait into a test, both wrapped in
+    `Run Keyword And Ignore Error`. The checker needs no code for them: its answer is the same with
+    and without the pair. Pinned here on the demoblaze test the feature was built for (a Laptops
+    click, then the first laptop's name) so a future checker change cannot silently flip it."""
+
+    READ = "css=#tbodyid >> div.col-lg-4 >> nth=0 >> a.hrefch"
+    ACTION = "a:has-text('Laptops')"
+    WAITS = ({"read_locator": READ, "action_locator": ACTION},)
+    VERIFY_QUERY = ("Go to https://www.demoblaze.com, click on the Laptops category in the left menu "
+                    "and verify the first laptop name is shown")
+    GET_QUERY = ("Go to https://www.demoblaze.com, click on the Laptops category in the left menu "
+                 "and get the name of the first laptop shown")
+
+    @staticmethod
+    def demoblaze(extra: str = "", inline: bool = False) -> str:
+        """The generated test (bench/private/bs31_eval/probe_pr42/exec_check/p03_60a0b526-...robot),
+        optionally with extra body lines before Close Browser, optionally with inline locators."""
+        read = TestTheChangeWaitPairDoesNotMoveTheAnswer.READ
+        action = TestTheChangeWaitPairDoesNotMoveTheAnswer.ACTION
+        variables = ("${browser}    chromium\n${headless}    True\n${url}    https://www.demoblaze.com\n"
+                     f"${{laptops_category_locator}}    {action}\n"
+                     f"${{first_laptop_name_locator}}    {read}\n")
+        click = f"    Click    {action}\n" if inline else "    Click    ${laptops_category_locator}\n"
+        get = (f"    ${{first_laptop_name}}=    Get Text    {read}\n" if inline
+               else "    ${first_laptop_name}=    Get Text    ${first_laptop_name_locator}\n")
+        return ("*** Settings ***\nLibrary    Browser    timeout=30s\nLibrary    BuiltIn\n"
+                "Library    Collections\n\n*** Variables ***\n" + variables
+                + "\n*** Test Cases ***\nGenerated Test\n"
+                "    [Documentation]    Auto-generated test case\n"
+                "    New Browser    ${browser}    headless=${headless}\n"
+                "    New Context    viewport={'width': 1920, 'height': 1080}\n"
+                "    New Page    ${url}\n" + click + get
+                + "    Log    First Laptop Name: ${first_laptop_name}\n" + extra + "    Close Browser\n")
+
+    @classmethod
+    def with_pair(cls, code: str) -> str:
+        from src.backend.crew_ai.robot_code_normalizer import insert_change_waits
+        out = insert_change_waits(code, cls.WAITS)
+        # Control for every test below: the pair really went into this file.
+        assert out != code and "Run Keyword And Ignore Error    Wait Until Keyword Succeeds" in out
+        return out
+
+    def test_a_verify_request_without_an_assertion_is_flagged_with_and_without_the_pair(self):
+        bare = self.demoblaze()
+        paired = self.with_pair(bare)
+        assert shapes(bare, self.VERIFY_QUERY) == {VERIFY_WITHOUT_ASSERTION}
+        assert shapes(paired, self.VERIFY_QUERY) == {VERIFY_WITHOUT_ASSERTION}
+        assert check_pass_quality(paired, self.VERIFY_QUERY) == check_pass_quality(bare, self.VERIFY_QUERY)
+
+    def test_a_real_assertion_clears_the_shape_with_and_without_the_pair(self):
+        # The control for the test above: the shape is not always present.
+        code = self.demoblaze("    Get Text    ${first_laptop_name_locator}    ==    Sony vaio i5\n")
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(code, self.VERIFY_QUERY)
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(self.with_pair(code), self.VERIFY_QUERY)
+
+    def test_a_get_request_has_the_same_findings_with_and_without_the_pair(self):
+        bare = self.demoblaze()
+        assert (check_pass_quality(self.with_pair(bare), self.GET_QUERY)
+                == check_pass_quality(bare, self.GET_QUERY))
+
+    def test_the_inline_form_gives_the_same_answer_with_and_without_the_pair(self):
+        bare = self.demoblaze(inline=True)
+        paired = self.with_pair(bare)
+        assert "${read_before_1}" in paired
+        for query in (self.VERIFY_QUERY, self.GET_QUERY):
+            assert check_pass_quality(paired, query) == check_pass_quality(bare, query), query
+        assert shapes(paired, self.VERIFY_QUERY) == {VERIFY_WITHOUT_ASSERTION}
+
+    def test_a_hand_written_wait_without_a_before_read_does_not_move_the_answer(self):
+        wait = ("    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    10s    1s"
+                "    Get Text    css=#x    !=    old\n")
+        bare = self.demoblaze()
+        # Placed above Close Browser: the line is in the file, and the answer is the same without it.
+        code = bare.replace("    Close Browser\n", wait + "    Close Browser\n")
+        assert code != bare
+        for query in (self.VERIFY_QUERY, self.GET_QUERY):
+            assert check_pass_quality(code, query) == check_pass_quality(bare, query), query
+
+    def test_the_old_plain_pair_would_have_changed_the_answer(self):
+        # The reason the never-failing form matters to the checker: a plain wait compares the read
+        # with the value read before the click (`!=`), which the checker counts as an assertion, so
+        # the verify request stops being flagged although nothing was verified.
+        bare = self.demoblaze()
+        plain = bare.replace(
+            "    Click    ${laptops_category_locator}\n",
+            "    ${first_laptop_name_locator_before}=    Get Text    ${first_laptop_name_locator}\n"
+            "    Click    ${laptops_category_locator}\n"
+            "    Wait Until Keyword Succeeds    30s    250ms    Get Text    ${first_laptop_name_locator}"
+            "    !=    ${first_laptop_name_locator_before}\n")
+        assert plain != bare
+        assert VERIFY_WITHOUT_ASSERTION in shapes(bare, self.VERIFY_QUERY)
+        assert VERIFY_WITHOUT_ASSERTION not in shapes(plain, self.VERIFY_QUERY)
+
+
+def test_importing_the_checker_loads_no_config_database_or_llm_client():
+    probe = ("import sys; import src.backend.core.pass_quality; "
+             "bad = [m for m in ('src.backend.core.config', 'psycopg', 'litellm', 'crewai', "
+             "'requests', 'httpx', 'sqlalchemy') if m in sys.modules]; print(bad)")
+    out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT, capture_output=True,
+                         text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "[]"

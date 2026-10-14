@@ -3,7 +3,7 @@
 Org-dimension test strategy (mirrors test_rerun_org_scope pattern):
 - owner (org A) creates a run.
 - same-org org_admin peer (different user_id, same org_id) should be ALLOWED by
-  caller_can_read (org_admin of the run's org), but DENIED by the old bare
+  caller_can_access (org_admin of the run's org), but DENIED by the old bare
   user_id == user_id check — this is the genuine RED gate before the wiring.
 - stranger (org B) should be denied under both old and new code.
 
@@ -67,7 +67,7 @@ def test_same_org_admin_peer_can_submit_feedback(client):
 
     This is the genuine org-dimension RED gate:
     - old code: compares peer.user_id != owner.user_id -> denies (wrong).
-    - new code: caller_can_read sees peer is org_admin of the same org -> allows.
+    - new code: caller_can_access sees peer is org_admin of the same org -> allows.
 
     feedback_type validation happens after the ownership gate, so a 400
     (invalid feedback_type passed the gate) or 200/disabled means gate passed.

@@ -233,7 +233,7 @@ class PostgresSpanExporter(SpanExporter):
             if org_id is None:
                 try:
                     from src.backend.core.run_registry import get_run_registry  # noqa: PLC0415
-                    _, org_id = get_run_registry().get_run_owner(workflow_id)
+                    org_id = get_run_registry().get_run_owner(workflow_id).org_id
                 except Exception:
                     org_id = None  # unknown run — stays None, re-checked next call
                 if org_id is not None:

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:35.633330" rpa="false" schemaversion="5">
+<suite id="s1" name="Retry Succeeds Then Real" source="/w/retry_succeeds_then_real.robot">
+<test id="s1-t1" name="Retry Succeeds Then Real" line="5">
+<kw name="Wait Until Keyword Succeeds" owner="BuiltIn">
+<kw name="Flaky">
+<kw name="Evaluate" owner="BuiltIn">
+<msg time="2026-09-21T18:17:35.671921" level="INFO">${n} = 1</msg>
+<var>${n}</var>
+<arg>${N} + 1</arg>
+<doc>Evaluates the given expression in Python and returns the result.</doc>
+<status status="PASS" start="2026-09-21T18:17:35.671753" elapsed="0.000209"/>
+</kw>
+<kw name="Set Suite Variable" owner="BuiltIn">
+<msg time="2026-09-21T18:17:35.672156" level="INFO">${N} = 1</msg>
+<arg>${N}</arg>
+<arg>${n}</arg>
+<doc>Makes a variable available everywhere within the scope of the current suite.</doc>
+<status status="PASS" start="2026-09-21T18:17:35.672022" elapsed="0.000155"/>
+</kw>
+<if>
+<branch type="IF" condition="${n} &lt; 2">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:35.672440" level="FAIL">Error: flaky attempt 1</msg>
+<arg>Error: flaky attempt ${n}</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:35.672300" elapsed="0.000201">Error: flaky attempt 1</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:35.672222" elapsed="0.000314">Error: flaky attempt 1</status>
+</branch>
+<status status="FAIL" start="2026-09-21T18:17:35.672208" elapsed="0.000344">Error: flaky attempt 1</status>
+</if>
+<status status="FAIL" start="2026-09-21T18:17:35.671612" elapsed="0.000990">Error: flaky attempt 1</status>
+</kw>
+<kw name="Flaky">
+<kw name="Evaluate" owner="BuiltIn">
+<msg time="2026-09-21T18:17:35.683248" level="INFO">${n} = 2</msg>
+<var>${n}</var>
+<arg>${N} + 1</arg>
+<doc>Evaluates the given expression in Python and returns the result.</doc>
+<status status="PASS" start="2026-09-21T18:17:35.683046" elapsed="0.000222"/>
+</kw>
+<kw name="Set Suite Variable" owner="BuiltIn">
+<msg time="2026-09-21T18:17:35.683456" level="INFO">${N} = 2</msg>
+<arg>${N}</arg>
+<arg>${n}</arg>
+<doc>Makes a variable available everywhere within the scope of the current suite.</doc>
+<status status="PASS" start="2026-09-21T18:17:35.683324" elapsed="0.000162"/>
+</kw>
+<if>
+<branch type="IF" condition="${n} &lt; 2">
+<kw name="Fail" owner="BuiltIn">
+<arg>Error: flaky attempt ${n}</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="NOT RUN" start="2026-09-21T18:17:35.683601" elapsed="0.000008"/>
+</kw>
+<status status="NOT RUN" start="2026-09-21T18:17:35.683527" elapsed="0.000095"/>
+</branch>
+<status status="PASS" start="2026-09-21T18:17:35.683514" elapsed="0.000119"/>
+</if>
+<status status="PASS" start="2026-09-21T18:17:35.682881" elapsed="0.000774"/>
+</kw>
+<arg>3x</arg>
+<arg>10ms</arg>
+<arg>Flaky</arg>
+<doc>Runs the specified keyword and retries if it fails.</doc>
+<status status="PASS" start="2026-09-21T18:17:35.671263" elapsed="0.012409"/>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:35.683865" level="FAIL">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real3")</msg>
+<arg>TimeoutError: locator.fill: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#real3")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:35.683710" elapsed="0.000191">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real3")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:35.670907" elapsed="0.013066">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real3")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:35.634151" elapsed="0.050011"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Retry Succeeds Then Real" id="s1" pass="0" fail="1" skip="0">Retry Succeeds Then Real</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

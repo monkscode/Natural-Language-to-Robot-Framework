@@ -240,6 +240,7 @@ class IntentExtractor:
                 f"evidence={initial_evidence})"
             )
         except Exception as e:
+            self._em._writer_conn.rollback()
             logger.debug(
                 f"[LEARNING:STRUCTURAL] Seed migration skipped for "
                 f"'{intent_name}': {e}"
@@ -400,49 +401,53 @@ class StructuralRuleEngine(LearningEngine):
         same connection — avoids a TOCTOU race in the INSERT OR IGNORE path.
         """
         rule_name = intent["intent"]
-        row = self._em._writer_conn.execute(
-            "SELECT * FROM structural_rules WHERE rule_name = ?",
-            (rule_name,),
-        ).fetchone()
+        try:
+            row = self._em._writer_conn.execute(
+                "SELECT * FROM structural_rules WHERE rule_name = ?",
+                (rule_name,),
+            ).fetchone()
 
-        if row:
-            return dict(row)
+            if row:
+                return dict(row)
 
-        # Create with evidence_count=0, counter_evidence=0, score=0.0
-        requires = intent.get("requires", {})
-        required_structure = requires.get("code_structure", "unknown")
-        required_keywords = requires.get("keywords", [])
-        query_pattern = "|".join(intent.get("triggered_by", []))
+            # Create with evidence_count=0, counter_evidence=0, score=0.0
+            requires = intent.get("requires", {})
+            required_structure = requires.get("code_structure", "unknown")
+            required_keywords = requires.get("keywords", [])
+            query_pattern = "|".join(intent.get("triggered_by", []))
 
-        # GLOBAL / cross-org table (no org_id, by Phase 1c design): abstract
-        # intent->structure derived from trigger words, not raw user queries.
-        # Never write org-private data (queries/URLs/locators) here - it injects
-        # into every org. Add org_id + org-scoped reads first if you must.
-        self._em._writer_conn.execute("""
-            INSERT INTO structural_rules
-            (rule_name, query_pattern, required_structure,
-             required_keywords_json, score, evidence_count, counter_evidence,
-             last_updated, created_at)
-            VALUES (?, ?, ?, ?, 0.0, 0, 0, datetime('now', 'localtime'), datetime('now', 'localtime'))
-        """, (
-            rule_name,
-            query_pattern,
-            required_structure,
-            json.dumps(required_keywords),
-        ))
-        self._em._writer_conn.commit()
+            # GLOBAL / cross-org table (no org_id, by Phase 1c design): abstract
+            # intent->structure derived from trigger words, not raw user queries.
+            # Never write org-private data (queries/URLs/locators) here - it injects
+            # into every org. Add org_id + org-scoped reads first if you must.
+            self._em._writer_conn.execute("""
+                INSERT INTO structural_rules
+                (rule_name, query_pattern, required_structure,
+                 required_keywords_json, score, evidence_count, counter_evidence,
+                 last_updated, created_at)
+                VALUES (?, ?, ?, ?, 0.0, 0, 0, datetime('now', 'localtime'), datetime('now', 'localtime'))
+            """, (
+                rule_name,
+                query_pattern,
+                required_structure,
+                json.dumps(required_keywords),
+            ))
+            self._em._writer_conn.commit()
 
-        logger.debug(
-            f"[LEARNING:STRUCTURAL] Created rule '{rule_name}' "
-            f"(structure={required_structure}, "
-            f"keywords={required_keywords})"
-        )
+            logger.debug(
+                f"[LEARNING:STRUCTURAL] Created rule '{rule_name}' "
+                f"(structure={required_structure}, "
+                f"keywords={required_keywords})"
+            )
 
-        # Re-fetch to get the row with id
-        return dict(self._em._writer_conn.execute(
-            "SELECT * FROM structural_rules WHERE rule_name = ?",
-            (rule_name,),
-        ).fetchone())
+            # Re-fetch to get the row with id
+            return dict(self._em._writer_conn.execute(
+                "SELECT * FROM structural_rules WHERE rule_name = ?",
+                (rule_name,),
+            ).fetchone())
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     def _increment_evidence(self, rule: dict, boost: bool = False):
         """Increment evidence_count and recalculate score.
@@ -454,21 +459,25 @@ class StructuralRuleEngine(LearningEngine):
         new_score = EffectivenessScore.calculate(
             new_evidence, rule["counter_evidence"]
         )
-        self._em._writer_conn.execute(
-            "UPDATE structural_rules "
-            "SET evidence_count = ?, score = ?, "
-            "    last_triggered = datetime('now', 'localtime'), "
-            "    last_updated = datetime('now', 'localtime') "
-            "WHERE id = ?",
-            (new_evidence, new_score, rule["id"]),
-        )
-        self._em._writer_conn.commit()
+        try:
+            self._em._writer_conn.execute(
+                "UPDATE structural_rules "
+                "SET evidence_count = ?, score = ?, "
+                "    last_triggered = datetime('now', 'localtime'), "
+                "    last_updated = datetime('now', 'localtime') "
+                "WHERE id = ?",
+                (new_evidence, new_score, rule["id"]),
+            )
+            self._em._writer_conn.commit()
 
-        logger.debug(
-            f"[LEARNING:STRUCTURAL] Rule '{rule['rule_name']}' "
-            f"evidence +{increment} → {new_evidence} "
-            f"(score={new_score})"
-        )
+            logger.debug(
+                f"[LEARNING:STRUCTURAL] Rule '{rule['rule_name']}' "
+                f"evidence +{increment} → {new_evidence} "
+                f"(score={new_score})"
+            )
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     def _increment_counter_evidence(self, rule: dict):
         """Increment counter_evidence and recalculate score."""
@@ -476,20 +485,24 @@ class StructuralRuleEngine(LearningEngine):
         new_score = EffectivenessScore.calculate(
             rule["evidence_count"], new_ce
         )
-        self._em._writer_conn.execute(
-            "UPDATE structural_rules "
-            "SET counter_evidence = ?, score = ?, "
-            "    last_updated = datetime('now', 'localtime') "
-            "WHERE id = ?",
-            (new_ce, new_score, rule["id"]),
-        )
-        self._em._writer_conn.commit()
+        try:
+            self._em._writer_conn.execute(
+                "UPDATE structural_rules "
+                "SET counter_evidence = ?, score = ?, "
+                "    last_updated = datetime('now', 'localtime') "
+                "WHERE id = ?",
+                (new_ce, new_score, rule["id"]),
+            )
+            self._em._writer_conn.commit()
 
-        logger.debug(
-            f"[LEARNING:STRUCTURAL] Rule '{rule['rule_name']}' "
-            f"counter-evidence +1 → {new_ce} "
-            f"(score={new_score})"
-        )
+            logger.debug(
+                f"[LEARNING:STRUCTURAL] Rule '{rule['rule_name']}' "
+                f"counter-evidence +1 → {new_ce} "
+                f"(score={new_score})"
+            )
+        except Exception:
+            self._em._writer_conn.rollback()
+            raise
 
     def _find_rule(self, intent_name: str) -> Optional[dict]:
         """Find a rule by intent name."""

@@ -7,11 +7,14 @@ Uses synthetic output.xml via tmp_dir fixture -- does NOT modify real data.
 Migrated from: scripts/verify_day02.py
 """
 
+import json
 import os
 import textwrap
+from pathlib import Path
 
 import pytest
 
+from src.backend.core.failure_sentences import first_failure_message
 from src.backend.crew_ai.optimization.failure_analyzer import (
     KeywordResult,
     FailureAnalysis,
@@ -362,6 +365,90 @@ class TestOutputXmlParser:
 
 
 # ---------------------------------------------------------------------------
+# Test: OutputXmlParser reports the first UNCAUGHT failure (F1, Task 9)
+#
+# Real Robot Framework 7.4.2 output.xml, tests/fixtures/rf742_output_xml/.
+# A caught failure (Wait Until Keyword Succeeds that retried, Run Keyword And
+# Ignore Error / Return Status / Expect Error, a TRY an EXCEPT handled) must not
+# be stored as the run's failure. SIX fixtures hold one; the other NINETEEN are
+# pinned to what the parser returned before the change
+# (parser_pins_before_f1.json) so nothing else moves.
+# ---------------------------------------------------------------------------
+
+_RF_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "rf742_output_xml"
+_PINS = json.loads(
+    (_RF_FIXTURES / "parser_pins_before_f1.json").read_text(encoding="utf-8")
+)
+
+# fixture -> (failed_keyword, failed_keyword_args) of the real, uncaught failure
+_CAUGHT_THEN_REAL = {
+    "caught_then_real.xml": (
+        "Fail",
+        ['TimeoutError: locator.fill: Timeout 10000ms exceeded.\\nCall log:\\n'
+         '${SPACE}${SPACE}-${SPACE}waiting for locator("#real")'],
+    ),
+    "caught_by_status_and_expect_then_real.xml": (
+        "Fail",
+        ['TimeoutError: locator.fill: Timeout 10000ms exceeded.\\nCall log:\\n'
+         '${SPACE}${SPACE}-${SPACE}waiting for locator("#real2")'],
+    ),
+    "retry_succeeds_then_real.xml": (
+        "Fail",
+        ['TimeoutError: locator.fill: Timeout 10000ms exceeded.\\nCall log:\\n'
+         '${SPACE}${SPACE}-${SPACE}waiting for locator("#real3")'],
+    ),
+    "try_except_then_real.xml": (
+        "Fail",
+        ['TimeoutError: locator.fill: Timeout 10000ms exceeded.\\nCall log:\\n'
+         '${SPACE}${SPACE}-${SPACE}waiting for locator("#after-try")'],
+    ),
+    "try_caught_then_finally_fails.xml": (
+        "Fail",
+        ["Error: cleanup in finally failed"],
+    ),
+    "try_handler_fails.xml": (
+        "Fail",
+        ["Could not click the button"],
+    ),
+}
+
+
+class TestOutputXmlParserUncaughtFailure:
+    """OutputXmlParser describes the first FAIL keyword that is not caught."""
+
+    def test_every_fixture_is_either_changed_or_pinned(self):
+        fixtures = {p.name for p in _RF_FIXTURES.glob("*.xml")}
+        assert len(fixtures) == 25
+        assert len(_CAUGHT_THEN_REAL) == 6
+        assert len(_PINS) == 19
+        assert set(_PINS) | set(_CAUGHT_THEN_REAL) == fixtures
+        assert not set(_PINS) & set(_CAUGHT_THEN_REAL)
+
+    @pytest.mark.parametrize("name", sorted(_PINS))
+    def test_other_fixtures_are_unchanged(self, name):
+        result = OutputXmlParser().parse(str(_RF_FIXTURES / name))
+        expected = _PINS[name]
+        for key in ("test_status", "failed_keyword", "failed_keyword_args", "error_message"):
+            assert result[key] == expected[key], f"{name}: {key} moved"
+
+    @pytest.mark.parametrize("name", sorted(_CAUGHT_THEN_REAL))
+    def test_caught_failure_gives_way_to_the_real_one(self, name):
+        result = OutputXmlParser().parse(str(_RF_FIXTURES / name))
+        keyword, args = _CAUGHT_THEN_REAL[name]
+        assert result["test_status"] == "failed"
+        assert result["failed_keyword"] == keyword
+        assert result["failed_keyword_args"] == args
+        assert result["error_message"] == first_failure_message(str(_RF_FIXTURES / name))
+
+    def test_keyword_chain_still_lists_every_keyword(self):
+        """Only the failed-keyword fields change; the chain keeps the caught ones."""
+        path = str(_RF_FIXTURES / "caught_then_real.xml")
+        chain = OutputXmlParser().parse(path)["keyword_chain"]
+        failed = [kw for kw in chain if kw.status == "FAIL"]
+        assert len(failed) >= 2, "the caught failure must stay in keyword_chain"
+
+
+# ---------------------------------------------------------------------------
 # Test: FailureClassifier -- Seed Regex Patterns
 # ---------------------------------------------------------------------------
 
@@ -385,7 +472,9 @@ class TestFailureClassifier:
         ("strict mode violation: locator resolved to 3 elements", "C2", "multiple_elements_found", "strict_mode"),
         ("Element is not attached to the DOM", "C3", "stale_element", "not_attached"),
         ("Element is not visible in the page", "C1", "element_not_visible", "not_visible"),
-        ("TimeoutError: locator.elementHandle: Timeout 10000ms exceeded.", "D1", "page_load_timeout", "timeout"),
+        # E5b: a LOCATOR timeout is an element failure, not a page-load one.
+        # "Navigation timeout exceeded" (next row) is still D1 — it is a page load.
+        ("TimeoutError: locator.elementHandle: Timeout 10000ms exceeded.", "C1", "element_never_resolved", "timeout"),
         ("Navigation timeout exceeded", "D1", "page_load_timeout", "page_load_timeout"),
         ("Element click intercepted by another element", "D4", "popup_overlay_blocking", "click_intercepted"),
         ("Element is not interactable at this point", "D3", "animation_or_disabled", "not_interactable"),
@@ -547,14 +636,14 @@ class TestFailureAnalyzer:
             "Analyzer: passing XML -> confidence=1.0"
         )
 
-    def test_timeout_failure_category_d1(self, tmp_dir):
-        """Verify FailureAnalyzer classifies timeout failure correctly."""
+    def test_locator_timeout_category_c1(self, tmp_dir):
+        """A locator that never resolved is C1, not a page-load timeout (E5b)."""
         analyzer = FailureAnalyzer()
         xml_path = _write_xml(tmp_dir, FAILING_XML_TIMEOUT, "analyzer_timeout.xml")
 
         result = analyzer.analyze(xml_path, user_query="get text of element")
-        assert result.category == "D1", (
-            f"Analyzer: timeout failure -> D1: got {result.category}"
+        assert result.category == "C1", (
+            f"Analyzer: locator timeout -> C1: got {result.category}"
         )
 
     def test_timeout_failure_source_regex(self, tmp_dir):

@@ -1,7 +1,14 @@
-"""Learning /hints + /runs are org-scoped; members 403; telemetry + mutations platform-only.
+"""Learning /hints + /runs are org-scoped; members 403; telemetry platform-only.
 
-Task 12: org-admin can read their OWN org's hints/runs; telemetry reads (/stats,
-/triggers, /health) and all mutations stay platform-admin-only.
+Task 12: org-admin can read their OWN org's hints/runs; telemetry reads
+(/stats, /triggers, /health) stay platform-admin-only.
+
+Mutations no longer do. A hint now answers to three tiers — platform admin
+anywhere, org admin in their own org, author for their own hints — so the
+create-tier tests below expect 201 where they once expected 403, and the
+per-hint matrix lives in test_hint_mutation_tiers.py. What stays platform-only
+here is the review-hints sweep: an LLM batch pass across every org, with no
+single org whose admin could own it.
 """
 
 import pytest
@@ -49,18 +56,48 @@ def test_stats_remains_platform_admin_only(dash_client):
     assert r.status_code == 403
 
 
-def test_mutation_still_platform_admin_only(dash_client):
+def _create_body(org_id, text="x"):
+    return {"feedback_text": text, "anchor_query": "login as admin",
+            "scope": "global", "actor": "a@e.com", "org_id": org_id}
+
+
+def test_org_admin_may_create_a_hint_in_their_own_org(dash_client):
+    """Hint creation is no longer platform-only. An org admin curates their
+    own org's hints — that is the point of the org-admin tier."""
     r = dash_client.post(
-        "/api/learning/hints",
-        json={
-            "feedback_text": "x",
-            "anchor_query": "login as admin",
-            "scope": "global",
-            "actor": "a@e.com",
-        },
+        "/api/learning/hints", json=_create_body(dash_client.org_a),
+        headers={"Authorization": f"Bearer {dash_client.org_a_admin_token}"},
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_org_admin_cannot_create_a_hint_in_another_org(dash_client):
+    """403, not 404: the caller named the org themselves, so refusing tells
+    them nothing they did not supply, and no hint exists whose existence
+    could leak."""
+    r = dash_client.post(
+        "/api/learning/hints", json=_create_body(dash_client.org_b),
         headers={"Authorization": f"Bearer {dash_client.org_a_admin_token}"},
     )
     assert r.status_code == 403
+
+
+def test_a_plain_member_cannot_create_a_hint_at_all(dash_client):
+    """A plain org_member contributes through feedback, never through this
+    route — they are not a curator of the org's hints."""
+    r = dash_client.post(
+        "/api/learning/hints", json=_create_body(dash_client.org_a),
+        headers={"Authorization": f"Bearer {dash_client.member_token}"},
+    )
+    assert r.status_code == 403
+
+
+def test_platform_admin_may_create_a_hint_in_any_org(dash_client):
+    r = dash_client.post(
+        "/api/learning/hints", json=_create_body(dash_client.org_b, "cross-org create"),
+        headers={"Authorization": f"Bearer {dash_client.platform_admin_token}"},
+    )
+    assert r.status_code == 201, r.text
 
 
 def test_org_admin_sees_only_own_org_runs(dash_client):
@@ -93,18 +130,16 @@ def test_org_admin_run_by_id_wrong_org_returns_404(dash_client):
     assert r.status_code == 404
 
 
-# POST /hints is covered by test_mutation_still_platform_admin_only above; the
-# remaining mutation/curation routes share the identical Depends(require_admin)
-# guard.  Path/body ids need not exist — require_admin 403s before any lookup.
+# The per-hint mutations moved to the three-tier rule and are covered by the
+# matrix below.  These three stay platform-only: they are LLM batch sweeps
+# across every org, not per-hint actions, so there is no org whose admin they
+# could belong to.  They share the identical Depends(require_admin) guard, and
+# path/body ids need not exist — require_admin 403s before any lookup.
 @pytest.mark.parametrize(
     "method, path, body",
     [
-        ("patch", "/api/learning/hints/1", {"actor": "a@e.com"}),
-        ("post", "/api/learning/hints/1/unflag", {"actor": "a@e.com"}),
         # /promote was removed outright (cross-org sharing disabled) — its
         # 404-for-everyone behaviour is pinned by test_learning_promote.py.
-        ("post", "/api/learning/hints/1/retract", {"actor": "a@e.com"}),
-        ("post", "/api/learning/hints/1/reactivate", {"actor": "a@e.com"}),
         ("post", "/api/learning/review-hints/start", None),
         ("patch", "/api/learning/review-hints/sessions/1/recommendations/1",
          {"admin_decision": "approved"}),
@@ -112,9 +147,58 @@ def test_org_admin_run_by_id_wrong_org_returns_404(dash_client):
     ],
 )
 def test_remaining_mutations_platform_admin_only(dash_client, method, path, body):
-    """Every remaining learning mutation route 403s a non-platform-admin (org-admin token)."""
+    """Every cross-org curation route 403s a non-platform-admin (org-admin token)."""
     kwargs = {"headers": {"Authorization": f"Bearer {dash_client.org_a_admin_token}"}}
     if body is not None:
         kwargs["json"] = body
     r = getattr(dash_client, method)(path, **kwargs)
     assert r.status_code == 403, f"{method.upper()} {path} returned {r.status_code}, expected 403"
+
+
+# ---------------------------------------------------------------------------
+# The AUTH_ENFORCED-off escape hatch, on the READ side.
+#
+# _require_caller closed it on the five mutations. The four reads on the same
+# router still ran `is_dashboard_viewer(None)`, which returns True, so a
+# token-less caller passed the gate AND landed in the platform-admin branch,
+# which drops the `org_id = ?` filter entirely. Probed: GET
+# /api/learning/hints with no Authorization header answered 200 with BOTH
+# orgs' hints, including the conflict_* columns _NON_CURATOR_HINT_FIELDS
+# exists to withhold; /runs/{id} does SELECT * FROM execution_records, so it
+# handed out every org's user_query, url and generated robot_code.
+#
+# dash_client runs AUTH_ENFORCED=false, exactly like a dev process started for
+# API debugging, and run.sh binds --host 0.0.0.0.
+# ---------------------------------------------------------------------------
+
+_READ_ROUTES = [
+    ("/api/learning/hints", "list_hints"),
+    ("/api/learning/hints/1", "get_hint"),
+    ("/api/learning/runs", "list_runs"),
+    ("/api/learning/runs/some-workflow-id", "get_run"),
+]
+
+
+@pytest.mark.parametrize("path, name", _READ_ROUTES)
+def test_a_token_less_caller_cannot_read_the_learning_api(dash_client, path, name):
+    """401, with no token at all — the same rule the five mutations already
+    follow and the one api/dashboard_scope.py states for the aggregate
+    dashboards."""
+    r = dash_client.get(path)
+    assert r.status_code == 401, (
+        f"GET {path} ({name}) answered {r.status_code} to a caller with no "
+        f"Authorization header"
+    )
+
+
+def test_a_token_less_caller_is_not_handed_every_org(dash_client):
+    """The consequence, spelled out: it is not only that the request was
+    allowed, it is that it was allowed with PLATFORM scope. Both orgs' hints
+    came back in one unauthenticated response."""
+    dash_client.seed_hint(org_id=dash_client.org_a, text="A-tokenless-probe")
+    dash_client.seed_hint(org_id=dash_client.org_b, text="B-tokenless-probe")
+    r = dash_client.get("/api/learning/hints?limit=200")
+    assert r.status_code == 401, (
+        f"answered {r.status_code}; body carried "
+        f"{[h.get('feedback_text') for h in r.json().get('hints', [])]}"
+    )

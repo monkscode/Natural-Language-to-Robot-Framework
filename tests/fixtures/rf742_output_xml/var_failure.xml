@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:44.938739" rpa="false" schemaversion="5">
+<suite id="s1" name="Var Failure" source="/w/var_failure.robot">
+<test id="s1-t1" name="Var Statement Fails" line="2">
+<variable name="${x}">
+<msg time="2026-09-21T18:17:44.978171" level="FAIL">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.</msg>
+<var>${undefined_variable}</var>
+<status status="FAIL" start="2026-09-21T18:17:44.977957" elapsed="0.000247">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.</status>
+</variable>
+<status status="FAIL" start="2026-09-21T18:17:44.977825" elapsed="0.000460">Setting variable '${x}' failed: Variable '${undefined_variable}' not found.</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:44.939494" elapsed="0.038951"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Var Failure" id="s1" pass="0" fail="1" skip="0">Var Failure</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

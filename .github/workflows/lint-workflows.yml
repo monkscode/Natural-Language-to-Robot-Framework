@@ -1,0 +1,67 @@
+name: Lint workflows
+
+# check-browser-service-release.yml is a SCHEDULED workflow, and scheduled
+# workflows only run from the default branch. It therefore has no runtime
+# feedback of any kind until it reaches main — nothing you can push, open or
+# re-run exercises it. Two bugs shipped in it that way, both of which stopped it
+# doing the one thing it exists for:
+#
+#   * an env var declared on the wrong step, so the PR body build hit an unbound
+#     variable under `set -u` one line before `gh pr create`;
+#   * archive parsing outside its own try block, so a truncated download killed
+#     the script instead of failing open as its docstring promised.
+#
+# actionlint catches the first class statically. Verified by putting the bug
+# back: it named the file, the line and the column. This job is the only
+# feedback that workflow gets before it goes live.
+
+on:
+  pull_request:
+    paths:
+      - '.github/**'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - '.github/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-workflows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      # No credentials in .git/config: this job reads the tree and nothing else.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Lint every workflow file
+        run: |
+          set -euo pipefail
+          # Pinned by DIGEST, not by tag. This container is handed the whole
+          # checkout, and `latest` would mean a different binary from one run to
+          # the next — the same discipline Dockerfile.browser-service applies to
+          # what it installs. 1.7.12, measured clean on this repo.
+          #
+          # actionlint discovers .github/workflows by asking git for the project
+          # root, which is why the checkout above is required rather than just
+          # convenient.
+          #
+          # -ignore SC2129 is a pure style rule ("consider { cmd1; cmd2; } >>
+          # file") with no defect-finding value. Nothing else is ignored:
+          # SC2016 is silenced with a scoped `shellcheck disable` comment in the
+          # one run block whose printf formats are deliberately literal, so it
+          # still fires on a genuine "expected this to expand" mistake anywhere
+          # else.
+          ACTIONLINT="rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
+          MOUNT="$PWD:/repo"
+          docker run --rm -v "$MOUNT" --workdir /repo "$ACTIONLINT" -color -ignore SC2129

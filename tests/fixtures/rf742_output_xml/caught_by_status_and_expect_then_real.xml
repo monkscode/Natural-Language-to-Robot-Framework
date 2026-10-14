@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:32.840274" rpa="false" schemaversion="5">
+<suite id="s1" name="Caught By Status And Expect Then Real" source="/w/caught_by_status_and_expect_then_real.robot">
+<test id="s1-t1" name="Return Status Then Real" line="2">
+<kw name="Run Keyword And Return Status" owner="BuiltIn">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:32.879920" level="FAIL">Error: caught by return status</msg>
+<arg>Error: caught by return status</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:32.879752" elapsed="0.000235">Error: caught by return status</status>
+</kw>
+<msg time="2026-09-21T18:17:32.880051" level="INFO">${ok} = False</msg>
+<var>${ok}</var>
+<arg>Fail</arg>
+<arg>Error: caught by return status</arg>
+<doc>Runs the specified keyword and returns the status as a Boolean value.</doc>
+<status status="PASS" start="2026-09-21T18:17:32.879523" elapsed="0.000540"/>
+</kw>
+<kw name="Run Keyword And Expect Error" owner="BuiltIn">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:32.880368" level="FAIL">Error: caught by expect error</msg>
+<arg>Error: caught by expect error</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:32.880230" elapsed="0.000168">Error: caught by expect error</status>
+</kw>
+<arg>*</arg>
+<arg>Fail</arg>
+<arg>Error: caught by expect error</arg>
+<doc>Runs the keyword and checks that the expected error occurred.</doc>
+<status status="PASS" start="2026-09-21T18:17:32.880114" elapsed="0.000353"/>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:32.880657" level="FAIL">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real2")</msg>
+<arg>TimeoutError: locator.fill: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#real2")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:32.880508" elapsed="0.000173">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real2")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:32.879190" elapsed="0.001557">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#real2")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:32.841102" elapsed="0.039852"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Caught By Status And Expect Then Real" id="s1" pass="0" fail="1" skip="0">Caught By Status And Expect Then Real</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

@@ -10,7 +10,7 @@ shared prompt-building helpers (_hint_line, _build_context_prefix).
 Referenced by: feedback_loop.FeedbackLoop.process_user_feedback (Trigger 2, via
                    fire_conflict_detection)
                feedback_loop._build_conflict_prompt_with_feedback (Trigger 2 prompt builder)
-               workflow_service._process_learning (usage attribution, via
+               workflow_service._process_learning_attribution (usage attribution, via
                    fire_usage_attribution)
                workflow_service._build_standalone_attribution_prompt /
                    _build_merged_attribution_prompt (attribution prompt builders)

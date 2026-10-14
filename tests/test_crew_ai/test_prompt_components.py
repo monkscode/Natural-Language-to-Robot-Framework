@@ -419,3 +419,101 @@ class TestStateVerificationHandling:
                              "parentClassName": "form-group has-error"},
         }})
         assert merged[0]["parent_classes"] == "form-group has-error"
+
+
+# The block's exact text is pinned on purpose. Every wording of it was measured with a
+# planner probe before it shipped (an earlier wording changed the plan of requests it
+# does not name), so an edit must fail here first and be probed again.
+NAMED_TEXT_CHECK_BLOCK = """
+--- VERIFYING THAT NAMED TEXT IS DISPLAYED ---
+This rule is ONLY for the visibility words "is displayed / visible / shown /
+present", "appears" and "can be seen". With those words, when the user names
+the words the element shows, they ask two things: that the element is
+visible, and that it shows those words. An element can be visible and show
+other words, or hold the words while it is still hidden.
+Examples: "verify the Products heading is displayed", "check the message
+'Saved' is visible", "make sure the Logout link appears".
+*   Plan TWO steps on that element, with the same element_description:
+    first the visibility check with value = "visible", then keyword
+    `Get Text` with the user's words in 'value' (e.g. value = "Products").
+Plan only the visibility check, with value = "visible", when:
+*   the user names no words the element shows: "verify the logo is
+    displayed", "verify the search results are visible", "verify an error
+    message appears";
+*   the element shows no text: images, icons, empty fields — even when the
+    user names them ("verify the Backpack image is displayed").
+When the user asks that something is NOT displayed, hidden or gone, keep
+the hidden check (value = "hidden").
+Every other check keeps the shape the other rules give it: "contains",
+"only has", "says", "is selected", counts ("verify 6 products are
+displayed") and element states (checked, enabled, disabled, shows an error).
+"""
+
+
+class TestPlanningNamedTextCheckBlock:
+
+    def test_block_text_is_exact(self):
+        assert PromptComponents.PLANNING_NAMED_TEXT_CHECK == NAMED_TEXT_CHECK_BLOCK
+
+    def test_named_words_plan_a_visibility_step_then_a_text_step(self):
+        block = PromptComponents.PLANNING_NAMED_TEXT_CHECK
+        assert "Plan TWO steps on that element, with the same element_description:" in block
+        two_steps = block[block.index("Plan TWO steps"):block.index("Plan only the visibility check")]
+        assert 'first the visibility check with value = "visible"' in two_steps
+        assert two_steps.index('value = "visible"') < two_steps.index("`Get Text`")
+        assert "with the user's words in 'value'" in two_steps
+
+    def test_visibility_only_line_carries_visible(self):
+        lines = PromptComponents.PLANNING_NAMED_TEXT_CHECK.splitlines()
+        only = [ln for ln in lines if ln.startswith("Plan only the visibility check")]
+        assert only == ['Plan only the visibility check, with value = "visible", when:']
+
+    def test_hidden_line_and_keep_list_stay(self):
+        block = PromptComponents.PLANNING_NAMED_TEXT_CHECK
+        assert 'the hidden check (value = "hidden").' in block
+        assert "Every other check keeps the shape the other rules give it" in block
+        for kept in ('"contains"', '"only has"', '"says"', '"is selected"', "counts", "element states"):
+            assert kept in block
+
+    def test_no_words_in_value_phrase_is_gone(self):
+        assert "no words in 'value'" not in PromptComponents.PLANNING_NAMED_TEXT_CHECK
+
+
+class TestAssemblerComparesIgnoreCase:
+    """Every shown-as-correct Should Contain carries ignore_case=True."""
+
+    def test_validation_rules_correct_line_and_rule(self):
+        rules = PromptComponents.VALIDATION_RULES
+        correct = [ln for ln in rules.splitlines() if "✅ CORRECT" in ln]
+        assert len(correct) == 1
+        assert "`Should Contain    ${row_text}    Cierra    ignore_case=True`" in correct[0]
+        rule = [ln for ln in rules.splitlines() if ln.startswith("**Rule:**")]
+        assert len(rule) == 1
+        assert "ignore_case=True" in rule[0]
+        wrong = [ln for ln in rules.splitlines() if "❌ WRONG" in ln]
+        assert len(wrong) == 1
+        assert "ignore_case" not in wrong[0]
+
+    def test_loop_handling_examples_and_rule(self):
+        lines = PromptComponents.LOOP_HANDLING.splitlines()
+        example = [ln for ln in lines if ln.strip().startswith("Should Contain")]
+        assert example == ["        Should Contain    ${text}    expected_text    ignore_case=True"]
+        correct = [ln for ln in lines if "✅ CORRECT" in ln and "Should Contain" in ln]
+        assert correct == [
+            "- ✅ CORRECT: `Should Contain    ${text}    expected_text    ignore_case=True`"
+        ]
+        item3 = [ln for ln in lines if ln.startswith("3. ")]
+        assert len(item3) == 1
+        assert "ignore_case=True" in item3[0]
+        wrong = [ln for ln in lines if "❌ WRONG" in ln]
+        assert len(wrong) == 2
+        assert all("ignore_case" not in ln for ln in wrong)
+
+    def test_exactly_five_places(self):
+        """Three code examples (four spaces before the argument) and two
+        prose rules; nothing else mentions ignore_case."""
+        lines = (PromptComponents.VALIDATION_RULES
+                 + PromptComponents.LOOP_HANDLING).splitlines()
+        mentions = [ln for ln in lines if "ignore_case=True" in ln]
+        assert len(mentions) == 5
+        assert sum("    ignore_case=True" in ln for ln in mentions) == 3

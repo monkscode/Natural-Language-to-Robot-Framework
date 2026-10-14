@@ -106,6 +106,11 @@ Create it by copying the example:
 cp .env.example .env
 ```
 
+This file also needs a database password: Compose refuses to start without
+`POSTGRES_PASSWORD`. Add one with the same command the README gives
+(`echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env`). On an existing install,
+read the README's "Database password" note first.
+
 The file contains three variables — one per container image:
 
 ```env
@@ -140,7 +145,7 @@ Create it by copying the example:
 cp src/backend/.env.example src/backend/.env
 ```
 
-Now open `src/backend/.env` and set your Gemini API key — **this is the only thing you must change**:
+Now open `src/backend/.env` and set your Gemini API key — **this is the only thing you must change in this file**:
 
 ```env
 # src/backend/.env
@@ -151,7 +156,7 @@ GEMINI_API_KEY=your_api_key_here
 # Everything below has sensible defaults — you don't need to change these to get started.
 
 MODEL_PROVIDER=gemini
-ONLINE_MODEL=gemini-2.5-flash
+ONLINE_MODEL=gemini-3.8-flash
 
 ROBOT_LIBRARY=browser       # Use Playwright-based tests (recommended)
 BROWSER_HEADLESS=true       # Run browser in background (no visible window)
@@ -244,8 +249,7 @@ Natural-Language-to-Robot-Framework/
 │
 ├── robot_tests/             ← Generated .robot test files + HTML results
 ├── logs/                    ← Application logs (also viewable in the UI)
-├── chroma_db/               ← Vector database for keyword search (auto-created)
-├── data/                    ← Pattern learning SQLite database (auto-created)
+├── data/                    ← Generated JWT secret + local artifacts (auto-created)
 │
 └── src/
     └── backend/
@@ -338,7 +342,7 @@ All settings below go in `src/backend/.env`. Only `GEMINI_API_KEY` is required t
 | Variable | Default | Description |
 |---|---|---|
 | `MODEL_PROVIDER` | `gemini` | `gemini` (Google AI Studio), `vertex` (Vertex AI), or `local` (Ollama) |
-| `ONLINE_MODEL` | `gemini-2.5-flash` | Bare model name — provider prefix added automatically |
+| `ONLINE_MODEL` | `gemini-3.8-flash` | Bare model name — provider prefix added automatically |
 | `GEMINI_API_KEY` | — | **Required for `MODEL_PROVIDER=gemini`.** Your Google AI Studio key |
 | `LOCAL_MODEL` | `qwen2.5-coder:14b` | Which Ollama model to use (local mode only) |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | URL of your Ollama server |
@@ -347,7 +351,7 @@ All settings below go in `src/backend/.env`. Only `GEMINI_API_KEY` is required t
 
 | Variable | Default | Description |
 |---|---|---|
-| `ROBOT_LIBRARY` | `browser` | `browser` (Playwright-based) or `selenium` |
+| `ROBOT_LIBRARY` | `browser` | `browser` (Playwright) — the only supported value; `selenium` fails at startup |
 | `MAX_AGENT_ITERATIONS` | `3` | How many times agents retry on failure (1–5) |
 
 ### Browser Automation

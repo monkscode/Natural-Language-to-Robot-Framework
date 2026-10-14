@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 WRITER_THREAD_NAME = "learning-writer"
 
 
+# Default submit_and_wait() budget in seconds. Long enough for a single
+# learning-store write (plus, on a cold process, the first fastembed encode
+# loading its ONNX model); short enough that a human who just clicked Submit
+# on /api/feedback does not notice. A timeout never cancels the job — see
+# submit_and_wait's docstring.
+SUBMIT_AND_WAIT_DEFAULT_TIMEOUT_SECONDS = 5.0
+
+
 # Max characters accepted for a user feedback_text, server-enforced at the two
 # feedback endpoints (POST /feedback, POST /hints). Single source of truth so
 # the hint-injection guard test can derive _HINT_CHAR_CAP from it: raising this
@@ -65,9 +73,6 @@ LEARNING_CONFIG = {
     "ERROR_RATE_THRESHOLD": 0.2,        # Disable if >20% errors
     "MIN_CALLS_BEFORE_CHECK": 10,       # Don't check rate until 10+ calls
     "RECOVERY_TIMEOUT_SECONDS": 300,    # Half-open probe after 5 minutes
-
-    # Performance
-    "DEDUPLICATION_THRESHOLD": 5,       # Aggregate after 5 identical runs
 }
 
 
@@ -320,6 +325,71 @@ class LearningWriteQueue:
         """Submit a write operation — never blocks the caller."""
         self._queue.put((write_fn, args, kwargs))
 
+    def submit_and_wait(
+        self, write_fn, *args,
+        timeout: float = SUBMIT_AND_WAIT_DEFAULT_TIMEOUT_SECONDS, **kwargs
+    ):
+        """Submit a write and wait for the writer thread's verdict.
+
+        Returns ("ok", <write_fn's return value>) | ("failed", exc)
+        | ("timeout", None).
+
+        The second element is the write function's OWN return, verbatim —
+        including None, which is what every write here but one produces. It is
+        not a status the queue invents. A write that ran and deliberately
+        changed nothing (NLFeedbackEngine.learn_from_feedback refusing a
+        resubmission against a switched-off hint) is otherwise indistinguishable
+        from one that stored a correction, and the caller reported both as
+        success. On the timeout branch it is None because the job has not
+        finished: whatever it eventually returns arrives too late to report, and
+        must not be.
+
+        `submit` is fire-and-forget by design: the pipeline must never block on
+        learning, and it keeps ignoring return values. /api/feedback is not the
+        pipeline — it is a human-speed endpoint that already blocks on a
+        conflict-detection LLM call — and it is the one caller that must report
+        whether the user's correction was actually stored. A timeout does NOT
+        cancel the job: it still runs, so "we queued it and could not confirm
+        within the budget" is the honest answer, never a lost write.
+        """
+        if threading.current_thread().name == WRITER_THREAD_NAME:
+            raise RuntimeError(
+                "submit_and_wait() called from the LearningWriteQueue writer "
+                "thread would deadlock waiting for itself — use submit() from "
+                "writer-thread code."
+            )
+
+        done = threading.Event()
+        outcome_box: dict = {}
+
+        def _wrapped():
+            try:
+                # Stored, not returned: this runs on the writer thread, whose
+                # drain loop discards what it calls. `done.set()` below is the
+                # happens-before edge that publishes it to the waiter, exactly
+                # as it already does for "exc".
+                outcome_box["value"] = write_fn(*args, **kwargs)
+            except BaseException as e:
+                outcome_box["exc"] = e
+                logger.warning(f"[LEARNING] Write failed (waited): {e}")
+            finally:
+                done.set()
+
+        self.submit(_wrapped)
+
+        if done.wait(timeout):
+            exc = outcome_box.get("exc")
+            if exc is not None:
+                return ("failed", exc)
+            # .get(), not [...]: `_wrapped` catches BaseException, so the only
+            # way past the branch above is a call that RETURNED — the key is
+            # always present here. This is the /api/feedback request path
+            # though, and a KeyError raised out of a queue internal is not
+            # something to add to it. Carried verbatim either way: a falsy
+            # return is a real answer, and normalising it to None loses it.
+            return ("ok", outcome_box.get("value"))
+        return ("timeout", None)
+
     def shutdown(self, timeout: float = 5.0):
         """Drain pending writes and stop the worker thread.
 
@@ -428,7 +498,7 @@ class LearningEngine(ABC):
         """
         ...
 
-    def learn_from_feedback(self, record, feedback_insight) -> None:
+    def learn_from_feedback(self, record, feedback_insight) -> str | None:
         """
         Optional: Process user NL feedback for this engine.
         Default implementation does nothing.
@@ -436,6 +506,15 @@ class LearningEngine(ABC):
         Args:
             record: ExecutionRecord for the workflow being given feedback
             feedback_insight: Triaged feedback result from NLFeedbackEngine
+
+        Returns:
+            None from this default, and from the three engines that inherit it
+            (AntiPattern, KeywordCorrection, StructuralRule) — they do not
+            override this method. The annotation is `str | None` only because
+            NLFeedbackEngine's override returns a signal string on one path
+            (GATED_INACTIVE_HINT), which submit_and_wait carries to
+            /api/feedback; a `-> None` here would misdescribe that override.
+            An implementer with nothing to signal returns None.
         """
         pass
 
@@ -486,8 +565,24 @@ class SemanticStore(ABC):
         ...
 
     @abstractmethod
-    def search_similar(self, query: str, top_k: int) -> list:
-        """Find semantically similar entries."""
+    def search_similar(self, query: str, top_k: int = 5, *,
+                       org_id: str | None) -> list:
+        """Find semantically similar entries within one org.
+
+        org_id is REQUIRED (keyword-only, no default) while its type still
+        admits None. The two halves are deliberate:
+
+        - Omitting it is a TypeError on the first call, not an empty list. The
+          reads behind this fail closed (T9), so a default would turn a
+          programmer's slip into "learning silently returns nothing" — the
+          failure class this whole area exists to remove.
+        - Passing None explicitly is still legal and still fails closed, for a
+          caller that genuinely has no org (an AUTH_ENFORCED=false run).
+
+        The sibling reads (find_similar_executions, get_hints_with_ids,
+        get_warnings) DO default to None because None is a real runtime state
+        on the generation path they serve. This one has no such path.
+        """
         ...
 
 

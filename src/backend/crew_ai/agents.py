@@ -6,6 +6,8 @@ from crewai import Agent
 # called directly by the deterministic element stage
 # (src/backend/crew_ai/element_identification.py).
 
+from src.backend.core.config import settings
+
 # Import LLM factory function
 from .cleaned_llm_wrapper import get_llm
 from .tasks import AssemblyOutput, PlanOutput
@@ -144,7 +146,7 @@ class RobotAgents:
                 f"{library_guidance}"
             ),
             llm=self.planner_llm,
-            verbose=True,
+            verbose=settings.CREWAI_VERBOSE,
             allow_delegation=False,
         )
 
@@ -175,7 +177,7 @@ class RobotAgents:
                 f"{library_knowledge}"
             ),
             llm=self.llm,
-            verbose=True,
+            verbose=settings.CREWAI_VERBOSE,
             # No in-crew delegation: the LLM validator agent was removed and replaced
             # by the deterministic robot --dryrun gate (dryrun_service.py). The repair
             # loop builds a fresh single-agent crew, so this agent never delegates.

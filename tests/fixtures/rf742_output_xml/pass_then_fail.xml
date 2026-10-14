@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:34.719097" rpa="false" schemaversion="5">
+<suite id="s1" name="Pass Then Fail" source="/w/pass_then_fail.robot">
+<test id="s1-t1" name="First Passes" line="2">
+<kw name="Log" owner="BuiltIn">
+<msg time="2026-09-21T18:17:34.759363" level="INFO">ok</msg>
+<arg>ok</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="PASS" start="2026-09-21T18:17:34.759191" elapsed="0.000209"/>
+</kw>
+<status status="PASS" start="2026-09-21T18:17:34.758836" elapsed="0.000627"/>
+</test>
+<test id="s1-t2" name="Second Fails" line="4">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:34.759886" level="FAIL">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#second")</msg>
+<arg>TimeoutError: locator.fill: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#second")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:34.759687" elapsed="0.000264">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#second")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:34.759570" elapsed="0.000451">TimeoutError: locator.fill: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#second")</status>
+</test>
+<test id="s1-t3" name="Third Fails" line="6">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:34.760410" level="FAIL">Error: third test message</msg>
+<arg>Error: third test message</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:34.760224" elapsed="0.000226">Error: third test message</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:34.760087" elapsed="0.000439">Error: third test message</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:34.719962" elapsed="0.040730"/>
+</suite>
+<statistics>
+<total>
+<stat pass="1" fail="2" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Pass Then Fail" id="s1" pass="1" fail="2" skip="0">Pass Then Fail</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:43:27.902380" rpa="false" schemaversion="5">
+<suite id="s1" name="Retry All Attempts Fail" source="/w/retry_all_attempts_fail.robot">
+<test id="s1-t1" name="Retry All Attempts Fail" line="2">
+<kw name="Wait Until Keyword Succeeds" owner="BuiltIn">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:27.941286" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#retry")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:27.941077" elapsed="0.000276">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</status>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:27.951687" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#retry")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:27.951511" elapsed="0.000211">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</status>
+</kw>
+<msg time="2026-09-21T18:43:27.951765" level="FAIL">Keyword 'Fail' failed after retrying 2 times. The last error was: TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</msg>
+<arg>2x</arg>
+<arg>10ms</arg>
+<arg>Fail</arg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#retry")</arg>
+<doc>Runs the specified keyword and retries if it fails.</doc>
+<status status="FAIL" start="2026-09-21T18:43:27.940821" elapsed="0.011016">Keyword 'Fail' failed after retrying 2 times. The last error was: TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:27.940507" elapsed="0.011416">Keyword 'Fail' failed after retrying 2 times. The last error was: TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#retry")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:43:27.903272" elapsed="0.048820"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Retry All Attempts Fail" id="s1" pass="0" fail="1" skip="0">Retry All Attempts Fail</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

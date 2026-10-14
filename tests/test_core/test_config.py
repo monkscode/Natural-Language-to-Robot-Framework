@@ -162,6 +162,28 @@ class TestSettingsValidators:
             self._make_settings({"OBSERVABILITY_BACKEND": "datadog"})
 
 
+class TestLlmRequestTimeout:
+    """LLM_REQUEST_TIMEOUT_S (W5, owner D3): the base of the 1x/2x/4x schedule."""
+
+    def _settings(self, value):
+        with patch.dict(os.environ, {"LLM_REQUEST_TIMEOUT_S": str(value)}, clear=False):
+            from src.backend.core.config import Settings
+            return Settings(_env_file=None)
+
+    def test_default_is_sixty_seconds(self):
+        from src.backend.core.config import Settings
+        assert Settings.model_fields["LLM_REQUEST_TIMEOUT_S"].default == 60
+
+    @pytest.mark.parametrize("value", [30, 60, 150])
+    def test_accepts_the_allowed_range(self, value):
+        assert self._settings(value).LLM_REQUEST_TIMEOUT_S == value
+
+    @pytest.mark.parametrize("value", [0, 29, 151])
+    def test_rejects_outside_the_range(self, value):
+        with pytest.raises(ValueError, match="LLM_REQUEST_TIMEOUT_S must be between 30 and 150"):
+            self._settings(value)
+
+
 def test_local_service_urls_use_ipv4_loopback(monkeypatch):
     """Local service hops must default to 127.0.0.1, never localhost.
 
@@ -182,3 +204,47 @@ def test_local_service_urls_use_ipv4_loopback(monkeypatch):
     assert s.BROWSER_USE_SERVICE_URL == "http://127.0.0.1:4999"
     assert "localhost" not in s.RUNNER_EXEC_URL
     assert "localhost" not in s.BROWSER_USE_SERVICE_URL
+
+
+# The model the bench gate's baseline is measured on (gemini-3.8-flash since
+# 2026-10-01; gemini-3.5-flash before, so figures dated earlier describe 3.5).
+# The shipped default must be this model and no other.
+BENCHED_ONLINE_MODEL = "gemini-3.8-flash"
+
+
+def test_default_online_model_is_the_benched_one(monkeypatch):
+    """The shipped default must be the model the bench actually measures.
+
+    It was not: the default and src/backend/.env.example both shipped
+    gemini-2.5-flash while all 75 baseline meta files record gemini-3.5-flash.
+    A new user therefore ran a configuration with zero benchmark evidence
+    behind it, while the README quoted numbers from a different one.
+
+    Asserted against the field default rather than an instance so neither the
+    process environment nor a developer's own .env can mask a revert.
+    """
+    from src.backend.core.config import Settings
+    assert Settings.model_fields["ONLINE_MODEL"].default == BENCHED_ONLINE_MODEL
+
+    monkeypatch.delenv("ONLINE_MODEL", raising=False)
+    assert Settings(_env_file=None).ONLINE_MODEL == BENCHED_ONLINE_MODEL
+
+
+def test_env_example_ships_the_same_online_model():
+    """src/backend/.env.example is what every new user copies.
+
+    An uncommented value there overrides the class default, so the two drifting
+    apart silently re-creates the bug this guards: the code says one model, the
+    file every user starts from says another.
+    """
+    from pathlib import Path
+    example = Path(__file__).resolve().parents[2] / "src" / "backend" / ".env.example"
+    shipped = [
+        line.split("=", 1)[1].strip()
+        for line in example.read_text(encoding="utf-8").splitlines()
+        if line.startswith("ONLINE_MODEL=")
+    ]
+    assert shipped == [BENCHED_ONLINE_MODEL], (
+        f".env.example ships ONLINE_MODEL={shipped}, expected "
+        f"['{BENCHED_ONLINE_MODEL}'] to match the class default"
+    )

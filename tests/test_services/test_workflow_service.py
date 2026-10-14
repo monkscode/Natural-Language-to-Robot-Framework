@@ -66,14 +66,364 @@ class TestStreamGenerateOnly:
         assert any("error" in str(e).lower() for e in events)
 
 
-class TestStreamExecuteOnly:
-    """Tests for stream_execute_only generator."""
+class TestRunIsRecordedAtStart:
+    """A run must be countable from the moment it starts, not only when it ends.
 
+    Both terminal paths write a row — 'generated' on success, 'error' on a
+    generation failure — but a run that dies without reaching either (the
+    process is killed, the container restarts, the machine OOMs) left no trace
+    at all. Nothing could tell "never started" apart from "started and
+    vanished", so the failure rate any dashboard computed was optimistic by
+    exactly the runs that disappeared.
+
+    An opening row fixes that: a vanished run shows up as a row still sitting
+    at 'running' long after it was created. 'running' is an existing status
+    (the execute path already uses it), so no vocabulary or UI change.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+    def _run(self, events, user=None):
+        """Drive stream_generate_only, collecting EVERY _record_run call."""
+        calls = []
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status,
+                          "user_query": user_query, "user": user_arg, **kw})
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return calls, sse
+
+    def test_row_is_opened_before_anything_can_fail(self):
+        """The opening row is written from the first event that carries an id.
+
+        A truly vanished run — killed process, container restart — cannot be
+        simulated here, because this harness always reaches the generator's
+        "finished without generating code" fallback. What it does pin is the
+        thing that makes a vanished run visible: the 'running' row exists
+        first, written before any terminal path is reached.
+        """
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+        ])
+        assert calls[0]["status"] == "running"
+        assert calls[0]["run_id"] == self._WF_ID
+        assert calls[0]["user_query"] == "login to github"
+
+    def test_opening_row_precedes_the_terminal_row(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+            {"status": "complete", "robot_code": "*** Test Cases ***\nT\n    Log    hi",
+             "workflow_id": self._WF_ID},
+        ])
+        assert [c["status"] for c in calls] == ["running", "generated"]
+        assert {c["run_id"] for c in calls} == {self._WF_ID}
+
+    def test_opening_row_precedes_an_error_row(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+            {"status": "error", "message": "LLM offline", "workflow_id": self._WF_ID},
+        ])
+        assert [c["status"] for c in calls] == ["running", "error"]
+
+    def test_written_once_however_many_events_carry_the_id(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "a", "workflow_id": self._WF_ID},
+            {"status": "running", "message": "b", "workflow_id": self._WF_ID},
+            {"status": "running", "message": "c", "workflow_id": self._WF_ID},
+        ])
+        assert len([c for c in calls if c["status"] == "running"]) == 1
+
+    def test_carries_the_user_so_the_row_is_org_scoped(self):
+        user = {"user_id": "u-1", "email": "someone@example.com", "org_id": "org-9"}
+        calls, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID}],
+            user=user,
+        )
+        assert calls[0]["user"] == user
+
+    def test_no_row_before_the_id_is_known(self):
+        """Events without a workflow_id cannot be attributed to a run."""
+        calls, _ = self._run([{"status": "running", "message": "planning"}])
+        assert [c for c in calls if c["status"] == "running"] == []
+
+    def test_non_uuid_id_is_not_recorded(self):
+        calls, _ = self._run([
+            {"status": "running", "message": "planning", "workflow_id": "not-a-uuid"},
+        ])
+        assert calls == []
+
+    def test_row_is_opened_even_when_the_client_leaves_after_one_event(self):
+        """The disconnect case is the whole reason the opening row exists.
+
+        The stream's job now runs in its own task (`_detached`), so closing
+        the stream no longer stops it: after the client drops, the job still
+        writes the terminal 'generated' row. The opening row is still written
+        before the event is handed on, and it must exist before any terminal
+        write.
+
+        Consume up to and including the first event carrying the id, close the
+        stream the way a dropped connection does, then wait for the job.
+        """
+        calls = []
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status})
+
+        reader_left = threading.Event()
+
+        def _workflow(*args, **kwargs):
+            # The terminal event is not produced until the reader has left.
+            yield {"status": "running", "message": "planning",
+                   "workflow_id": self._WF_ID}
+            reader_left.wait(5)
+            yield {"status": "complete", "robot_code": "*** Test Cases ***",
+                   "workflow_id": self._WF_ID}
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   side_effect=_workflow), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                agen = stream_generate_only("login to github", "gemini",
+                                            "gemini-2.5-flash")
+                async for sse in agen:
+                    if self._WF_ID in sse:
+                        break          # client has the opening event...
+                await agen.aclose()    # ...and now drops the connection
+                reader_left.set()      # only now may the terminal event exist
+                await asyncio.gather(*ws._detached_jobs)
+                return None
+
+            from src.backend.services import workflow_service as ws
+            asyncio.run(run_gen())
+
+        assert [c["status"] for c in calls] == ["running", "generated"], (
+            "the opening row must be written first and the job must still "
+            f"write its terminal row after the client left; got {calls}"
+        )
+        assert calls[0]["run_id"] == self._WF_ID
+
+    def test_opening_row_failure_does_not_break_the_stream(self):
+        """History bookkeeping must never cost a run.
+
+        Only the opening write is made to fail: _record_run swallows registry
+        errors internally, so in production it does not raise at all — this
+        pins the extra guard around the thread hop the opening write adds.
+        """
+        def _explode_on_open(run_id, user, user_query, status, **kw):
+            if status == "running":
+                raise RuntimeError("postgres down")
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter([
+                       {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+                       {"status": "complete", "robot_code": "*** Test Cases ***",
+                        "workflow_id": self._WF_ID},
+                   ])), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_explode_on_open), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                return [e async for e in stream_generate_only(
+                    "login to github", "gemini", "gemini-2.5-flash")]
+
+            sse = asyncio.run(run_gen())  # must not raise
+        assert any("complete" in str(e) for e in sse)
+
+
+class TestGenerationFailureIsRecorded:
+    """A generation failure must leave a row behind.
+
+    Before this, _GenerationError returned before _record_run and the metrics
+    block runs only after the dryrun gate — so a run that never produced code
+    was invisible to History and to Grafana alike. Status 'error' already
+    exists in test_runs and in the SPA's filter list, so nothing new is needed
+    downstream.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+
+    def _run(self, events, user=None):
+        """Drive stream_generate_only over a scripted generation event list."""
+        recorded = {}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            recorded.update({"run_id": run_id, "status": status,
+                             "user_query": user_query, **kw})
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return recorded, sse
+
+    def test_error_event_writes_an_error_row(self):
+        recorded, _ = self._run([
+            {"status": "running", "message": "planning"},
+            {"status": "error", "message": "LLM offline",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["run_id"] == self._WF_ID
+        assert recorded["status"] == "error"
+        assert recorded["user_query"] == "login to github"
+
+    def test_row_carries_the_failure_reason(self):
+        """Angle E: countable is not enough — a failure has to be diagnosable."""
+        recorded, _ = self._run([
+            {"status": "error", "message": "Vertex 429 Resource exhausted",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "Vertex 429 Resource exhausted"
+
+    def test_reason_is_truncated(self):
+        """A stack-trace-sized message must not bloat every history query."""
+        recorded, _ = self._run([
+            {"status": "error", "message": "x" * 9000, "workflow_id": self._WF_ID},
+        ])
+        assert len(recorded["error_message"]) == 2000
+
+    def test_no_row_without_a_workflow_id(self):
+        """Nothing to key the row on; the SSE already told the user."""
+        recorded, sse = self._run([{"status": "error", "message": "died early"}])
+        assert recorded == {}
+        assert any("error" in str(e).lower() for e in sse)
+
+    def test_non_uuid_workflow_id_records_nothing(self):
+        recorded, _ = self._run([
+            {"status": "error", "message": "boom", "workflow_id": "not-a-uuid"},
+        ])
+        assert recorded == {}
+
+    def test_finished_without_code_is_now_attributable(self):
+        """This was a documented limitation and is no longer one.
+
+        The fallback used to have no workflow_id to key a row on, because only
+        complete/error events carried one. The opening 'running' event now
+        carries it too, so the run is already in result_store by the time this
+        path fires and the failure lands on the right row.
+
+        Still true: an event stream with no id at all records nothing — see
+        test_no_row_without_a_workflow_id.
+        """
+        recorded, sse = self._run([
+            {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+        ])
+        assert recorded["run_id"] == self._WF_ID
+        assert recorded["status"] == "error"
+        assert "without generating code" in recorded["error_message"]
+        assert any("without generating code" in str(e) for e in sse)
+
+    def test_successful_generation_is_not_recorded_as_error(self):
+        recorded, _ = self._run([
+            {"status": "complete", "robot_code": "*** Test Cases ***\nT\n    Log    hi",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["status"] == "generated"
+
+    def test_reason_is_redacted_before_storing(self):
+        """M1: a generation-failure message can carry a secret (a bad API key
+        quoted back by the provider's own error) and the History drawer now
+        shows this stored text verbatim, so it must never reach the row raw."""
+        key = "AIzaSy" + "D" * 33  # a Google API key shape redact_secrets masks
+        recorded, _ = self._run([
+            {"status": "error", "message": f"provider call failed at ?key={key}",
+             "workflow_id": self._WF_ID},
+        ])
+        assert key not in recorded["error_message"]
+        assert "[REDACTED]" in recorded["error_message"]
+
+    def test_an_already_redacted_reason_is_stored_unchanged(self):
+        recorded, _ = self._run([
+            {"status": "error", "message": "provider call failed at ?key=[REDACTED]",
+             "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "provider call failed at ?key=[REDACTED]"
+
+    def test_redaction_happens_before_the_cap(self):
+        key = "AIzaSy" + "D" * 33
+        recorded, _ = self._run([
+            {"status": "error", "message": f"key={key} " + "x" * 3000,
+             "workflow_id": self._WF_ID},
+        ])
+        assert len(recorded["error_message"]) == 2000
+        assert key not in recorded["error_message"]
+
+    def test_default_message_still_applies_when_redacting(self):
+        recorded, _ = self._run([
+            {"status": "error", "workflow_id": self._WF_ID},
+        ])
+        assert recorded["error_message"] == "Generation failed"
+
+
+class TestStreamExecuteOnly:
+    """Tests for stream_execute_only generator.
+
+    stream_execute_only drives the real _stream_docker_execution
+    (workflow_service.py), which reaches three external dependencies
+    imported at module level: get_run_registry() writes a test_runs row
+    (_record_run before it, _set_run_status inside it); get_artifact_store()
+    writes a test.robot file under robot_tests/
+    (run_dir(run_id, create=True)); and, on the success path, _process_learning_record
+    calls get_feedback_loop() as the first statement in its try block
+    — before the empty-user_query guard a few lines below it, so it
+    runs even though these tests never reach the learning call itself. With
+    OPTIMIZATION_ENABLED=true (the real .env), that constructs a real
+    FeedbackLoop backed by a live psycopg connection to Postgres. All three
+    are real Postgres/disk writes, which CLAUDE.md forbids from tests, so all
+    three are patched here (one patch each blocks every write path through
+    them, the same reasoning TestRunIsRecordedAtStart uses for _record_run) —
+    only runner_exec_client stands in for the thing that is actually
+    external: the executor. run_dir is pointed at pytest's tmp_path so
+    _write_test_file still succeeds on a real, disposable directory outside
+    robot_tests/, which keeps the happy-path and failure-path behaviour
+    these tests actually assert.
+    """
+
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
+    @patch("src.backend.services.workflow_service.get_artifact_store")
+    @patch("src.backend.services.workflow_service.get_run_registry")
     @patch("src.backend.services.workflow_service.runner_exec_client")
-    def test_yields_events(self, mock_rc):
-        """Generator yields execution events."""
+    def test_yields_events(self, mock_rc, mock_registry, mock_store, mock_feedback, tmp_path):
+        """Generator yields execution events; no Postgres or robot_tests/ writes."""
         mock_rc.ensure_image.return_value = {"status": "ready"}
         mock_rc.execute.return_value = {"status": "passed", "test_status": "PASS"}
+        mock_store.return_value.run_dir.return_value = tmp_path
+        mock_feedback.return_value = None
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
@@ -85,10 +435,15 @@ class TestStreamExecuteOnly:
         events = asyncio.run(run_gen())
         assert len(events) > 0
 
+    @patch("src.backend.services.workflow_service.get_feedback_loop")
+    @patch("src.backend.services.workflow_service.get_artifact_store")
+    @patch("src.backend.services.workflow_service.get_run_registry")
     @patch("src.backend.services.workflow_service.runner_exec_client")
-    def test_handles_docker_failure(self, mock_rc):
-        """Executor failure yields error event."""
+    def test_handles_docker_failure(self, mock_rc, mock_registry, mock_store, mock_feedback, tmp_path):
+        """Executor failure yields error event; no Postgres or robot_tests/ writes."""
         mock_rc.ensure_image.side_effect = Exception("Runner exec not running")
+        mock_store.return_value.run_dir.return_value = tmp_path
+        mock_feedback.return_value = None
 
         from src.backend.services.workflow_service import stream_execute_only
         import asyncio
@@ -99,6 +454,275 @@ class TestStreamExecuteOnly:
             return events
         events = asyncio.run(run_gen())
         assert len(events) > 0
+
+
+class TestPlatformAdminFlagWiring:
+    """D7's ran_as_platform_admin is wired here (Task 2): workflow_service
+    calls is_validated_admin(user) ONCE per request and threads the result to
+    every _record_run call that request makes. Once, not once per call,
+    because is_validated_admin re-reads the users table on every invocation
+    where the token already claims admin — every other caller returns False
+    before that read runs.
+
+    stream_generate_only and stream_generate_and_run share the exact opening
+    row and generation-failure plumbing (_make_start_recorder,
+    _record_generation_failure), so both of those call sites are pinned here,
+    driven through stream_generate_only alone. stream_generate_and_run's OWN
+    call site (its terminal 'running' write) and stream_execute_only's are
+    covered by the two classes below instead.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
+    _MEMBER = {"user_id": "u-1", "email": "u1@x.com", "role": "user"}
+
+    def _run(self, events, user=None, admin_side_effect=None):
+        """Drive stream_generate_only, collecting every _record_run call's
+        kwargs plus how many times is_validated_admin was invoked."""
+        calls = []
+        admin_calls = {"n": 0}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status, **kw})
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            if admin_side_effect is not None:
+                raise admin_side_effect
+            return u is not None and u.get("role") == "admin"
+
+        with patch("src.backend.services.workflow_service.run_agentic_workflow",
+                   return_value=iter(events)), \
+             patch("src.backend.services.workflow_service._record_run",
+                   side_effect=_capture), \
+             patch("src.backend.services.workflow_service.is_validated_admin",
+                   side_effect=_count_admin_calls), \
+             patch("src.backend.services.workflow_service._acquire_workflow_slot",
+                   return_value=True):
+            from src.backend.services.workflow_service import stream_generate_only
+
+            async def run_gen():
+                out = []
+                async for e in stream_generate_only("login to github", "gemini",
+                                                    "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return calls, admin_calls["n"], sse
+
+    def test_a_validated_admins_opening_row_is_flagged(self):
+        """The opening-row call site, inside _make_start_recorder."""
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert calls[0]["status"] == "running"
+        assert calls[0]["is_platform_admin"] is True
+
+    def test_an_ordinary_users_opening_row_is_not_flagged(self):
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID}],
+            user=self._MEMBER,
+        )
+        assert calls[0]["is_platform_admin"] is False
+
+    def test_the_token_less_dev_caller_is_never_flagged_admin(self):
+        """user=None is the AUTH_ENFORCED=false dev caller. is_validated_admin
+        short-circuits on `not user` and must return False, not raise."""
+        calls, _, sse = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=None,
+        )
+        assert all(c["is_platform_admin"] is False for c in calls)
+        assert any("complete" in str(e) for e in sse)
+
+    def test_the_terminal_generated_row_carries_the_same_flag_as_the_opening_row(self):
+        """stream_generate_only's own terminal 'generated' call site."""
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert [c["status"] for c in calls] == ["running", "generated"]
+        assert calls[0]["is_platform_admin"] is True
+        assert calls[1]["is_platform_admin"] is True
+
+    def test_is_validated_admin_is_called_once_per_request_not_once_per_write(self):
+        """The docstring's own reason: two writes in one request (opening +
+        terminal) must share ONE users-table lookup, not pay for it twice."""
+        _, admin_calls, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert admin_calls == 1
+
+    def test_the_generation_failure_row_carries_the_flag(self):
+        """The _record_generation_failure call site — synchronous, reached
+        from the _GenerationError except block."""
+        calls, _, _ = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "error", "message": "LLM offline", "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+        )
+        assert [c["status"] for c in calls] == ["running", "error"]
+        assert calls[1]["is_platform_admin"] is True
+
+    def test_a_failure_computing_the_flag_falls_back_to_false_and_never_breaks_the_stream(self):
+        """Same discipline _record_run itself already lives by: bookkeeping
+        may never take the pipeline down. A raise inside is_validated_admin
+        must degrade to False, not propagate."""
+        calls, _, sse = self._run(
+            [{"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+             {"status": "complete", "robot_code": "*** Test Cases ***",
+              "workflow_id": self._WF_ID}],
+            user=self._ADMIN,
+            admin_side_effect=RuntimeError("users table unreachable"),
+        )
+        assert [c["status"] for c in calls] == ["running", "generated"]
+        assert calls[0]["is_platform_admin"] is False
+        assert calls[1]["is_platform_admin"] is False
+        assert any("complete" in str(e) for e in sse)
+
+
+class TestStreamExecuteOnlyPlatformAdminFlag:
+    """stream_execute_only's own direct _record_run call site.
+
+    _stream_docker_execution is faked so this isolates stream_execute_only's
+    OWN bookkeeping call from Docker/artifact machinery, the same reasoning
+    TestRerunServiceWritesTheFolder (test_rerun_group_inheritance.py) and
+    TestExecuteRunIdFork (test_history_and_reports_access.py) already use.
+    """
+
+    _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
+    _MEMBER = {"user_id": "u-1", "email": "u1@x.com", "role": "user"}
+
+    def _execute(self, user, history_query=None, rerun_of=None, admin_side_effect=None,
+                is_platform_admin=None):
+        calls = []
+        admin_calls = {"n": 0}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status,
+                          "user_query": user_query, **kw})
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            if admin_side_effect is not None:
+                raise admin_side_effect
+            return u is not None and u.get("role") == "admin"
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot):
+            release_slot()
+            yield "data: ok\n\n"
+
+        from src.backend.services import workflow_service as ws
+        with patch.object(ws, "_stream_docker_execution", fake_docker), \
+             patch.object(ws, "_record_run", side_effect=_capture), \
+             patch.object(ws, "is_validated_admin", side_effect=_count_admin_calls):
+            async def consume():
+                async for _ in ws.stream_execute_only(
+                        "*** Test Cases ***\nT\n    Log    hi", user=user,
+                        history_query=history_query, rerun_of=rerun_of,
+                        is_platform_admin=is_platform_admin):
+                    pass
+            asyncio.run(consume())
+        return calls, admin_calls["n"]
+
+    def test_a_validated_admins_execute_row_is_flagged(self):
+        calls, admin_calls = self._execute(self._ADMIN)
+        assert calls[0]["is_platform_admin"] is True
+        assert admin_calls == 1
+
+    def test_an_ordinary_users_execute_row_is_not_flagged(self):
+        calls, _ = self._execute(self._MEMBER)
+        assert calls[0]["is_platform_admin"] is False
+
+    def test_the_rerun_path_carries_the_flag_alongside_history_query(self):
+        """Corner case: history_query stands in for user_query on this call
+        site. The admin flag rides beside it, computed independently."""
+        calls, _ = self._execute(
+            self._ADMIN, history_query="the original query", rerun_of="root-run-id")
+        assert calls[0]["user_query"] == "the original query"
+        assert calls[0]["rerun_of"] == "root-run-id"
+        assert calls[0]["is_platform_admin"] is True
+
+    def test_a_failure_computing_the_flag_falls_back_to_false(self):
+        calls, _ = self._execute(self._ADMIN, admin_side_effect=RuntimeError("boom"))
+        assert calls[0]["is_platform_admin"] is False
+
+    def test_a_pre_computed_flag_is_used_as_is_not_recomputed(self):
+        """Finding 1 (round 1 review): the rerun route now has its own
+        history_scope() answer in hand before calling in here, and must not
+        pay for a second is_validated_admin lookup. _MEMBER's own role would
+        compute False if asked, so seeing True proves the passed-in value won
+        rather than being overridden or ignored, and admin_calls == 0 proves
+        is_validated_admin was never invoked at all."""
+        calls, admin_calls = self._execute(self._MEMBER, is_platform_admin=True)
+        assert calls[0]["is_platform_admin"] is True
+        assert admin_calls == 0
+
+
+class TestGenerateAndRunFlagWiring:
+    """stream_generate_and_run's OWN call site — the terminal 'running'
+    write issued before Docker execution starts. Its opening row and
+    generation-failure path reuse the exact same _make_start_recorder /
+    _record_generation_failure code already pinned by
+    TestPlatformAdminFlagWiring via stream_generate_only — this class only
+    needs to prove the direct call site plus the once-per-request property
+    hold for THIS entry point too.
+    """
+
+    _WF_ID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    _ADMIN = {"user_id": "root", "email": "root@x.com", "role": "admin"}
+
+    def _run(self, user):
+        calls = []
+        admin_calls = {"n": 0}
+
+        def _capture(run_id, user_arg, user_query, status, **kw):
+            calls.append({"run_id": run_id, "status": status, **kw})
+
+        def _count_admin_calls(u):
+            admin_calls["n"] += 1
+            return u is not None and u.get("role") == "admin"
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot):
+            release_slot()
+            yield "data: ok\n\n"
+
+        from src.backend.services import workflow_service as ws
+        with patch.object(ws, "run_agentic_workflow", return_value=iter([
+                {"status": "running", "message": "planning", "workflow_id": self._WF_ID},
+                {"status": "complete", "robot_code": "*** Test Cases ***",
+                 "workflow_id": self._WF_ID},
+             ])), \
+             patch.object(ws, "_record_run", side_effect=_capture), \
+             patch.object(ws, "is_validated_admin", side_effect=_count_admin_calls), \
+             patch.object(ws, "_stream_docker_execution", fake_docker):
+
+            async def run_gen():
+                out = []
+                async for e in ws.stream_generate_and_run(
+                        "login to github", "gemini", "gemini-2.5-flash", user=user):
+                    out.append(e)
+                return out
+
+            sse = asyncio.run(run_gen())
+        return calls, admin_calls["n"], sse
+
+    def test_the_terminal_running_row_is_flagged_for_a_validated_admin(self):
+        calls, admin_calls, _ = self._run(self._ADMIN)
+        # Opening row (_make_start_recorder, shared with stream_generate_only)
+        # + this function's own terminal row — both status='running'.
+        assert len(calls) == 2
+        assert all(c["is_platform_admin"] is True for c in calls)
+        assert admin_calls == 1
 
 
 class TestVertexCredentialValidation:
@@ -303,7 +927,8 @@ def test_stream_docker_execution_uses_runner_exec_client(tmp_path):
     with patch("src.backend.services.workflow_service.runner_exec_client") as rc, \
          patch("src.backend.services.workflow_service.get_artifact_store") as gas, \
          patch.object(workflow_service, "_set_run_status"), \
-         patch.object(workflow_service, "_process_learning"), \
+         patch.object(workflow_service, "_process_learning_record",
+                      return_value=None), \
          patch.object(workflow_service, "inline_report_screenshots", return_value=0), \
          patch.object(workflow_service, "_safe_evict_hint_metadata"):
         gas.return_value.run_dir.return_value = tmp_path
@@ -315,3 +940,357 @@ def test_stream_docker_execution_uses_runner_exec_client(tmp_path):
 
     rc.execute.assert_called_once_with("abc123", "test.robot")
     assert any("passed" in c for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# E5b Part B: every status write in _stream_docker_execution records why.
+#
+# The real _set_run_status runs against a mocked get_run_registry, so each test
+# checks both the value a site computes and that _set_run_status forwards it —
+# and nothing reaches the live database. get_artifact_store points run_dir at
+# tmp_path (nothing under robot_tests/). The output.xml files are real Robot
+# Framework 7.4.2 output (tests/fixtures/rf742_output_xml/, see
+# tests/test_core/test_failure_sentences.py for how they were produced).
+# ---------------------------------------------------------------------------
+
+import contextlib
+from pathlib import Path
+from unittest.mock import call
+
+from src.backend.core.failure_sentences import failure_sentence
+from src.backend.core.secret_redaction import redact_secrets
+
+_RF_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "rf742_output_xml"
+_RUN_ID = "3f0c9f4e-8a3b-4d7e-9c55-6b1f2a0d7e11"
+_KEY = "AIzaSy" + "D" * 33  # a Google API key shape redact_secrets masks
+_PAGE_LOAD_SENTENCE = failure_sentence(
+    "TimeoutError: page.goto: Timeout 30000ms exceeded.\n"
+    "Call log:\n  - navigating to \"https://example.com/\", waiting until \"load\"")
+
+
+def _fixture_xml(name: str) -> str:
+    return str(_RF_FIXTURES / f"{name}.xml")
+
+
+def _runner_body(test_status: str | None, output_xml_path: str | None) -> dict:
+    """The dict docker_service.run_test_in_container returns (docker_service.py:527-579)."""
+    body = {
+        "status": "complete",
+        "message": "Test execution finished: Some tests failed (exit code 1).",
+        "output_xml_path": output_xml_path,
+        "exit_code": 1,
+        "result": {"logs": "", "log_html": f"/reports/{_RUN_ID}/log.html",
+                   "report_html": f"/reports/{_RUN_ID}/report.html"},
+    }
+    if test_status is not None:
+        body["test_status"] = test_status
+    return body
+
+
+def _sse(chunks: list[str]) -> list[dict]:
+    out = []
+    for c in chunks:
+        for line in c.splitlines():
+            if line.startswith("data: "):
+                out.append(json.loads(line[6:]))
+    return out
+
+
+def _drive_execution(tmp_path, *, body=None, execute_error=None, registry=None,
+                     extra=()):
+    """Run the real _stream_docker_execution; return (events, set_status calls)."""
+    registry = registry or MagicMock()
+
+    async def _drive():
+        chunks = []
+        async for chunk in workflow_service._stream_docker_execution(
+                _RUN_ID, "*** Test Cases ***\nT\n    Log    x\n", "q", lambda: None):
+            chunks.append(chunk)
+        return chunks
+
+    with contextlib.ExitStack() as stack:
+        rc = stack.enter_context(patch.object(workflow_service, "runner_exec_client"))
+        gas = stack.enter_context(patch.object(workflow_service, "get_artifact_store"))
+        stack.enter_context(patch.object(workflow_service, "get_run_registry",
+                                         return_value=registry))
+        stack.enter_context(patch.object(workflow_service, "_process_learning_record",
+                                         return_value=None))
+        stack.enter_context(patch.object(workflow_service, "inline_report_screenshots",
+                                         return_value=0))
+        stack.enter_context(patch.object(workflow_service, "_safe_evict_hint_metadata"))
+        for p in extra:
+            stack.enter_context(p)
+        gas.return_value.run_dir.return_value = tmp_path
+        gas.return_value.persist_run.return_value = None
+        rc.ensure_image.return_value = {"status": "ready"}
+        if execute_error is not None:
+            rc.execute.side_effect = execute_error
+        else:
+            rc.execute.return_value = body
+        chunks = asyncio.run(_drive())
+    return _sse(chunks), registry.set_status.call_args_list
+
+
+def _result_event(events: list[dict]) -> dict:
+    """The execution event that carries the runner's verdict."""
+    return next(e for e in events if e.get("stage") == "execution" and "test_status" in e)
+
+
+class TestFailedVerdictRecordsTheReason:
+    """The :1392 site, `failed` arm: output.xml -> redact -> cap -> classify."""
+
+    def test_the_first_failing_tests_message_is_stored_not_the_first_tests(self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("pass_then_fail"))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        expected = ("TimeoutError: locator.fill: Timeout 10000ms exceeded.\n"
+                    "Call log:\n  - waiting for locator(\"#second\")")
+        assert calls == [call(_RUN_ID, "failed", expected)]
+        assert _result_event(events)["failure_sentence"] == failure_sentence(expected)
+        assert _result_event(events)["failure_sentence"] is not None
+
+    def test_a_caught_failure_is_not_stored_as_the_reason(self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("caught_then_real"))
+
+        _, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls == [call(_RUN_ID, "failed",
+                              "TimeoutError: locator.fill: Timeout 10000ms exceeded.\n"
+                              "Call log:\n  - waiting for locator(\"#real\")")]
+
+    def test_the_stored_reason_is_redacted_then_capped_keeping_the_head(self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("long_failure_with_token"))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        stored = calls[0].args[2]
+        assert calls[0].args[:2] == (_RUN_ID, "failed")
+        assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
+        assert "SECRETVALUE123" not in stored
+        assert stored.startswith(
+            "Error: page.goto: net::ERR_ABORTED at https://example.com/app?token=[REDACTED]\n")
+        # The card classifies the SAME text History stores.
+        assert _result_event(events)["failure_sentence"] == failure_sentence(stored)
+        assert _result_event(events)["failure_sentence"] is not None
+
+    def test_a_suite_setup_header_is_stripped_so_a_locator_timeout_is_not_a_page_load(
+            self, tmp_path):
+        body = _runner_body("failed", _fixture_xml("suite_setup_failure"))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        stored = calls[0].args[2]
+        assert stored == ("TimeoutError: locator.click: Timeout 10000ms exceeded.\n"
+                          "Call log:\n  - waiting for locator(\"#suite-setup\")")
+        assert _result_event(events)["failure_sentence"] != _PAGE_LOAD_SENTENCE
+
+    def test_an_unparseable_output_xml_stores_none_and_the_verdict_stays_failed(
+            self, tmp_path):
+        broken = tmp_path / "output.xml"
+        broken.write_text("<robot><suite><test><status status='FAIL'>", encoding="utf-8")
+        body = _runner_body("failed", str(broken))
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls == [call(_RUN_ID, "failed", None)]
+        event = _result_event(events)
+        assert event["test_status"] == "failed"
+        assert "failure_sentence" in event
+        assert event["failure_sentence"] is None
+        assert not [e for e in events if e.get("status") == "error"]
+
+    def test_a_missing_output_xml_path_stores_none(self, tmp_path):
+        """docker_service's exit-code fallback returns failed with no path (:571-575)."""
+        events, calls = _drive_execution(tmp_path, body=_runner_body("failed", None))
+
+        assert calls == [call(_RUN_ID, "failed", None)]
+        assert _result_event(events)["failure_sentence"] is None
+
+    @pytest.mark.parametrize("target", ["first_failure_message", "failure_sentence"])
+    def test_an_exception_in_the_derivation_changes_neither_verdict_nor_event(
+            self, tmp_path, target):
+        body = _runner_body("failed", _fixture_xml("single_failure"))
+        before = dict(body)
+
+        events, calls = _drive_execution(
+            tmp_path, body=body,
+            extra=[patch.object(workflow_service, target,
+                                side_effect=RuntimeError("derivation blew up"))])
+
+        assert calls == [call(_RUN_ID, "failed", None)]
+        assert _result_event(events) == {"stage": "execution", **before,
+                                         "failure_sentence": None}
+        assert not [e for e in events if e.get("status") == "error"]
+
+    def test_a_swallowed_derivation_error_is_logged_with_its_traceback_and_path(
+            self, tmp_path, caplog):
+        path = _fixture_xml("single_failure")
+
+        with caplog.at_level("ERROR"):
+            _drive_execution(
+                tmp_path, body=_runner_body("failed", path),
+                extra=[patch.object(workflow_service, "first_failure_message",
+                                    side_effect=RuntimeError("derivation blew up"))])
+
+        records = [r for r in caplog.records if "failure reason" in r.getMessage()]
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+        assert records[0].exc_info[0] is RuntimeError
+        assert path in records[0].getMessage()
+
+    def test_the_sentence_is_classified_from_exactly_the_stored_string(self, tmp_path):
+        """The raw text (token, 3,184 chars) and the stored one (redacted, 2,000
+        chars) classify the same today, so only the call itself can prove the
+        card and History read ONE text."""
+        seen = []
+
+        def recording(message):
+            seen.append(message)
+            return failure_sentence(message)
+
+        _, calls = _drive_execution(
+            tmp_path, body=_runner_body("failed", _fixture_xml("long_failure_with_token")),
+            extra=[patch.object(workflow_service, "failure_sentence", recording)])
+
+        stored = calls[0].args[2]
+        assert stored is not None
+        assert seen == [stored]
+
+    def test_the_derivation_runs_off_the_event_loop(self, tmp_path):
+        seen = []
+        real = workflow_service.first_failure_message
+
+        def recording(path):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return real(path)
+
+        _drive_execution(
+            tmp_path, body=_runner_body("failed", _fixture_xml("single_failure")),
+            extra=[patch.object(workflow_service, "first_failure_message", recording)])
+
+        assert seen == [False]
+
+
+class TestOtherVerdictsAtTheResultSite:
+    """The :1392 site's `passed` and `error` arms."""
+
+    def test_a_passed_run_stores_none_and_derives_nothing(self, tmp_path):
+        derive = MagicMock()
+        body = _runner_body("passed", _fixture_xml("single_failure"))
+
+        events, calls = _drive_execution(
+            tmp_path, body=body,
+            extra=[patch.object(workflow_service, "first_failure_message", derive)])
+
+        assert calls == [call(_RUN_ID, "passed", None)]
+        derive.assert_not_called()
+        assert "failure_sentence" not in _result_event(events)
+
+    def test_a_malformed_runner_body_stores_its_message_redacted_and_capped(self, tmp_path):
+        body = _runner_body(None, None)
+        body["message"] = f"runner said something odd at /x?key={_KEY} " + "y" * 3000
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        stored = calls[0].args[2]
+        assert calls[0].args[:2] == (_RUN_ID, "error")
+        assert stored == redact_secrets(body["message"])[
+            :workflow_service._ERROR_MESSAGE_MAX_CHARS]
+        assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
+        assert _KEY not in stored
+        assert not any("failure_sentence" in e for e in events)
+
+    def test_a_malformed_runner_bodys_streamed_message_is_redacted_not_capped(
+            self, tmp_path):
+        """The row gets the capped/redacted text; the SSE event must too —
+        never the raw message (CodeRabbit security finding, PR #112)."""
+        body = _runner_body(None, None)
+        body["message"] = f"runner said something odd at /x?key={_KEY} " + "y" * 3000
+
+        events, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls[0].args[:2] == (_RUN_ID, "error")
+        streamed = next(e for e in events
+                        if e.get("stage") == "execution" and "exit_code" in e)
+        assert _KEY not in streamed["message"]
+        assert streamed["message"] == redact_secrets(
+            f"runner said something odd at /x?key={_KEY} " + "y" * 3000)
+        assert len(streamed["message"]) > workflow_service._ERROR_MESSAGE_MAX_CHARS
+
+    def test_a_malformed_runner_body_with_no_message_stores_none(self, tmp_path):
+        body = _runner_body("weird", None)
+        del body["message"]
+
+        _, calls = _drive_execution(tmp_path, body=body)
+
+        assert calls == [call(_RUN_ID, "error", None)]
+
+
+class TestSaveFailureRecordsTheReason:
+    """The :1354 site: the text is built once, before the write, and reused."""
+
+    def test_the_text_is_redacted_capped_stored_and_yielded(self, tmp_path):
+        def leaky_open(*_a, **_kw):
+            raise OSError(f"cannot write /run/secrets/env?key={_KEY} " + "z" * 3000)
+
+        events, calls = _drive_execution(
+            tmp_path, body=_runner_body("passed", None),
+            extra=[patch("builtins.open", leaky_open)])
+
+        stored = calls[0].args[2]
+        assert calls == [call(_RUN_ID, "error", stored)]
+        assert stored.startswith(
+            "Failed to save test code: cannot write /run/secrets/env?key=[REDACTED]")
+        assert len(stored) == workflow_service._ERROR_MESSAGE_MAX_CHARS
+        assert _KEY not in stored
+        assert events[-1]["status"] == "error"
+        assert events[-1]["message"] == stored
+
+
+class TestExecutionExceptionRecordsTheReason:
+    """The :1437 site: `detail` is built before the write; the yield stays uncapped."""
+
+    def test_the_text_is_redacted_and_capped_in_the_row_but_not_in_the_event(self, tmp_path):
+        error = RuntimeError(
+            "Docker container exited with a system error (exit code 3).\n"
+            f"Container stdout/stderr (tail):\nGET /x?key={_KEY}\n" + "w" * 3000)
+
+        events, calls = _drive_execution(tmp_path, execute_error=error)
+
+        detail = redact_secrets(str(error))
+        assert calls == [call(_RUN_ID, "error",
+                              detail[:workflow_service._ERROR_MESSAGE_MAX_CHARS])]
+        assert _KEY not in calls[0].args[2]
+        assert events[-1] == {"stage": "execution", "status": "error", "message": detail}
+        assert len(events[-1]["message"]) > workflow_service._ERROR_MESSAGE_MAX_CHARS
+
+    def test_an_exception_with_no_text_records_its_type_name(self, tmp_path):
+        events, calls = _drive_execution(tmp_path, execute_error=TimeoutError())
+
+        assert calls == [call(_RUN_ID, "error", "TimeoutError")]
+        assert events[-1]["message"] == "TimeoutError"
+
+
+class TestRecordingAReasonNeverBreaksARun:
+
+    def test_a_registry_failure_does_not_propagate(self, tmp_path):
+        registry = MagicMock()
+        registry.set_status.side_effect = RuntimeError("database is down")
+        body = _runner_body("failed", _fixture_xml("single_failure"))
+
+        events, calls = _drive_execution(tmp_path, body=body, registry=registry)
+
+        assert len(calls) == 1
+        assert _result_event(events)["test_status"] == "failed"
+        assert not [e for e in events if e.get("status") == "error"]
+
+    def test_set_run_status_forwards_the_message_and_swallows_a_bootstrap_failure(self):
+        registry = MagicMock()
+        with patch.object(workflow_service, "get_run_registry", return_value=registry):
+            workflow_service._set_run_status("rid", "failed", "why")
+        registry.set_status.assert_called_once_with("rid", "failed", "why")
+
+        with patch.object(workflow_service, "get_run_registry",
+                          side_effect=RuntimeError("no pool")):
+            workflow_service._set_run_status("rid", "failed", "why")  # must not raise

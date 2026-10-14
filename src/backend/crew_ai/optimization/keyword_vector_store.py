@@ -294,7 +294,17 @@ class KeywordVectorStore:
 
     def add_pattern(self, user_query: str, keywords: List[str],
                     org_id: str | None = None) -> Optional[str]:
-        """Store one (user_query -> keywords) pattern; returns its id (or None)."""
+        """Store one (user_query -> keywords) pattern; returns its id (or None).
+
+        A missing org is refused (T9): search_patterns now fails closed, so an
+        org-less row could never be read back — it would only accumulate.
+        Checked before the embed so a refused call costs nothing.
+        """
+        if org_id is None:
+            logger.warning(
+                "Query-pattern write refused (no org): an org-less pattern can "
+                "never be searched again")
+            return None
         vec = embedding.embed_to_literal(user_query)
         if not vec:
             return None
@@ -318,25 +328,25 @@ class KeywordVectorStore:
         """Nearest query patterns by L2 distance. Returns [{keywords, distance}].
 
         When org_id is set only patterns belonging to that org are returned.
-        When org_id is None the search is unscoped (backward-compatible).
+        A missing org returns [] (T9): the filter used to be dropped entirely,
+        which returned every org's patterns to a caller with no tenancy.
         """
+        if org_id is None:
+            logger.warning(
+                "Query-pattern read refused (no org): returning no patterns "
+                "rather than every org's")
+            return []
         vec = embedding.embed_to_literal(user_query)
         if not vec:
             return []
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    where = "WHERE org_id = %s " if org_id is not None else ""
-                    params = (
-                        [vec, org_id, vec, top_k]
-                        if org_id is not None
-                        else [vec, vec, top_k]
-                    )
                     cur.execute(
                         "SELECT keywords, embedding <-> %s::vector AS distance "
-                        f"FROM kw_query_patterns {where}"
+                        "FROM kw_query_patterns WHERE org_id = %s "
                         "ORDER BY embedding <-> %s::vector LIMIT %s",
-                        params)
+                        [vec, org_id, vec, top_k])
                     return [{"keywords": kw, "distance": float(d)} for kw, d in cur.fetchall()]
         except Exception as e:
             logger.warning("Query-pattern search failed: %s", e)

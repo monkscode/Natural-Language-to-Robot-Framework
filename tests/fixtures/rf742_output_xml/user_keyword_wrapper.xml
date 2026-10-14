@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:17:44.021518" rpa="false" schemaversion="5">
+<suite id="s1" name="User Keyword Wrapper" source="/w/user_keyword_wrapper.robot">
+<test id="s1-t1" name="User Keyword Wrapper" line="2">
+<kw name="Do The Click">
+<kw name="Log" owner="BuiltIn">
+<msg time="2026-09-21T18:17:44.061501" level="INFO">inside</msg>
+<arg>inside</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="PASS" start="2026-09-21T18:17:44.061344" elapsed="0.000193"/>
+</kw>
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:17:44.061791" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#inner")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#inner")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:17:44.061594" elapsed="0.000263">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#inner")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:44.061125" elapsed="0.000815">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#inner")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:17:44.060792" elapsed="0.001214">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#inner")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:17:44.022274" elapsed="0.039903"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="User Keyword Wrapper" id="s1" pass="0" fail="1" skip="0">User Keyword Wrapper</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

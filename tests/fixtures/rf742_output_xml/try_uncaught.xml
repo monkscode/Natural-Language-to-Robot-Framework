@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot generator="Robot 7.4.2 (Python 3.12.13 on linux)" generated="2026-09-21T18:43:30.727111" rpa="false" schemaversion="5">
+<suite id="s1" name="Try Uncaught" source="/w/try_uncaught.robot">
+<test id="s1-t1" name="Uncaught Try" line="2">
+<try>
+<branch type="TRY">
+<kw name="Fail" owner="BuiltIn">
+<msg time="2026-09-21T18:43:30.765932" level="FAIL">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#uncaught")</msg>
+<arg>TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n${SPACE}${SPACE}-${SPACE}waiting for locator("#uncaught")</arg>
+<doc>Fails the test with the given message and optionally alters its tags.</doc>
+<status status="FAIL" start="2026-09-21T18:43:30.765677" elapsed="0.000322">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#uncaught")</status>
+</kw>
+<status status="FAIL" start="2026-09-21T18:43:30.765474" elapsed="0.000572">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#uncaught")</status>
+</branch>
+<branch type="EXCEPT">
+<pattern>Something else entirely</pattern>
+<kw name="Log" owner="BuiltIn">
+<arg>never</arg>
+<doc>Logs the given message with the given level.</doc>
+<status status="NOT RUN" start="2026-09-21T18:43:30.766125" elapsed="0.000010"/>
+</kw>
+<status status="NOT RUN" start="2026-09-21T18:43:30.766079" elapsed="0.000071"/>
+</branch>
+<status status="FAIL" start="2026-09-21T18:43:30.765445" elapsed="0.000720">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#uncaught")</status>
+</try>
+<status status="FAIL" start="2026-09-21T18:43:30.765317" elapsed="0.000911">TimeoutError: locator.click: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator("#uncaught")</status>
+</test>
+<status status="FAIL" start="2026-09-21T18:43:30.728068" elapsed="0.038322"/>
+</suite>
+<statistics>
+<total>
+<stat pass="0" fail="1" skip="0">All Tests</stat>
+</total>
+<tag>
+</tag>
+<suite>
+<stat name="Try Uncaught" id="s1" pass="0" fail="1" skip="0">Try Uncaught</stat>
+</suite>
+</statistics>
+<errors>
+</errors>
+</robot>

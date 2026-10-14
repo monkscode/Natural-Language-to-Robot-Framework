@@ -9,21 +9,39 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Windows: reconfigure stdout/stderr to UTF-8 for emoji log compatibility.
+#
+# reconfigure() retunes the EXISTING wrapper in place. Rewrapping .buffer in a
+# NEW TextIOWrapper (what this used to do) hands that buffer a second owner, and
+# whichever wrapper is garbage-collected first closes it. Under pytest the buffer
+# belongs to the capture machinery, so importing this module used to arm a
+# landmine: the moment nothing kept the wrapper alive, every later test died at
+# setup/teardown with "ValueError: I/O operation on closed file". OTel init
+# happened to hold a reference and mask it for as long as tracing was on.
 if sys.platform.startswith('win'):
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    for _stream_name in ('stdout', 'stderr'):
+        _stream = getattr(sys, _stream_name, None)
+        if hasattr(_stream, 'reconfigure'):
+            _stream.reconfigure(encoding='utf-8', errors='replace')
+        elif hasattr(_stream, 'buffer'):
+            setattr(sys, _stream_name, io.TextIOWrapper(
+                _stream.buffer, encoding='utf-8', errors='replace'))
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 # --- Structured Logging (must be FIRST — before any logger calls) ---
+# LOG_DIR moves application.log, and only that file. It is read from the
+# process environment because this runs before settings exists: run.sh and
+# compose export .env, a bare `uvicorn` does not, so there a LOG_DIR set only
+# in .env is not seen. Unset or blank keeps ./logs.
 from src.backend.config.logging_config import setup_logging
-setup_logging()
+_LOG_DIR = os.environ.get("LOG_DIR") or "logs"
+setup_logging(log_dir=_LOG_DIR)
 
 # Disable crewai tracing prompts to prevent log spam
 os.environ['CREWAI_TRACING_ENABLED'] = 'false'
 
 logger = logging.getLogger(__name__)
-logger.info("Starting application with structured logging enabled at logs/application.log")
+logger.info("Starting application with structured logging enabled at %s/application.log", _LOG_DIR)
 
 # --- LLM Observability (must be BEFORE any import that loads CrewAI/LiteLLM) ---
 from src.backend.core.observability import init_observability
@@ -126,6 +144,15 @@ app.include_router(api_router)
 from src.backend.api.history_endpoints import router as history_router
 app.include_router(history_router, prefix="/api")
 
+# Run groups — the History page's org-scoped folder feature.
+from src.backend.api.groups_endpoints import router as groups_router
+app.include_router(groups_router, prefix="/api")
+
+# Tests — the Tests page's list of versioned tests (distinct from their
+# individual runs, which /api/history keeps listing).
+from src.backend.api.tests_endpoints import router as tests_router
+app.include_router(tests_router, prefix="/api")
+
 # Metrics dashboards — routes self-guard via is_dashboard_viewer (org-admin+).
 from src.backend.api.workflow_metrics_endpoints import router as workflow_metrics_router
 app.include_router(workflow_metrics_router, prefix="/api")
@@ -166,6 +193,16 @@ async def startup_event():
     # ARTIFACT_STORE=s3 with no bucket) instead of on the first report request.
     from src.backend.core.artifact_store import get_artifact_store
     get_artifact_store()
+
+    # LiteLLM's model list: if its download failed at import, keep the configured
+    # model known (schema enforcement + cost). Logs; never blocks startup.
+    try:
+        from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+        from src.backend.crew_ai.model_map_fallback import ensure_model_entry
+        ensure_model_entry(settings.MODEL_PROVIDER,
+                           resolve_model_string(settings.MODEL_PROVIDER, settings.ONLINE_MODEL))
+    except Exception as e:
+        logging.warning(f"[LLM] model-list check skipped: {e}")
 
     logging.info("Application startup complete.")
     _check_learning_health()
@@ -212,6 +249,58 @@ async def startup_event():
             logging.info("[ORG_BACKFILL] data org_id backfill already applied; skipping")
     except Exception as e:
         logging.warning(f"[ORG_BACKFILL] data org_id backfill skipped: {e}")
+
+    # Build the run registry here rather than leaving it to the first request.
+    # RunRegistry.__init__ runs _SCHEMA_DDL, which carries the one-shot
+    # test-split collapse. The backfill above is the only other thing that
+    # constructs it at startup, and run_migration_once calls that only while
+    # the data_org_id_backfill marker is unset — so on any deployment that has
+    # already completed that migration, nothing built the registry at boot and
+    # the collapse fired inside whichever request first touched History, groups
+    # or a report authorization: a schema migration inside a user request, and
+    # a bare 500 for that user if it failed. Must stay AFTER the org backfill,
+    # which is ordered where it is on purpose. Best-effort, like the migration
+    # block above: a Postgres outage must not block startup, and nothing is
+    # cached on failure, so the first request simply retries construction.
+    try:
+        from src.backend.core.run_registry import get_run_registry
+        get_run_registry()
+    except Exception as e:
+        logging.warning(f"[RUN_REGISTRY] startup construction skipped: {e}")
+
+    # Align each result's own folder column with its test's, once. History's
+    # "Remove from group" used to leave a test's OTHER results in the folder
+    # (assign_runs wrote only the named runs), and reads fall back to that
+    # column when the test has none, so those results stayed published to the
+    # org. A run filed into a folder while it was still generating (before
+    # its test existed) ends with the same columns (test: no folder, own
+    # column: the folder), cannot be told apart from a leaked row by column
+    # state, and is un-filed too; un-publishing is the safe direction, and
+    # each rewritten run is logged with its old folder so it can be filed
+    # again. Must stay AFTER the construction above (the test-split collapse
+    # that creates `tests` runs there). Best-effort: a failure leaves the
+    # marker unset and the next boot retries; it never blocks startup.
+    try:
+        from src.backend.auth.migration_state import run_migration_once
+        from src.backend.core.run_registry import get_run_registry
+        if run_migration_once(
+                "result_folder_alignment",
+                lambda: get_run_registry().align_result_folders()):
+            logging.info("[RUN_REGISTRY] result folder alignment applied")
+        else:
+            logging.info(
+                "[RUN_REGISTRY] result folder alignment already applied; skipping")
+    except Exception as e:
+        logging.warning(f"[RUN_REGISTRY] result folder alignment skipped: {e}")
+
+    # Close runs a dead server left on 'running'. Best-effort: never blocks startup.
+    try:
+        import asyncio
+        from src.backend.services.workflow_service import sweep_abandoned_runs_forever
+        app.state.abandoned_run_sweeper = asyncio.create_task(
+            sweep_abandoned_runs_forever())
+    except Exception as e:
+        logging.warning(f"[RUN_REGISTRY] abandoned-run sweeper not started: {e}")
 
     # Clean up orphaned temp metrics files left by crashed/incomplete workflows
     try:
@@ -269,6 +358,10 @@ def _check_learning_health():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    sweeper = getattr(app.state, "abandoned_run_sweeper", None)
+    if sweeper is not None:
+        sweeper.cancel()
+
     # Drain pending learning writes before exit
     try:
         from src.backend.crew_ai.optimization.learning_registry import get_feedback_loop

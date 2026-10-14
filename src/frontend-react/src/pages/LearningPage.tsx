@@ -65,6 +65,7 @@ interface ReviewPage {
   status: string
   hint_count?: number | null
   error_message?: string | null
+  org_id?: string | null
 }
 interface ReviewSessionDetail {
   session: ReviewSession
@@ -91,6 +92,14 @@ function hintStatus(h: Hint): { label: string; cls: string } {
   if (h.sort_priority === 4) return { label: 'Retracted', cls: 'bg-muted text-muted-foreground' }
   if (h.llm_review_disabled === 1) return { label: 'LLM-disabled', cls: 'bg-purple-100 text-purple-700 border-purple-200' }
   return { label: 'Auto-disabled', cls: 'bg-amber-50 text-amber-600 border-amber-200' }
+}
+
+// F2: a review session can hold pages from multiple orgs (see hint_review_pages.org_id,
+// Task 2/3) — two orgs sharing scope_type='global', or the same domain string, must not
+// render identical labels, or an admin cannot tell which page belongs to which tenant.
+export function reviewPageLabel(p: ReviewPage): string {
+  const scope = p.scope_type === 'global' ? 'Global hints' : (p.scope_value || 'No domain')
+  return `${scope} — ${p.org_id || 'no org'}`
 }
 
 function ErrorNote({ msg }: { msg: string }) {
@@ -147,7 +156,7 @@ function Stat({ label, value }: { label: string; value: number | string }) {
 
 /* ── Hints management ── */
 function Hints() {
-  const { user } = useAuth()
+  const { user, isAdmin } = useAuth()
   const [filter, setFilter] = useState('')
   const [busyId, setBusyId] = useState<number | null>(null)
   const [actErr, setActErr] = useState('')
@@ -156,6 +165,24 @@ function Hints() {
   const [scopeFilter, setScopeFilter] = useState('')
   const [domainFilter, setDomainFilter] = useState('')
   const [search, setSearch] = useState('')
+  const [orgNames, setOrgNames] = useState<Record<string, string>>({})
+  // Org names for the owning-org column, fetched once. Only a PLATFORM admin
+  // needs them: list_hints sets scope_org = None for them alone, so they are
+  // the only caller whose rows span more than one org — for an org admin every
+  // row carries the same org and the column would be noise. /auth/admin/orgs
+  // is require_admin, so for anyone else the call could only 403; skipping it
+  // is the same pattern, for the same reason, as AddFeedbackSheet's picker.
+  useEffect(() => {
+    if (!isAdmin) return
+    let live = true
+    api<{ id: string; name: string }[]>('/auth/admin/orgs')
+      .then(rows => { if (live) setOrgNames(Object.fromEntries(rows.map(o => [o.id, o.name]))) })
+      // The name is a convenience; the id is the identity, and the column
+      // falls back to it. A directory lookup must never take down the table
+      // the Retract button lives in.
+      .catch(() => { /* rows keep showing their raw org_id */ })
+    return () => { live = false }
+  }, [isAdmin])
   // Debounce text inputs so we don't refetch per keystroke
   const [applied, setApplied] = useState({ domain: '', search: '' })
   useEffect(() => {
@@ -231,6 +258,10 @@ function Hints() {
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
                     <th className="px-4 py-2.5">Hint</th>
+                    {/* Not responsive-hidden like Scope: this is the column
+                        that tells two tenants' identical hints apart, and it
+                        sits beside the buttons that mutate them. */}
+                    {isAdmin && <th className="px-4 py-2.5">Org</th>}
                     <th className="px-4 py-2.5 hidden md:table-cell">Scope</th>
                     <th className="px-4 py-2.5">Status</th>
                     <th className="px-4 py-2.5 hidden sm:table-cell">OK / Fail / Applied</th>
@@ -250,6 +281,14 @@ function Hints() {
                             <span className="mt-0.5 block text-xs italic text-amber-700 line-clamp-2">⚠ {h.conflict_flag_reason}</span>
                           )}
                         </td>
+                        {/* Falls back to the raw id when the name lookup has
+                            not landed or failed, and wraps rather than
+                            truncating — a half-printed org id names nothing. */}
+                        {isAdmin && (
+                          <td className="px-4 py-3 text-xs text-muted-foreground break-all">
+                            {h.org_id ? (orgNames[h.org_id] || h.org_id) : '—'}
+                          </td>
+                        )}
                         <td className="px-4 py-3 hidden md:table-cell text-xs text-muted-foreground">{h.scope || '—'}</td>
                         <td className="px-4 py-3"><Badge className={cn('text-xs', st.cls)}>{st.label}</Badge></td>
                         <td className="px-4 py-3 hidden sm:table-cell text-xs text-muted-foreground whitespace-nowrap">
@@ -480,8 +519,13 @@ function Review() {
           )}
         </CardContent>
       </Card>
+      {/* Keyed by session: the panel is inline, so opening another session's
+          row changes its id while it stays mounted. Its detail read, busy flag
+          and error/"Applied" messages all belong to one session, and without
+          the key they stayed on screen under the next one — beside an Apply
+          that posts to the next one. */}
       {selectedId != null && (
-        <ReviewSessionPanel id={selectedId} listStatus={selected?.status} onSessionsChanged={reload} />
+        <ReviewSessionPanel key={selectedId} id={selectedId} listStatus={selected?.status} onSessionsChanged={reload} />
       )}
     </div>
   )
@@ -505,7 +549,7 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
   useEffect(() => {
     if (prevStatus.current !== listStatus) {
       prevStatus.current = listStatus
-      reload()
+      void reload()
     }
   }, [listStatus, reload])
 
@@ -517,11 +561,16 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
         ? 'Optional note — why you agree with this recommendation (leave blank to skip):'
         : 'Optional note — why you are overriding this recommendation (leave blank to skip):',
     )
+    // window.prompt returns null only when the dialog was DISMISSED (Cancel or
+    // Escape), which abandons the action — and this PATCH writes a decision
+    // into the learning store, so it must not fire. '' is different: it is the
+    // "leave blank to skip" the label offers, so it submits with no note.
+    if (notes === null) return
     setBusyId(recId); setActErr(''); setAppliedMsg('')
     try {
       await api(`/api/learning/review-hints/sessions/${id}/recommendations/${recId}`, {
         method: 'PATCH',
-        body: JSON.stringify({ admin_decision: decision, admin_notes: notes || null }),
+        body: JSON.stringify({ admin_decision: decision, admin_notes: notes.trim() || null }),
       })
       await reload()
     } catch (e) {
@@ -579,7 +628,7 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
       {(data.pages?.length ?? 0) > 0 && (
         <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs space-y-0.5">
           {data.pages!.map(p => {
-            const label = p.scope_type === 'global' ? 'Global hints' : (p.scope_value || 'No domain')
+            const label = reviewPageLabel(p)
             const icon = p.status === 'succeeded' ? '✅' : p.status === 'failed' ? '❌' : session.status === 'pending_llm' ? '⟳' : '⏳'
             const note = p.status === 'succeeded' ? `${p.hint_count ?? 0} hints reviewed`
               : p.status === 'failed' ? (p.error_message || 'Failed')
@@ -648,17 +697,44 @@ function ReviewSessionPanel({ id, listStatus, onSessionsChanged }: {
   )
 }
 
-const VIEWS: { key: View; label: string }[] = [
-  { key: 'overview', label: 'Overview' },
+/* Which tabs a caller can actually open.
+ *
+ * /learning admits an org admin (can_view_learning / is_dashboard_viewer), but
+ * most of this page's own calls are still Depends(require_admin) and answer an
+ * org admin 403: /learning/stats (Overview AND Stats), /learning/triggers, and
+ * /learning/review-hints/sessions. Only GET /learning/hints and
+ * /learning/runs are is_dashboard_viewer. Those four routes are platform-only
+ * on purpose — test_learning_dashboards_org.py pins the 403 — so the page
+ * draws fewer controls rather than the API opening more.
+ *
+ * platformOnly is therefore a statement about the ROUTE behind the tab, not a
+ * second permission model: it is true exactly where the backing route carries
+ * require_admin. Adding a tab means checking its route's guard, not guessing.
+ */
+const VIEWS: { key: View; label: string; platformOnly?: boolean }[] = [
+  { key: 'overview', label: 'Overview', platformOnly: true },
   { key: 'hints', label: 'Hints' },
-  { key: 'triggers', label: 'Triggers' },
+  { key: 'triggers', label: 'Triggers', platformOnly: true },
   { key: 'runs', label: 'Runs' },
-  { key: 'stats', label: 'Stats' },
-  { key: 'review', label: 'LLM Review' },
+  { key: 'stats', label: 'Stats', platformOnly: true },
+  { key: 'review', label: 'LLM Review', platformOnly: true },
 ]
 
+/** The tabs this caller can open. Exported, and pure, so the filtering is
+ *  testable as a table — LearningPage.test.tsx pins both roles' tab lists
+ *  against it as well as rendering the page. */
+export function visibleViews(isPlatformAdmin: boolean) {
+  return VIEWS.filter(v => isPlatformAdmin || !v.platformOnly)
+}
+
 export default function LearningPage() {
-  const [view, setView] = useState<View>('overview')
+  const { isAdmin } = useAuth()
+  const views = visibleViews(isAdmin)
+  // Open on the first tab this caller can actually load. It used to be a
+  // hardcoded 'overview', so an org admin following the Learning nav item
+  // landed on a 403 error box on arrival — GET /learning/stats, Overview's
+  // only call, is require_admin.
+  const [view, setView] = useState<View>(views[0].key)
   return (
     <div className="mx-auto w-full max-w-7xl space-y-4">
       <div className="flex items-start justify-between">
@@ -667,9 +743,12 @@ export default function LearningPage() {
           <p className="mt-0.5 text-sm text-muted-foreground">Review learned hints, runs, and the adaptive-learning system</p>
         </div>
       </div>
-      <HealthBanner />
+      {/* GET /learning/health is require_admin too. It fails silently (the
+          banner renders null without data), so this is not a visible error —
+          but it is a guaranteed 403 on every page load for an org admin. */}
+      {isAdmin && <HealthBanner />}
       <div className="flex gap-1.5 border-b pb-2">
-        {VIEWS.map(v => (
+        {views.map(v => (
           <Button key={v.key} size="sm" variant={view === v.key ? 'default' : 'ghost'} className="h-7 text-xs" onClick={() => setView(v.key)}>
             {v.label}
           </Button>

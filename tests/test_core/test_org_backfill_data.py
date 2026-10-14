@@ -108,9 +108,17 @@ def test_backfill_data_org_ids_attributes_all_tables(_shared):
     """
     registry, store, collector, admin, _dsn = _shared
 
-    user_id, org_id = _user_and_org()
+    from src.backend.auth.repository import UserRepository
+    from src.backend.auth.org_repository import OrgRepository
+    users, orgs = UserRepository(), OrgRepository()
+    email = f"bf-{uuid.uuid4().hex[:8]}@e.com"
+    user = users.create_user(email, "S3cretpw!")
+    user_id = str(user["id"])
 
     # ---- test_runs: pre-tenancy row (user_id set, org_id NULL) ----
+    # The org is provisioned AFTER record_start so record_start's own
+    # org_members fallback (T1 Part B) has no membership to find yet and
+    # genuinely leaves org_id NULL -- the state backfill_org_ids repairs.
     run_id = str(uuid.uuid4())
     registry.record_start(
         run_id,
@@ -123,6 +131,8 @@ def test_backfill_data_org_ids_attributes_all_tables(_shared):
     ).fetchone()
     assert row is not None, "record_start did not insert the row"
     assert row[0] is None, f"Expected NULL org_id, got {row[0]!r}"
+
+    org_id = orgs.ensure_personal_org(user_id, email)
 
     # ---- llm_traces: row linked to a run that already has org_id ----
     # (The trace backfill JOINs test_runs on workflow_id; that row must carry

@@ -33,6 +33,13 @@ _SCHEMA_DDL = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_workflow_metrics_ts ON workflow_metrics (ts DESC)",
+    # Lookup by run. llm_traces indexes workflow_id and test_runs has run_id as
+    # its primary key; this table was the only one of the three join keys left
+    # on a seq scan — paid by bench evidence capture (which retries the read),
+    # by the metrics/test_runs join, and by the single-run trace query in
+    # docs/OBSERVABILITY_GRAFANA.md.
+    "CREATE INDEX IF NOT EXISTS idx_workflow_metrics_workflow_id"
+    " ON workflow_metrics (workflow_id)",
     # v2: org tenancy column (upgrade path for tables created before this version)
     "ALTER TABLE workflow_metrics ADD COLUMN IF NOT EXISTS org_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_workflow_metrics_org ON workflow_metrics(org_id)",

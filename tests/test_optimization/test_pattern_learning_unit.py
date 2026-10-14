@@ -77,6 +77,24 @@ class TestLearnFromExecution:
         store.add_pattern.side_effect = RuntimeError("postgres down")
         QueryPatternMatcher(store).learn_from_execution("q", ROBOT_CODE)  # no raise
 
+    def test_refused_pattern_is_not_logged_as_learned(self, caplog):
+        """M13: add_pattern refuses (e.g. no org — T9) and returns None, but
+        the very next line used to log "Learned pattern" unconditionally,
+        claiming a store that never happened."""
+        store = MagicMock()
+        store.add_pattern.return_value = None
+        with caplog.at_level("INFO", logger="src.backend.crew_ai.optimization.pattern_learning"):
+            QueryPatternMatcher(store).learn_from_execution("q", ROBOT_CODE)
+        assert "Learned pattern" not in caplog.text
+
+    def test_stored_pattern_is_logged_as_learned(self, caplog):
+        """The positive case stays intact: a real store still logs."""
+        store = MagicMock()
+        store.add_pattern.return_value = "pattern_abc"
+        with caplog.at_level("INFO", logger="src.backend.crew_ai.optimization.pattern_learning"):
+            QueryPatternMatcher(store).learn_from_execution("q", ROBOT_CODE)
+        assert "Learned pattern" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # get_relevant_keywords: prediction + every degradation path

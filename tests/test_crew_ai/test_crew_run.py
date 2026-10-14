@@ -72,7 +72,8 @@ def _make_tasks_mock():
 
 def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
                           kickoff_side_effect=None, agents_mock=None,
-                          progress_queue=None, identify_side_effect=None):
+                          progress_queue=None, identify_side_effect=None,
+                          identification_result=None):
     """
     Call run_crew() with all heavy dependencies mocked.
 
@@ -96,7 +97,9 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
                                   return_value=tasks_mock))
         mock_identify = stack.enter_context(
             patch("src.backend.crew_ai.crew.identify_elements",
-                  return_value=_IDENTIFICATION_RESULT,
+                  return_value=(identification_result
+                                if identification_result is not None
+                                else _IDENTIFICATION_RESULT),
                   side_effect=identify_side_effect))
         stack.enter_context(patch("src.backend.crew_ai.crew.get_crew_callbacks",
                                   return_value=(MagicMock(), MagicMock())))
@@ -134,13 +137,36 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
 # ---------------------------------------------------------------------------
 
 class TestRunCrewReturnShape:
-    """run_crew() must return a 5-tuple with the correct element types."""
+    """run_crew() must return a RunCrewResult with the correct element types.
 
-    def test_returns_five_tuple(self):
-        """Success path: result is a 5-element tuple."""
+    Indices 0-4 are unchanged from the original 5-tuple; stage_metrics,
+    shared_llm and guardrail_attempts are appended, so every positional
+    assertion below still holds.
+    """
+
+    def test_returns_nine_member_tuple(self):
+        """Success path: result is a 9-member tuple (change_waits is the 9th)."""
         result, _ = _run_crew_with_mocks()
         assert isinstance(result, tuple)
-        assert len(result) == 5
+        assert len(result) == 9
+
+    def test_named_access_matches_positional(self):
+        """It is a NamedTuple: names and indices address the same members."""
+        result, _ = _run_crew_with_mocks()
+        assert result.output is result[0]
+        assert result.crew is result[1]
+        assert result.llm_monitor is result[4]
+        assert result.stage_metrics is result[5]
+        assert result.shared_llm is result[6]
+
+    def test_seventh_element_is_the_shared_llm_wrapper(self):
+        """result[6] is agents.llm — the wrapper, not its monitor.
+
+        workflow_service needs the wrapper itself for get_workflow_usage().
+        """
+        agents_mock = _make_agents_mock()
+        out, _ = _run_crew_with_mocks(agents_mock=agents_mock)
+        assert out[6] is agents_mock.llm
 
     def test_first_element_is_assembler_kickoff_result(self):
         """result[0] is what the assembler crew's kickoff() returned."""
@@ -243,6 +269,24 @@ class TestRunCrewElementStage:
         _, mocks = _run_crew_with_mocks()
         call = mocks["tasks"].assemble_code_task.call_args
         steps_json = call.kwargs.get("identified_steps_json") or call.args[1]
+        assert json.loads(steps_json) == {"steps": _IDENTIFICATION_RESULT["steps"]}
+
+    def test_change_waits_is_empty_when_identification_has_none(self):
+        """F1: no change_waits key in the identification result -> ()."""
+        result, _ = _run_crew_with_mocks()
+        assert result.change_waits == ()
+        assert result[8] == ()
+
+    def test_change_waits_carries_the_identification_list_as_a_tuple(self):
+        """F1: the marks travel beside the steps, never inside them."""
+        waits = [{"read_locator": "css=#t", "action_locator": "a:has-text('Laptops')"}]
+        result, mocks = _run_crew_with_mocks(
+            identification_result={**_IDENTIFICATION_RESULT, "change_waits": waits})
+        assert result.change_waits == tuple(waits)
+        assert isinstance(result.change_waits, tuple)
+        call = mocks["tasks"].assemble_code_task.call_args
+        steps_json = call.kwargs.get("identified_steps_json") or call.args[1]
+        assert "change_waits" not in steps_json
         assert json.loads(steps_json) == {"steps": _IDENTIFICATION_RESULT["steps"]}
 
     def test_identify_elements_failure_propagates(self):

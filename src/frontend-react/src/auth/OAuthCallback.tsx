@@ -34,7 +34,7 @@ export default function OAuthCallback() {
       return
     }
     loginWithToken(token)
-      .then(() => navigate('/generate', { replace: true }))
+      .then(() => navigate('/', { replace: true }))
       .catch(() => setError('Could not complete sign-in. Please try again.'))
   }, [])
 

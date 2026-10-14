@@ -1,0 +1,439 @@
+"""Static guards over the log pipeline's level classification.
+
+The level a log line carries in Loki is set in TWO files that have to agree,
+and neither one reads as broken on its own. Alloy stamps `detected_level`
+from the level the application recorded; Loki is told to stop guessing one
+from the raw text. Delete either half and the other silently stops working —
+which is the whole reason this file exists.
+
+The guards below check wiring, not just presence. Four mutations that leave
+every Alloy component healthy and every line flowing were found to pass an
+earlier presence-only version of this file, the worst being an empty
+`forward_to` inside the process block: logs stop reaching Loki entirely and
+nothing complains.
+
+Referenced by: nothing — pytest entry point.
+Depends on: observability/alloy/config.alloy, observability/loki/loki-config.yml
+"""
+import json
+import re
+from pathlib import Path
+
+import yaml
+
+ALLOY_CONFIG = Path("observability/alloy/config.alloy")
+LOKI_CONFIG = Path("observability/loki/loki-config.yml")
+COMPOSE = Path("docker-compose.yml")
+DASHBOARDS = Path("observability/grafana/dashboards")
+
+# The application services whose logs must reach Loki. runner-exec joined them
+# once it configured logging and bound a workflow_id; before that it was
+# dropped at discovery, which is why a failed image pull at boot left no trace
+# anywhere an operator would look.
+COLLECTED_SERVICES = {"fastapi", "browser-service", "runner-exec"}
+
+# The stages, in the only order that works. json first so a real record wins;
+# regex second so uvicorn's line-start prefix is read only when json found
+# nothing; template third to normalise and default; structured_metadata last,
+# because it can only attach a value the earlier stages have already put in
+# the extracted map.
+EXPECTED_STAGE_ORDER = [
+    "stage.json",
+    "stage.regex",
+    "stage.template",
+    "stage.structured_metadata",
+]
+
+
+def _alloy() -> str:
+    return ALLOY_CONFIG.read_text(encoding="utf-8")
+
+
+def _loki() -> dict:
+    return yaml.safe_load(LOKI_CONFIG.read_text(encoding="utf-8"))
+
+
+def _block(header: str, text: str, closing: str) -> str:
+    """The body of a `header { ... }` block, up to its own closing brace.
+
+    `closing` is what distinguishes the block's own brace from the braces of
+    the blocks nested inside it — indentation is the only thing that does,
+    and getting it wrong fails in both directions. A top-level block closes
+    at column 0; a stage nested in one closes indented. Matching "any
+    whitespace" for a top-level block stops at the first nested stage;
+    matching greedily instead runs past the block entirely and swallows
+    whatever follows, which would let a stage moved OUT of the pipeline
+    still satisfy the assertions below.
+    """
+    match = re.search(header + r"\s*\{(.*?)\n" + closing + r"\}", text, re.S)
+    assert match, f"block {header!r} not found"
+    return match.group(1)
+
+
+def _top_level(header: str) -> str:
+    """A block at column 0 — `alloy fmt` never indents these."""
+    return _block(header, _alloy(), closing="")
+
+
+def _process_block() -> str:
+    return _top_level(r'loki\.process\s+"level"')
+
+
+def _stage(name: str) -> str:
+    """A stage nested inside the process block, so its brace is indented.
+
+    Space or tab: `alloy fmt` re-indents with tabs, the committed file uses
+    spaces, and this has to hold either way.
+    """
+    return _block(re.escape(name), _process_block(), closing=r"[ \t]+")
+
+
+def _kept_services() -> set[str]:
+    """The service names the relabel `keep` rule admits.
+
+    Matched on the rule that carries `action = "keep"` rather than on the
+    first `regex =` in the block — the container-name rule above it has one
+    too, and reading that one instead would assert nothing about collection.
+    """
+    keep = re.search(r'rule\s*\{[^{}]*action\s*=\s*"keep"[^{}]*\}', _alloy(), re.S)
+    assert keep, "the relabel block has no keep rule; every container is collected"
+    pattern = re.search(r'regex\s*=\s*"([^"]+)"', keep.group(0))
+    assert pattern, "the keep rule has no regex"
+    return set(pattern.group(1).split("|"))
+
+
+def test_every_application_service_is_collected():
+    """A service missing here is invisible in Grafana and looks healthy.
+
+    Nothing reports the omission: Alloy drops the target at discovery, all
+    components stay green, and `docker logs` still shows uvicorn's own output,
+    so the service reads as logging normally. Verified live against the stack
+    before runner-exec was added — /loki/api/v1/label/service/values returned
+    exactly ["browser-service","fastapi"].
+    """
+    kept = _kept_services()
+
+    missing = COLLECTED_SERVICES - kept
+    assert not missing, (
+        f"{sorted(missing)} are dropped at discovery and never reach Loki")
+
+
+def test_every_collected_service_caps_its_docker_log():
+    """Collection and a size cap have to arrive together.
+
+    The cap is on the Docker side, so the file grows whether or not Alloy
+    reads it — but while a service logs nothing, an absent cap is invisible.
+    runner-exec was in exactly that state: the only application service with
+    no `logging:` block, harmless only because it had no logging configured
+    to produce output.
+    """
+    services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+
+    for name in sorted(COLLECTED_SERVICES):
+        assert name in services, f"{name} is collected by Alloy but absent from compose"
+        options = (services[name].get("logging") or {}).get("options") or {}
+        assert options.get("max-size"), (
+            f"{name} sets no max-size, so its json-file log falls back to the "
+            f"daemon default and grows without bound")
+        assert options.get("max-file"), (
+            f"{name} sets no max-file, so nothing bounds the number of "
+            f"rotated files kept")
+
+
+def _dashboard_service_selectors() -> list[tuple[str, str, set[str]]]:
+    """Every Loki target that pins a service list, as (file, panel, services).
+
+    Walks nested row panels too. No dashboard nests today, but a row is the
+    normal way one grows and a guard that silently stops seeing panels is
+    worse than no guard.
+    """
+    found: list[tuple[str, str, set[str]]] = []
+
+    def walk(panels, filename):
+        for panel in panels:
+            if "panels" in panel:
+                walk(panel["panels"], filename)
+            for target in panel.get("targets") or []:
+                for match in re.finditer(r'service=~"([^"]+)"', target.get("expr", "")):
+                    found.append(
+                        (filename, panel.get("title", "?"), set(match.group(1).split("|"))))
+
+    for path in sorted(DASHBOARDS.glob("*.json")):
+        walk(json.loads(path.read_text(encoding="utf-8")).get("panels", []), path.name)
+    return found
+
+
+def test_dashboards_query_every_service_that_alloy_collects():
+    """Collecting a service and querying it are two edits, and only one fails loudly.
+
+    When runner-exec was added to the keep rule its lines reached Loki
+    immediately, but all three Loki panels still pinned
+    `service=~"fastapi|browser-service"` — including "Log lines from every
+    service in the run", whose entire purpose is to show one run end to end.
+    Every dashboard rendered, every query succeeded, and the executor's lines
+    (the container outcome, and the errors when it fails) were simply absent.
+
+    If a future panel deliberately wants a subset, this test is the right
+    place to record why — an exemption with a reason, not a silent drift.
+    """
+    selectors = _dashboard_service_selectors()
+    assert selectors, (
+        "no Loki panel pins a service list; this guard is watching nothing — "
+        "either the dashboards moved to a different selector shape or the "
+        "walk above stopped finding panels")
+
+    kept = _kept_services()
+    for filename, title, listed in selectors:
+        missing = kept - listed
+        assert not missing, (
+            f"{filename} panel {title!r} queries {sorted(listed)} but Alloy "
+            f"collects {sorted(kept)}; {sorted(missing)} reach Loki and are "
+            f"filtered back out here")
+        unknown = listed - kept
+        assert not unknown, (
+            f"{filename} panel {title!r} queries {sorted(unknown)}, which Alloy "
+            f"does not collect — the panel silently returns nothing for those")
+
+
+def test_docker_source_forwards_only_through_the_level_stage():
+    """The scrape must reach Loki via the stage, and not also bypass it.
+
+    Forwarding straight to `loki.write` stamps nothing and returns level
+    classification to Loki's guessing. Forwarding to BOTH ingests every line
+    twice, which reads as a traffic doubling rather than as a config error.
+    """
+    source = _top_level(r'loki\.source\.docker\s+"containers"')
+
+    assert "loki.process.level.receiver" in source, (
+        "the docker source does not forward through loki.process.level; "
+        "nothing stamps detected_level and Loki falls back to guessing")
+    assert "loki.write" not in source, (
+        "the docker source also forwards straight to loki.write, so every "
+        "line is ingested twice")
+
+
+def test_the_level_stage_still_reaches_loki():
+    """An empty `forward_to` drops every log line and stays healthy.
+
+    This is the failure this file exists to catch and the one a presence-only
+    guard misses: Alloy reports all components healthy, Loki simply stops
+    receiving anything.
+    """
+    assert "loki.write.default.receiver" in _process_block(), (
+        "loki.process.level does not forward to loki.write; every log line "
+        "is silently dropped and every component still reports healthy")
+
+
+def test_stages_run_in_the_only_order_that_works():
+    body = _process_block()
+    positions = []
+    for stage in EXPECTED_STAGE_ORDER:
+        assert stage in body, f"{stage} is missing from loki.process.level"
+        positions.append(body.index(stage))
+
+    assert positions == sorted(positions), (
+        f"stages are out of order: {EXPECTED_STAGE_ORDER} must appear in "
+        f"that sequence, found offsets {positions}")
+
+
+def test_alloy_stamps_detected_level_from_the_recorded_level():
+    """The stamp must come from the application's own `level` field.
+
+    Measured 2026-08-14 over the five days Loki held, counting only lines
+    that are NOT structlog records: 7,769 carried a level Loki had guessed.
+    1,053 of those were CrewAI box-drawing prompt echo and every one was
+    wrong — 270 stamped critical, 232 warn, 551 error. Discovery was correct
+    on all 16,436 real structlog records, and correct on the 6,408 uvicorn
+    access lines the regex stage below preserves.
+
+    The trigger is not only the `KEYWORD:` shape. `--- CRITICAL: ONLY
+    EXPLICIT ELEMENTS ---` is stamped critical, but so is a prompt line that
+    merely contains the bare word `error` in prose — that is where 551 of
+    the 1,053 came from.
+    """
+    extraction = _stage("stage.json")
+    assert re.search(r'\blevel\s*=\s*"level"', extraction), (
+        "stage.json does not extract the application's `level` field into "
+        "`level`; a rename here leaves every record stamped unknown")
+
+    mapping = _stage("stage.structured_metadata")
+    assert re.search(r'detected_level\s*=\s*"level"', mapping), (
+        "structured metadata does not map detected_level from the extracted "
+        "level; Loki will keep guessing from raw text")
+
+
+def test_uvicorn_keeps_its_level_and_the_rule_cannot_reach_prompt_text():
+    """uvicorn writes plain text with the level as a line-start prefix.
+
+    Loki classified those 6,408 lines correctly, so dropping them to unknown
+    would be a regression. The anchor is the safety property: every CrewAI
+    echo line starts with a box-drawing character, never with `LEVEL:`, so an
+    anchored rule cannot reach prompt text. Unanchored, it would re-introduce
+    exactly the bug this pipeline removes.
+
+    Verified live 2026-08-14: `INFO:     127.0.0.1 - "GET /health" 200 OK`
+    stores info, `ERROR:    Exception in ASGI application` stores error, and
+    both prompt-echo shapes still store unknown.
+    """
+    expression = _stage("stage.regex")
+    assert re.search(r'expression\s*=\s*"\^', expression), (
+        "the uvicorn level rule is not anchored to the start of the line; "
+        "unanchored it matches prompt text and re-creates the bug")
+    assert "uvicorn_level" in expression, (
+        "stage.regex does not capture a uvicorn_level group")
+
+
+def test_non_records_default_to_unknown():
+    """Lines that are not log records must not borrow a level.
+
+    95.4% of the fastapi stream is not a log record at all — 73.7% of it is
+    CrewAI's verbose box-drawing echo of the prompt. Those lines have no
+    level to report and must say so rather than inherit one.
+
+    Verified live 2026-08-14 against the real Alloy pipeline: a JSON record
+    with no `level` key stores `unknown`, and `ToLower` is load-bearing —
+    `"ERROR"` stores `error`, `"Warning"` stores `warning`. Only `info`,
+    `error` and `warning` occur in this deployment's logs.
+
+    Known and accepted: a numeric level (`"level": 40`, what stdlib logging
+    would write) passes through as `detected_level=40`. No logger here emits
+    one, so no guard was added for it.
+    """
+    template = _stage("stage.template")
+
+    assert re.search(r'source\s*=\s*"level"', template), (
+        "stage.template does not read the extracted `level`, so nothing is "
+        "normalised or defaulted")
+    assert re.search(r'\{\{\s*else\s*\}\}unknown\{\{\s*end\s*\}\}', template), (
+        "stage.template does not default a missing level to unknown")
+    assert template.count("ToLower") >= 2, (
+        "stage.template does not lower-case both the recorded level and the "
+        "uvicorn prefix; an upstream logger writing ERROR would stamp a "
+        "level Loki does not recognise")
+
+
+def test_loki_does_not_guess_levels_from_raw_text():
+    """Loki's discovery must be off, or it overrides our `unknown` stamps.
+
+    This is the coupling that is invisible from either file alone. Loki
+    honours an incoming `detected_level` only when it names a real level; it
+    treats the literal string `unknown` as absent and re-runs discovery.
+    Measured 2026-08-14 by pushing the same line four ways:
+
+        stamped info    + text "--- CRITICAL: ..."  -> stored info
+        stamped unknown + text "--- CRITICAL: ..."  -> stored CRITICAL
+        no stamp        + text "--- CRITICAL: ..."  -> stored critical
+        stamped unknown + text "--- ERROR: ..."     -> stored ERROR
+
+    So the Alloy stage alone does not work.
+    """
+    limits = _loki().get("limits_config", {})
+
+    assert "discover_log_levels" in limits, (
+        "discover_log_levels is unset, so it defaults to true and Loki "
+        "overrides every unknown stamp with a keyword guess")
+    assert limits["discover_log_levels"] is False, (
+        f"discover_log_levels is {limits['discover_log_levels']!r}; it must "
+        f"be false or Alloy's stamps are discarded for non-records")
+
+
+# --- Passwords: the compose file ships no published default -------------------
+# Measured live 2026-10-13: a test a member pastes and runs reaches the host's
+# published ports (Postgres 5432, Loki 3100, Grafana 3001) from its container
+# through host.docker.internal, and a loopback binding does not stop that on
+# Docker Desktop. The container needs the internet, so the password is the lock.
+
+ENV_EXAMPLE = Path(".env.example")
+
+
+def _compose_services() -> dict:
+    return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+
+
+def _entrypoint_text(service: str) -> str:
+    entrypoint = _compose_services()[service].get("entrypoint")
+    assert entrypoint, f"{service} has no entrypoint wrapper"
+    assert isinstance(entrypoint, list), f"{service}'s entrypoint must be a list"
+    return " ".join(str(part) for part in entrypoint)
+
+
+def test_compose_ships_no_default_for_any_password():
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    for name in ("POSTGRES_PASSWORD", "GRAFANA_DB_PASSWORD", "GRAFANA_ADMIN_PASSWORD"):
+        defaults = re.findall(r"\$\{" + name + r":-[^}]", text)
+        assert not defaults, (
+            f"{name} falls back to a published default ({defaults}); a pasted "
+            f"test can reach the port with it")
+
+
+def test_postgres_password_is_required_by_compose():
+    text = COMPOSE.read_text(encoding="utf-8")
+
+    # DATABASE_URL, the postgres service and grafana-db-init's PGPASSWORD.
+    assert text.count("${POSTGRES_PASSWORD:?") == 3, (
+        "every use of POSTGRES_PASSWORD must refuse an empty value with a message")
+    assert "${POSTGRES_PASSWORD}" not in text
+    assert "${POSTGRES_PASSWORD:-" not in text
+
+
+def test_loki_publishes_no_port_to_the_host():
+    # Alloy and Grafana reach it by name on nlrf-network; Loki has no auth.
+    assert "ports" not in _compose_services()["loki"]
+
+
+def test_grafana_refuses_to_start_without_an_admin_password():
+    service = _compose_services()["grafana"]
+
+    assert "GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-}" in service["environment"]
+    wrapper = _entrypoint_text("grafana")
+    assert "GRAFANA_ADMIN_PASSWORD" in wrapper
+    assert "exit 1" in wrapper
+    assert "exec /run.sh" in wrapper, "the wrapper must hand over to the image's own entrypoint"
+    assert "GRAFANA_DB_PASSWORD" not in wrapper, (
+        "the database password is checked by grafana-db-init, which grafana waits for")
+
+
+def test_grafana_db_init_refuses_to_run_without_a_password():
+    service = _compose_services()["grafana-db-init"]
+
+    assert "GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}" in service["environment"]
+    wrapper = _entrypoint_text("grafana-db-init")
+    assert "GRAFANA_DB_PASSWORD" in wrapper
+    assert "exit 1" in wrapper
+    assert "exec psql" in wrapper
+    assert service["restart"] == "no"
+    assert "grafana_password=${GRAFANA_DB_PASSWORD:-}" in str(service["command"])
+
+
+def test_the_live_role_test_names_no_fallback_password():
+    # test_readonly_role.py runs the role script, whose ALTER ROLE sets the LIVE
+    # role's password, against a running nlrf-postgres. With a default here, a
+    # plain local pytest run with the variable unset resets the role to that
+    # published value and breaks Grafana's datasource. It is skipped in CI, so
+    # this static guard is what runs there.
+    text = Path("tests/test_observability/test_readonly_role.py").read_text(encoding="utf-8")
+
+    defaults = re.findall(
+        r"""(?:environ\.get|getenv)\(\s*["']GRAFANA_DB_PASSWORD["']\s*,[^)]*\)""", text)
+    assert not defaults, (
+        f"{defaults} give the role a made-up password; the module must take "
+        f"GRAFANA_DB_PASSWORD from the environment only and skip when it is unset")
+
+
+def test_env_example_names_every_required_password():
+    lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith("POSTGRES_PASSWORD=") for line in lines), (
+        "the README appends the active line; an active one here would define it twice")
+
+    for name in ("POSTGRES_PASSWORD", "GRAFANA_DB_PASSWORD", "GRAFANA_ADMIN_PASSWORD"):
+        index = lines.index(f"#{name}=") if f"#{name}=" in lines else None
+        assert index is not None, f".env.example has no commented #{name}= line"
+        block = []
+        while index > 0 and lines[index - 1].startswith("#"):
+            index -= 1
+            block.append(lines[index])
+        assert "REQUIRED" in " ".join(block), f"the comment above #{name}= does not say it is required"
+
+    assert "grafana_ro / admin" not in "\n".join(lines), (
+        "nothing falls back to grafana_ro / admin any more")
