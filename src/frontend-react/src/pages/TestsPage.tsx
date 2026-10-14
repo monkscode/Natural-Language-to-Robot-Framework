@@ -44,7 +44,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import { Check, ChevronRight, Copy, FileTerminal, Folder, FolderInput, Play, RefreshCw, Search, Zap } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
 import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
@@ -794,7 +794,14 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
         setError('The server ended the stream without saying whether a version was written. Reload the list to see whether it is there.')
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The update request failed')
+      if (e instanceof StreamDroppedError) {
+        // The version lands in the Tests list, not History, so the error's own
+        // sentence would send them to the wrong page. After the version event
+        // there is nothing to report, as in the other stream handlers.
+        if (!out.saved && !out.failed) setError('The connection dropped before the server said whether a version was written. Reload the list to see whether it is there.')
+      } else {
+        setError(e instanceof Error ? e.message : 'The update request failed')
+      }
     } finally {
       setBusy(false)
       // Any event at all means record_start wrote a run against this test —
@@ -1194,10 +1201,12 @@ export default function TestsPage() {
     setRunError('')
     let refreshed = false
     let refused = false
+    let ended = false // no complete / error event = the stream was cut short
     try {
       // {test_id} and nothing else: the server answers 400 to any other
       // field beside it, and mints the run id itself.
       await streamSSE('/execute-test', { test_id: id }, ev => {
+        if (ev.status === 'complete' || ev.status === 'error') ended = true
         // run_id rides the FIRST execution event: the run's row exists from
         // then on, so the list can show the test as running.
         if (!refreshed && typeof ev.run_id === 'string') {
@@ -1209,8 +1218,14 @@ export default function TestsPage() {
           setRunError(`Run of “${label}” failed${which}: ${ev.message || 'execution failed'}`)
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
-      setRunError(`Couldn’t run “${label}” — ${e instanceof Error ? e.message : 'the request failed'}`)
+      // A drop after the final event leaves nothing to report: the result is
+      // shown and the run is recorded. A drop before it came after a 200, so
+      // the run DID start — never say it could not.
+      if (ended && e instanceof StreamDroppedError) return
+      const reason = e instanceof Error ? e.message : 'the request failed'
+      setRunError(e instanceof StreamDroppedError ? `Run of “${label}”: ${reason}` : `Couldn’t run “${label}” — ${reason}`)
       // Only a test the caller can no longer see may leave the list — see
       // isAccessLoss for why a 409 is not that.
       refused = isAccessLoss(e)
@@ -1234,12 +1249,14 @@ export default function TestsPage() {
     setInFlight(prev => new Set(prev).add(id))
     setRunError('')
     let refreshed = false
+    let ended = false // no complete / error event = the stream was cut short
     try {
       await streamSSE('/execute-test', {
         robot_code: saved.robotCode,
         workflow_id: saved.runId,
         user_query: saved.userQuery,
       }, ev => {
+        if (ev.status === 'complete' || ev.status === 'error') ended = true
         if (!refreshed && typeof ev.run_id === 'string') {
           refreshed = true
           void reloadAll()
@@ -1252,8 +1269,13 @@ export default function TestsPage() {
           setRunError(`${what} was saved. Running it failed${which}: ${ev.message || 'execution failed'}`)
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
-      setRunError(`${what} was saved, but the run could not start — ${e instanceof Error ? e.message : 'the request failed'}`)
+      // As in runTest: nothing to report after the final event; before it the
+      // run had started, so only the dropped sentence follows "was saved".
+      if (ended && e instanceof StreamDroppedError) return
+      const reason = e instanceof Error ? e.message : 'the request failed'
+      setRunError(e instanceof StreamDroppedError ? `${what} was saved. ${reason}` : `${what} was saved, but the run could not start — ${reason}`)
     } finally {
       setInFlight(prev => { const next = new Set(prev); next.delete(id); return next })
       void reloadAll()

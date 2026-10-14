@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { api, isAccessLoss } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle, Info } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
 import { ALREADY_RECORDED_HEADING, SWITCHED_OFF_MARKER } from '@/components/RecordedCorrections'
@@ -1205,10 +1205,14 @@ export default function GeneratePage() {
     setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setCode('')
     setGenProgress(0); setGenStage('Starting test generation…')
     workflowId.current = null
-    generatedQuery.current = query
+    generatedQuery.current = ''
     setPhase('generating')
+    // A stream that ends with neither a complete nor an error event was cut
+    // short (the run itself carries on server-side and lands in History).
+    let ended = false
     try {
       await streamSSE('/generate-test', { query }, (data) => {
+        if (data.status === 'complete' || data.status === 'error') ended = true
         if (data.status === 'running') {
           // The backend sends a monotonic 0–100 `progress` on stage boundaries;
           // events without it (e.g. dryrun repair iterations) hold the bar.
@@ -1220,6 +1224,7 @@ export default function GeneratePage() {
         } else if (data.status === 'complete' && data.robot_code) {
           setGenProgress(100)
           setCode(data.robot_code)
+          generatedQuery.current = query
           workflowId.current = data.workflow_id || null
           generationCompleteLogs(data).forEach(line => addGen(line.kind, line.msg))
         } else if (data.status === 'error') {
@@ -1227,7 +1232,10 @@ export default function GeneratePage() {
           setError(data.message || 'Generation failed')
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
+      // A drop after the final event must not paint an error over the result.
+      if (ended && e instanceof StreamDroppedError) return
       const msg = e instanceof Error ? e.message : 'Generation failed'
       addGen('error', msg); setError(msg)
     } finally {
@@ -1242,6 +1250,7 @@ export default function GeneratePage() {
     execStart.current = Date.now()
     setExecSecs(null)
     setPhase('executing')
+    let ended = false // as in handleGenerate: no complete / error event = cut short
     try {
       await streamSSE('/execute-test', {
         robot_code: robot,
@@ -1252,6 +1261,7 @@ export default function GeneratePage() {
         user_query: generatedQuery.current || null,
         workflow_id: workflowId.current || null,
       }, (data) => {
+        if (data.status === 'complete' || data.status === 'error') ended = true
         if (data.status === 'running') {
           addExec('info', data.message || data.log || '…')
         } else if (data.status === 'complete' && data.result) {
@@ -1275,7 +1285,9 @@ export default function GeneratePage() {
           setError(data.message || 'Execution failed')
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
+      if (ended && e instanceof StreamDroppedError) return // as in handleGenerate
       const msg = e instanceof Error ? e.message : 'Execution failed'
       addExec('error', msg); setError(msg)
     } finally {

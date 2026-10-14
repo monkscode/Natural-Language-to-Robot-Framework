@@ -40,13 +40,18 @@ vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: vi.fn(),
 }))
-vi.mock('@/lib/sse', () => ({ streamSSE: vi.fn() }))
+// The real StreamDroppedError stays: the page throws it when a stream ends
+// without a final event.
+vi.mock('@/lib/sse', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/sse')>()),
+  streamSSE: vi.fn(),
+}))
 
 import { useAuth } from '@/auth/AuthContext'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
 import { useFetch } from '@/lib/useFetch'
 import { api } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import HistoryPage from './HistoryPage'
 
 const mockUseAuth = vi.mocked(useAuth)
@@ -1274,6 +1279,8 @@ describe('HistoryPage — select mode and moving runs', () => {
   })
 })
 
+const DROPPED = 'Connection dropped; the result will appear in History.'
+
 describe('HistoryPage — running a row again', () => {
   it('sends rerun_of for the CLICKED row’s id, not any other row on the table', async () => {
     setupList([RUN_A, RUN_B])
@@ -1293,7 +1300,7 @@ describe('HistoryPage — running a row again', () => {
 
   it('shows the pass note in the drawer and refreshes the list once the re-run succeeds', async () => {
     setupList([RUN_A])
-    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => { onEvent({ test_status: 'passed' }) })
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => { onEvent({ status: 'complete', test_status: 'passed' }) })
     renderPage()
     const rowA = (await screen.findByText('search flipkart for shoes')).closest('tr')!
     const callsBefore = mockApi.mock.calls.length
@@ -1302,6 +1309,38 @@ describe('HistoryPage — running a row again', () => {
 
     await screen.findByText('✓ Re-run passed')
     await waitFor(() => expect(mockApi.mock.calls.length).toBeGreaterThan(callsBefore))
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('keeps the pass note and shows no dropped sentence when the stream drops after its final event', async () => {
+    setupList([RUN_A])
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'complete', test_status: 'passed' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+    const rowA = (await screen.findByText('search flipkart for shoes')).closest('tr')!
+
+    fireEvent.click(within(rowA).getByTitle(RUN_AGAIN_TITLE))
+
+    await screen.findByText('✓ Re-run passed')
+    await waitFor(() => expect(within(rowA).getByTitle(RUN_AGAIN_TITLE)).not.toBeDisabled())
+    expect(screen.getByText('✓ Re-run passed')).toBeInTheDocument()
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('says the connection dropped, and keeps the row, when the stream ends after only running events', async () => {
+    setupList([RUN_A])
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 100, message: 'Executing' })
+    })
+    renderPage()
+    const rowA = (await screen.findByText('search flipkart for shoes')).closest('tr')!
+
+    fireEvent.click(within(rowA).getByTitle(RUN_AGAIN_TITLE))
+
+    await screen.findByText(DROPPED)
+    expect(screen.getAllByText('search flipkart for shoes').length).toBeGreaterThan(0)
   })
 
   it('disables that row’s Run-again button while its re-run is still in flight', async () => {
@@ -1486,5 +1525,60 @@ describe('HistoryPage — the drawer’s remaining actions', () => {
     renderPage()
 
     expect(await screen.findByText(/Couldn.t load groups — network down/)).toBeInTheDocument()
+  })
+})
+
+describe('HistoryPage — a row from the keyboard', () => {
+  // The row's own onClick is a mouse convenience; a <tr> takes no focus, so the
+  // description is a real button (as on the Tests page). A native button turns
+  // Enter and Space into a click, which is what these tests send.
+  it('puts a focusable button on the description, and activating it opens the drawer', async () => {
+    setupList([RUN_A])
+    withDetail('run-A')
+    renderPage()
+    const button = await screen.findByRole('button', { name: 'search flipkart for shoes (run-A)' })
+
+    button.focus()
+    expect(button).toHaveFocus()
+    fireEvent.click(button)
+
+    expect(await screen.findByTitle('Copy code')).toBeInTheDocument()
+  })
+
+  it('toggles the checkbox in select mode when the caller may move the run, and does nothing when not', async () => {
+    setupList([RUN_A, RUN_B])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'search flipkart for shoes (run-A)' }))
+    fireEvent.click(screen.getByRole('button', { name: 'checkout flow (run-B)' }))
+
+    expect(screen.getByLabelText('Select run search flipkart for shoes (run-A)')).toBeChecked()
+    expect(screen.getByLabelText('Select run checkout flow (run-B)')).not.toBeChecked()
+    expect(screen.queryByTitle('Copy code')).toBeNull()
+  })
+
+  it('names two re-runs of one query apart by the full run id, and a pasted run by it too', async () => {
+    const RE_RUN = { ...RUN_A, run_id: 'run-A2' }
+    const PASTED = { ...RUN_A, run_id: 'run-P', user_query: null }
+    setupList([RUN_A, RE_RUN, PASTED])
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: 'search flipkart for shoes (run-A)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'search flipkart for shoes (run-A2)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pasted code run (run-P)' })).toBeInTheDocument()
+  })
+
+  it('disables the description button in select mode for a run the caller cannot move, like its checkbox', async () => {
+    setupList([RUN_A, RUN_B])
+    renderPage()
+    await screen.findByText('search flipkart for shoes')
+    expect(screen.getByRole('button', { name: 'checkout flow (run-B)' })).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+
+    expect(screen.getByRole('button', { name: 'checkout flow (run-B)' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'search flipkart for shoes (run-A)' })).toBeEnabled()
   })
 })

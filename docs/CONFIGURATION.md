@@ -331,7 +331,7 @@ Set to `false` on metered connections or air-gapped hosts.
 
 ### TEST_EXECUTION_TIMEOUT
 
-Maximum seconds to wait for a test container to finish. Set in the **root `.env`**.
+Maximum seconds to wait for a test container to finish. Set in `src/backend/.env`.
 
 ```env
 TEST_EXECUTION_TIMEOUT=1800

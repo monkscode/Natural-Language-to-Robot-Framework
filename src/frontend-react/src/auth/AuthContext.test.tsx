@@ -24,7 +24,8 @@
  * A provider is not a page component — nothing here renders App, and no
  * Router is involved.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/api', () => ({
@@ -34,7 +35,7 @@ vi.mock('@/lib/api', () => ({
   clearToken: vi.fn(),
 }))
 
-import { api, getToken } from '@/lib/api'
+import { api, clearToken, getToken } from '@/lib/api'
 import { AuthProvider, useAuth, type User } from './AuthContext'
 
 const mockApi = vi.mocked(api)
@@ -148,5 +149,51 @@ describe('no token at all', () => {
     expect(flag('isAdmin')).toBe('false')
     expect(flag('isOrgAdmin')).toBe('false')
     expect(flag('canViewLearning')).toBe('false')
+  })
+})
+
+describe('logoutAll — the session ends only once the server has revoked it', () => {
+  /** Signed in, with a button that runs logoutAll and reports how it ended. */
+  async function signedInWithLogoutAllButton() {
+    mockGetToken.mockReturnValue('a.jwt.token')
+    function Probe() {
+      const { logoutAll, isAuthenticated } = useAuth()
+      const [outcome, setOutcome] = useState('')
+      return (
+        <>
+          <span data-testid="auth">{String(isAuthenticated)}</span>
+          <span data-testid="outcome">{outcome}</span>
+          <button onClick={() => logoutAll().then(() => setOutcome('resolved'), e => setOutcome(`rejected: ${e.message}`))}>
+            go
+          </button>
+        </>
+      )
+    }
+    mockApi.mockResolvedValueOnce({ id: 'u1', email: 'a@b.c', display_name: 'A', role: 'user', status: 'active' })
+    render(<AuthProvider><Probe /></AuthProvider>)
+    await waitFor(() => expect(screen.getByTestId('auth')).toHaveTextContent('true'))
+  }
+
+  it('keeps the token and the user, and rethrows, when the revoke request fails', async () => {
+    await signedInWithLogoutAllButton()
+    mockApi.mockRejectedValueOnce(new Error('server down'))
+
+    fireEvent.click(screen.getByText('go'))
+
+    await waitFor(() => expect(screen.getByTestId('outcome')).toHaveTextContent('rejected: server down'))
+    expect(vi.mocked(clearToken)).not.toHaveBeenCalled()
+    expect(screen.getByTestId('auth')).toHaveTextContent('true')
+  })
+
+  it('clears the token and the user once the revoke request succeeds', async () => {
+    await signedInWithLogoutAllButton()
+    mockApi.mockResolvedValueOnce({})
+
+    fireEvent.click(screen.getByText('go'))
+
+    await waitFor(() => expect(screen.getByTestId('outcome')).toHaveTextContent('resolved'))
+    expect(mockApi).toHaveBeenLastCalledWith('/auth/logout-all', { method: 'POST' })
+    expect(vi.mocked(clearToken)).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('auth')).toHaveTextContent('false')
   })
 })

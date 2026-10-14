@@ -9,6 +9,28 @@
 
 import { ApiError, clearToken, extractDetail, getToken } from './api'
 
+/**
+ * The connection broke mid-stream. Every stream that uses streamSSE runs its
+ * job detached on the server (PR #123) and records the run, so the result is
+ * not lost — it will be in History.
+ */
+export class StreamDroppedError extends Error {
+  constructor() {
+    super('Connection dropped; the result will appear in History.')
+    this.name = 'StreamDroppedError'
+  }
+}
+
+async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal) {
+  try {
+    return await reader.read()
+  } catch (err) {
+    // An abort is the caller's own doing and callers treat it specially.
+    if (signal?.aborted) throw err
+    throw new StreamDroppedError()
+  }
+}
+
 export async function streamSSE(
   path: string,
   body: unknown,
@@ -64,7 +86,7 @@ export async function streamSSE(
   }
 
   for (;;) {
-    const { done, value } = await reader.read()
+    const { done, value } = await readChunk(reader, signal)
     if (done) break
     buffer += decoder.decode(value, { stream: true })
     const parts = buffer.split('\n\n')

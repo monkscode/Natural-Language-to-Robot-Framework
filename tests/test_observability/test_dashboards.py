@@ -328,13 +328,17 @@ def test_readonly_role_grants_match_the_dashboards():
     (dashboards are a subset of GRANTED_TABLES), this pins the whole chain:
     what panels query == what the constant lists == what the role is granted.
     """
-    sql = ROLE_SCRIPT.read_text(encoding="utf-8")
-    match = re.search(
-        r"\bGRANT\s+SELECT\s+ON\s+(.*?)\s+TO\s+grafana_ro\b", sql,
-        re.IGNORECASE | re.DOTALL,
-    )
-    assert match, f"{ROLE_SCRIPT.name} has no `GRANT SELECT ON ... TO grafana_ro`"
-    granted = {t.strip().lower() for t in match.group(1).split(",") if t.strip()}
+    # The app grants live in a DO block that loops over a name array and
+    # grants each table that already exists (grafana-db-init can run before the
+    # API has created the schema), so the names are read from that array.
+    sql = re.sub(r"--[^\n]*", "", ROLE_SCRIPT.read_text(encoding="utf-8"))
+    block = re.search(r"\bDO\s+\$\$(.*?)\$\$", sql, re.DOTALL)
+    assert block, f"{ROLE_SCRIPT.name} has no DO block granting the app tables"
+    assert "GRANT SELECT ON public.%I TO grafana_ro" in block.group(1), (
+        f"{ROLE_SCRIPT.name}'s DO block does not `GRANT SELECT ON public.%I TO grafana_ro`")
+    names = re.search(r"\bARRAY\s*\[(.*?)\]", block.group(1), re.DOTALL)
+    assert names, f"{ROLE_SCRIPT.name}'s DO block has no ARRAY[...] of table names"
+    granted = {t.lower() for t in re.findall(r"'([A-Za-z_]+)'", names.group(1))}
     assert granted == GRANTED_TABLES, (
         f"{ROLE_SCRIPT.name} grants {sorted(granted)}, "
         f"GRANTED_TABLES lists {sorted(GRANTED_TABLES)}"

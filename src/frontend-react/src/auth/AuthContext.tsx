@@ -126,9 +126,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Revoke every token for this account (this device and any other) by bumping
   // the server-side token_version, then clear the local session. The POST must
   // run while the token is still present (it identifies whose tokens to revoke),
-  // so await it BEFORE clearing.
+  // so await it BEFORE clearing. A failed request throws and keeps the session:
+  // clearing locally while the other devices stay signed in would claim a
+  // sign-out that did not happen.
   async function logoutAll() {
-    await api('/auth/logout-all', { method: 'POST' }).catch(() => {})
+    await api('/auth/logout-all', { method: 'POST' })
     clearToken()
     setUser(null)
   }

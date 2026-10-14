@@ -86,7 +86,14 @@ fi
 echo "✅ Using Google Cloud project: $PROJECT_ID"
 
 # Enable the Vertex AI API for the project
-"$GCLOUD" services enable aiplatform.googleapis.com --project="$PROJECT_ID"
+if ! "$GCLOUD" services enable aiplatform.googleapis.com --project="$PROJECT_ID"; then
+    echo "❌ Could not enable the Vertex AI API for $PROJECT_ID."
+    echo "   FAILED_PRECONDITION here usually means the project has no billing account."
+    echo "   Vertex AI needs one, even on the free trial (signing up for the trial creates it):"
+    echo "   https://console.cloud.google.com/billing/linkedaccount?project=$PROJECT_ID"
+    echo "   No billing account? Use a free Google AI Studio key instead — see README step 2."
+    exit 1
+fi
 
 # Create a dedicated service account (reused if it already exists)
 SA_EMAIL="vertex-ai-sa@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -128,7 +135,7 @@ existing_key_is_usable() {
     # brings the reuse check into line with it.
     disabled=$("$GCLOUD" iam service-accounts keys describe "$key_id" \
         --iam-account="$SA_EMAIL" --project="$PROJECT_ID" \
-        --format="value(disabled)" 2>/dev/null) || return 1
+        --format="value(disabled)" 2>/dev/null | tr -d '\r') || return 1
     # Only an explicit True rejects. A key that was never disabled can print
     # False or nothing at all depending on gcloud version, and treating an
     # empty field as "disabled" would re-mint a key on every run — the exact
