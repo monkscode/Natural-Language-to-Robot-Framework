@@ -748,6 +748,46 @@ class TestHintDomainIsStoredAsTheEngineMatchesIt:
         assert resp.status_code == 201, resp.json()
         assert resp.json()["hint"]["domain"] == "example.com"
 
+    def test_create_keeps_the_port_as_extract_domain_does_for_a_test_url(self, learning_client):
+        client, *_ = learning_client
+        resp = client.post("/hints", json=self._valid_payload(
+            domain="https://Example.com:8080/x"))
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["hint"]["domain"] == "example.com:8080"
+
+    def test_create_with_the_same_host_typed_differently_is_a_duplicate(self, learning_client):
+        client, _, _, db_path = learning_client
+        first = client.post("/hints", json=self._valid_payload(domain="example.com"))
+        assert first.status_code == 201, first.json()
+        assert first.json()["created"] is True
+        second = client.post("/hints", json=self._valid_payload(domain="WWW.Example.com"))
+        assert second.status_code == 201, second.json()
+        assert second.json()["created"] is False
+        conn = _pg_conn(db_path)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM nl_feedback_corrections WHERE feedback_text = ?",
+            ("Use xpath for stable selectors",)).fetchone()[0]
+        conn.close()
+        assert n == 1
+        assert second.json()["hint"]["evidence_count"] == 2
+
+    def test_list_filter_finds_a_stored_host_by_a_www_or_url_form(self, learning_client):
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="hint a")
+        _insert_hint(db_path, scope="domain", domain="other.test", feedback_text="hint b")
+        for typed in ("www.Example.com", "https://www.Example.com/a"):
+            resp = client.get("/hints", params={"domain": typed})
+            assert resp.status_code == 200, resp.json()
+            hints = resp.json()["hints"]
+            assert [h["domain"] for h in hints] == ["example.com"], typed
+
+    def test_list_filter_never_400s_on_text_with_no_host(self, learning_client):
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="hint a")
+        resp = client.get("/hints", params={"domain": "http://"})
+        assert resp.status_code == 200
+        assert resp.json()["hints"] == []
+
     def test_create_refuses_a_domain_with_no_host(self, learning_client):
         client, *_ = learning_client
         resp = client.post("/hints", json=self._valid_payload(domain="http://"))
@@ -828,7 +868,7 @@ class TestCreateOnAnExistingHintReactivatesOrReinforces:
         assert "reactivate" in actions, actions
         assert "reinforce" not in actions, actions
 
-    def test_an_active_hint_is_reinforced_and_keeps_its_unused_count(self, learning_client):
+    def test_an_active_hint_is_reinforced_and_gets_a_fresh_unused_count(self, learning_client):
         client, _, _, db_path = learning_client
         hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors")
         self._set_unused(db_path, hint_id, 5)
@@ -838,7 +878,8 @@ class TestCreateOnAnExistingHintReactivatesOrReinforces:
 
         row, actions = self._state(db_path, hint_id)
         assert row["is_active"] == 1
-        assert row["unused_count"] == 5
+        assert row["unused_count"] == 0
+        assert row["disabled_at"] is None
         assert "reinforce" in actions, actions
         assert "reactivate" not in actions, actions
 

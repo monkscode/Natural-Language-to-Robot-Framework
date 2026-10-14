@@ -410,6 +410,12 @@ def list_hints(
             # Domains are stored lowercased (extract_domain), but admin-created
             # hints may predate that — compare case-insensitively on both sides.
             conditions.append("LOWER(domain) = LOWER(?)")
+            try:
+                # Same form the hints are now stored in; a filter never 400s,
+                # so text with no host is searched as typed.
+                domain = _normalise_hint_domain(domain) or domain
+            except HTTPException:
+                pass
             params.append(domain)
 
         if search:
@@ -693,15 +699,15 @@ def create_hint(
             # the flag, the next Trigger 1/2 will re-flag with fresh evidence.
             was_flagged = existing["conflict_flagged"] == 1
             was_retired = existing["is_active"] == 0
-            # A retired hint comes back as a fresh chance, as POST /reactivate
-            # does: otherwise its old unused_count retires it again at once.
+            # A re-submission is a fresh chance (as a user re-submit in
+            # nl_feedback_engine.py and POST /reactivate do): a kept
+            # unused_count would retire the hint again at once.
             conn.execute(
                 "UPDATE nl_feedback_corrections "
                 "SET evidence_count = evidence_count + 1, last_seen = ?, is_active = 1, "
                 "    conflict_flagged = 0, conflict_flagged_at = NULL, "
-                "    conflict_flag_reason = NULL "
-                + (", unused_count = 0, disabled_at = NULL " if was_retired else "")
-                + "WHERE id = ?",
+                "    conflict_flag_reason = NULL, unused_count = 0, disabled_at = NULL "
+                "WHERE id = ?",
                 (now, existing["id"]),
             )
             if was_flagged:
