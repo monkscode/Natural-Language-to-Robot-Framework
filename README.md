@@ -56,7 +56,7 @@ No Python. No Node.js. No manual dependency installs.
 ### 1. Clone the repo
 
 ```bash
-git clone -b develop https://github.com/monkscode/Natural-Language-to-Robot-Framework.git
+git clone -b main https://github.com/monkscode/Natural-Language-to-Robot-Framework.git
 cd Natural-Language-to-Robot-Framework
 ```
 
@@ -97,17 +97,19 @@ cp src/backend/.env.example src/backend/.env      # backend: Vertex AI + setting
 ```
 
 The **root `.env`** needs one line — a database password (see **Database password**
-below). It already points all four image tags at the published `-develop` builds:
+below). It already points all four image tags at the published `-latest` builds, made from the `main` branch:
 
 ```env
-FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-develop
-BROWSER_SERVICE_IMAGE_TAG=monkscode/nlrf:browser-service-develop
-TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
-FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-develop
+FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-latest
+BROWSER_SERVICE_IMAGE_TAG=monkscode/nlrf:browser-service-latest
+TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-latest
+FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-latest
 ```
 
 If you do change them, change all four to the **same** suffix — a mixed set is the
 usual cause of odd boot and login errors after an update.
+To run the newest unreleased work instead, clone with `-b develop` and set all four tags to
+`-develop` (built on every push to `develop`; not yet released, may be unstable).
 
 **Database password.** Compose refuses to start without `POSTGRES_PASSWORD` in the
 root `.env`; there is no default, because a test a user pastes and runs can reach the
@@ -181,7 +183,7 @@ Everything else has sensible defaults. The internal service URLs and inter-conta
 
 ```bash
 docker compose pull                                   # the services (~2–5 min)
-docker pull monkscode/nlrf:test-runner-develop        # the test runner (~0.5 GB)
+docker pull monkscode/nlrf:test-runner-latest         # the test runner (~0.5 GB)
 docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d
 ```
 
