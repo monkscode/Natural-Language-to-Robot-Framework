@@ -409,14 +409,17 @@ def list_hints(
         if domain:
             # Domains are stored lowercased (extract_domain), but admin-created
             # hints may predate that — compare case-insensitively on both sides.
-            conditions.append("LOWER(domain) = LOWER(?)")
+            # Match the typed text AND the stored form: an old admin row can
+            # still read "www.Example.com", a new one reads "example.com".
+            conditions.append("LOWER(domain) IN (LOWER(?), LOWER(?))")
+            typed = domain
             try:
                 # Same form the hints are now stored in; a filter never 400s,
                 # so text with no host is searched as typed.
                 domain = _normalise_hint_domain(domain) or domain
             except HTTPException:
                 pass
-            params.append(domain)
+            params += [typed, domain]
 
         if search:
             # ILIKE: SQLite LIKE was case-insensitive; keep that behaviour on Postgres.

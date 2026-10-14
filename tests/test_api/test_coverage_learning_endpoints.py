@@ -336,6 +336,19 @@ class TestListHints:
         assert data["total"] == 1
         assert data["hints"][0]["domain"] == "example.com"
 
+    def test_domain_filter_finds_an_old_row_stored_as_typed(self, learning_client):
+        """Admin hints made before domains were normalised keep their typed form
+        (`www.Example.com`); typing that form in the filter must still find them."""
+        client, _, _, db_path = learning_client
+        _insert_hint(db_path, scope="domain", domain="www.Example.com", feedback_text="old row")
+        _insert_hint(db_path, scope="domain", domain="example.com", feedback_text="new row")
+        _insert_hint(db_path, scope="domain", domain="other.com", feedback_text="other row")
+
+        resp = client.get("/hints", params={"domain": "www.Example.com"})
+        assert resp.status_code == 200
+        texts = sorted(h["feedback_text"] for h in resp.json()["hints"])
+        assert texts == ["new row", "old row"]
+
     def test_pagination(self, learning_client):
         client, _, _, db_path = learning_client
         for i in range(5):
@@ -870,7 +883,10 @@ class TestCreateOnAnExistingHintReactivatesOrReinforces:
 
     def test_an_active_hint_is_reinforced_and_gets_a_fresh_unused_count(self, learning_client):
         client, _, _, db_path = learning_client
-        hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors")
+        # An active row that still carries disabled_at is what a user re-submit of
+        # a retired hint leaves behind; the reset must clear it.
+        hint_id = _insert_hint(db_path, feedback_text="Use xpath for stable selectors",
+                               disabled_at=datetime.now(timezone.utc).isoformat())
         self._set_unused(db_path, hint_id, 5)
 
         resp = client.post("/hints", json=self._valid_payload())
