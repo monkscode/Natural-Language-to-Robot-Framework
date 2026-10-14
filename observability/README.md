@@ -55,7 +55,8 @@ keep Grafana waiting for it.
 `test_runs`, `llm_traces`, `execution_records`, `learning_metrics`,
 `nl_feedback_corrections`, `trigger_events` — and nothing else. A table that does
 not exist when the profile starts is skipped, with a NOTICE in
-`docker logs nlrf-grafana-db-init`, until the profile is started again; a panel
+`docker logs nlrf-grafana-db-init` (in the terminal with the `run --rm` start
+above, which removes its container), until the profile is started again; a panel
 that reads "permission denied for table X" means the same. The four learning
 tables exist only with `OPTIMIZATION_ENABLED=true`. No dashboard
 here queries `users`, `orgs` or `audit_log`, and the role has no grant on them.
