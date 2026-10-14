@@ -47,7 +47,7 @@ vi.mock('./api', () => {
 })
 
 import { ApiError, clearToken, extractDetail, getToken } from './api'
-import { streamSSE } from './sse'
+import { streamSSE, StreamDroppedError } from './sse'
 
 const mockGetToken = vi.mocked(getToken)
 const mockClearToken = vi.mocked(clearToken)
@@ -314,12 +314,28 @@ describe('streamSSE — parsing the event stream', () => {
     expect(onEvent).toHaveBeenCalledWith({ ok: true })
   })
 
-  it('propagates a read() rejection instead of hanging forever', async () => {
+  it('turns a read() rejection into a StreamDroppedError instead of hanging forever', async () => {
+    // The job runs detached on the server (PR #123) and records its run, so a
+    // dropped connection is told apart from a failed request.
     stubFetch(async () => ({ status: 200, ok: true, body: bodyThatRejects(new Error('connection reset')) }))
     mockGetToken.mockReturnValue(null)
 
     const err = await reasonOf(streamSSE('/x', {}, vi.fn()))
 
-    expect((err as Error).message).toBe('connection reset')
+    expect(err).toBeInstanceOf(StreamDroppedError)
+    expect((err as Error).name).toBe('StreamDroppedError')
+    expect((err as Error).message).toBe('Connection dropped; the result will appear in History.')
+  })
+
+  it('rethrows the original read() error when the caller aborted', async () => {
+    const abort = new Error('The user aborted a request.')
+    const controller = new AbortController()
+    controller.abort()
+    stubFetch(async () => ({ status: 200, ok: true, body: bodyThatRejects(abort) }))
+    mockGetToken.mockReturnValue(null)
+
+    const err = await reasonOf(streamSSE('/x', {}, vi.fn(), controller.signal))
+
+    expect(err).toBe(abort)
   })
 })
