@@ -178,12 +178,12 @@ class Settings(BaseSettings):
     # (logout-all), enforced against current DB state on every authenticated
     # request (require_user / require_admin / report access).
     JWT_EXPIRY_HOURS: int = Field(default=12, description="Access token lifetime in hours")
-    # Comma-separated emails granted the 'admin' role at signup; everyone else
-    # is 'user'. Stored as a string (not list) to avoid pydantic env JSON-parsing
-    # pitfalls — read via the admin_emails_list property.
+    # No longer used: an address is not proof the caller owns it, so this grants
+    # nothing. Kept only so a .env that still holds the line loads (unknown keys
+    # are refused); a non-empty value triggers a startup warning.
     ADMIN_EMAILS: str = Field(
         default="",
-        description="Comma-separated emails granted the admin role at signup",
+        description="Unused; no longer makes anyone an admin (only triggers a startup warning)",
     )
     # Google SSO (server-side OAuth2/OIDC). Empty GOOGLE_CLIENT_ID disables the
     # Google routes gracefully (they return 503) so the app runs without it.
@@ -233,11 +233,6 @@ class Settings(BaseSettings):
         default=True,
         description="Enable per-IP rate limiting on the auth endpoints",
     )
-
-    @property
-    def admin_emails_list(self) -> list[str]:
-        """Normalized admin email allow-list (lowercased, de-blanked)."""
-        return [e.strip().lower() for e in self.ADMIN_EMAILS.split(",") if e.strip()]
 
     @property
     def allowed_origins_list(self) -> list[str]:

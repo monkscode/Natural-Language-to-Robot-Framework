@@ -89,18 +89,19 @@ def test_plain_org_member_login_payload_carries_flag_false(client):
     assert user["can_view_learning"] is False
 
 
-def test_platform_admin_login_payload_carries_flag_true(client, monkeypatch):
+def test_platform_admin_login_payload_carries_flag_true(client):
     """A platform admin sees the flag regardless of their own org_role —
     is_dashboard_viewer short-circuits on is_platform_admin before it ever
     looks at org_role/org_id."""
-    from src.backend.core.config import settings
-
     email = _unique_email()
-    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
-    reg = client.post("/auth/register", json={"email": email, "password": "S3cretpw!"})
-    assert reg.status_code == 201
-    assert reg.json()["user"]["role"] == "admin"
-    assert reg.json()["user"]["can_view_learning"] is True
+    repo = UserRepository()
+    user = repo.create_user(email, "S3cretpw!")
+    repo.set_platform_role(user["id"], "admin")
+    repo.set_status(user["id"], "active")
+    login = client.post("/auth/login", json={"email": email, "password": "S3cretpw!"})
+    assert login.status_code == 200
+    assert login.json()["user"]["role"] == "admin"
+    assert login.json()["user"]["can_view_learning"] is True
 
 
 def test_me_matches_login_payload_for_same_user(client):
