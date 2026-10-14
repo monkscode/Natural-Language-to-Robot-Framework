@@ -213,7 +213,7 @@ docker compose up -d
 
 ### Update to a newer version
 
-1. Edit `.env` and change the three image tags to the new version.
+1. Edit `.env` and change the four image tags to the new version.
 2. Run:
 
 ```bash

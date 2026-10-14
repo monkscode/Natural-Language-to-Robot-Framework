@@ -300,9 +300,9 @@ the runner image from source on your first **Run Test** — minutes of CPU inste
 of a ~0.5 GB pull — and also disables the startup warm-up below. The shipped
 `src/backend/.env.example` sets it; only a hand-trimmed `.env` loses it.
 
-The `false` fallback is deliberate: with no `TEST_RUNNER_IMAGE_TAG` configured
-either, a `true` fallback would pull `monkscode/nlrf:test-runner-latest` — the
-main-branch build, which is not the one this tree is developed against.
+The `false` fallback dates from when `-latest` lagged `develop` and has not been
+changed since. With no `TEST_RUNNER_IMAGE_TAG` configured either, a `true`
+fallback would pull `monkscode/nlrf:test-runner-latest` — the main-branch build.
 
 ### REMOTE_DOCKER_IMAGE
 
