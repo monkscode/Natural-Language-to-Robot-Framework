@@ -27,7 +27,7 @@ import {
   Play, RefreshCw, Repeat2, RotateCw, FileTerminal, Search,
 } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
 import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { useFetch } from '@/lib/useFetch'
@@ -1077,8 +1077,10 @@ export default function HistoryPage() {
     note('Starting re-run of the stored code…')
     let listRefreshed = false
     let refused = false
+    let ended = false // no complete / error event = the stream was cut short
     try {
       await streamSSE('/execute-test', { rerun_of: sourceId }, ev => {
+        if (ev.status === 'complete' || ev.status === 'error') ended = true
         // First event = the new run row exists; surface it at the top
         // (the table is populated and the stream is still going).
         if (!listRefreshed) { listRefreshed = true; void reloadAll() }
@@ -1087,6 +1089,7 @@ export default function HistoryPage() {
         else if (ev.status === 'error') note(`Error: ${ev.message || 'execution failed'}`)
         else if (typeof ev.message === 'string' && ev.message) note(ev.message)
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
       note(e instanceof Error ? e.message : 'Failed to start the re-run')
       // Only a run the caller can no longer READ may be dropped below — see

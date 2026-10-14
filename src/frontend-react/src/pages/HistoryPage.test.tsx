@@ -40,7 +40,12 @@ vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: vi.fn(),
 }))
-vi.mock('@/lib/sse', () => ({ streamSSE: vi.fn() }))
+// The real StreamDroppedError stays: the page throws it when a stream ends
+// without a final event.
+vi.mock('@/lib/sse', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/sse')>()),
+  streamSSE: vi.fn(),
+}))
 
 import { useAuth } from '@/auth/AuthContext'
 import { useRunGroups } from '@/components/history/RunGroupsContext'
@@ -1274,6 +1279,8 @@ describe('HistoryPage — select mode and moving runs', () => {
   })
 })
 
+const DROPPED = 'Connection dropped; the result will appear in History.'
+
 describe('HistoryPage — running a row again', () => {
   it('sends rerun_of for the CLICKED row’s id, not any other row on the table', async () => {
     setupList([RUN_A, RUN_B])
@@ -1293,7 +1300,7 @@ describe('HistoryPage — running a row again', () => {
 
   it('shows the pass note in the drawer and refreshes the list once the re-run succeeds', async () => {
     setupList([RUN_A])
-    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => { onEvent({ test_status: 'passed' }) })
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => { onEvent({ status: 'complete', test_status: 'passed' }) })
     renderPage()
     const rowA = (await screen.findByText('search flipkart for shoes')).closest('tr')!
     const callsBefore = mockApi.mock.calls.length
@@ -1302,6 +1309,21 @@ describe('HistoryPage — running a row again', () => {
 
     await screen.findByText('✓ Re-run passed')
     await waitFor(() => expect(mockApi.mock.calls.length).toBeGreaterThan(callsBefore))
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('says the connection dropped, and keeps the row, when the stream ends after only running events', async () => {
+    setupList([RUN_A])
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 100, message: 'Executing' })
+    })
+    renderPage()
+    const rowA = (await screen.findByText('search flipkart for shoes')).closest('tr')!
+
+    fireEvent.click(within(rowA).getByTitle(RUN_AGAIN_TITLE))
+
+    await screen.findByText(DROPPED)
+    expect(screen.getAllByText('search flipkart for shoes').length).toBeGreaterThan(0)
   })
 
   it('disables that row’s Run-again button while its re-run is still in flight', async () => {

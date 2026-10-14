@@ -44,7 +44,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import { Check, ChevronRight, Copy, FileTerminal, Folder, FolderInput, Play, RefreshCw, Search, Zap } from 'lucide-react'
 import { api, isAccessLoss } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { formatDate, timeAgo } from '@/lib/time'
 import { PLATFORM_ADMIN, labelFrom, versionLabel } from '@/lib/testLabels'
 import { canDeleteFolder, canRenameFolder } from '@/components/history/folderPermissions'
@@ -1194,10 +1194,12 @@ export default function TestsPage() {
     setRunError('')
     let refreshed = false
     let refused = false
+    let ended = false // no complete / error event = the stream was cut short
     try {
       // {test_id} and nothing else: the server answers 400 to any other
       // field beside it, and mints the run id itself.
       await streamSSE('/execute-test', { test_id: id }, ev => {
+        if (ev.status === 'complete' || ev.status === 'error') ended = true
         // run_id rides the FIRST execution event: the run's row exists from
         // then on, so the list can show the test as running.
         if (!refreshed && typeof ev.run_id === 'string') {
@@ -1209,6 +1211,7 @@ export default function TestsPage() {
           setRunError(`Run of “${label}” failed${which}: ${ev.message || 'execution failed'}`)
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
       setRunError(`Couldn’t run “${label}” — ${e instanceof Error ? e.message : 'the request failed'}`)
       // Only a test the caller can no longer see may leave the list — see
@@ -1234,12 +1237,14 @@ export default function TestsPage() {
     setInFlight(prev => new Set(prev).add(id))
     setRunError('')
     let refreshed = false
+    let ended = false // no complete / error event = the stream was cut short
     try {
       await streamSSE('/execute-test', {
         robot_code: saved.robotCode,
         workflow_id: saved.runId,
         user_query: saved.userQuery,
       }, ev => {
+        if (ev.status === 'complete' || ev.status === 'error') ended = true
         if (!refreshed && typeof ev.run_id === 'string') {
           refreshed = true
           void reloadAll()
@@ -1252,6 +1257,7 @@ export default function TestsPage() {
           setRunError(`${what} was saved. Running it failed${which}: ${ev.message || 'execution failed'}`)
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
       setRunError(`${what} was saved, but the run could not start — ${e instanceof Error ? e.message : 'the request failed'}`)
     } finally {

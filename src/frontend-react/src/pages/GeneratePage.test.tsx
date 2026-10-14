@@ -15,7 +15,12 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/lib/sse', () => ({ streamSSE: vi.fn() }))
+// The real StreamDroppedError stays: the page throws it when a stream ends
+// without a final event.
+vi.mock('@/lib/sse', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/sse')>()),
+  streamSSE: vi.fn(),
+}))
 vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: vi.fn(),
@@ -966,5 +971,70 @@ describe('GeneratePage — logs after a run', () => {
 
     expect(screen.getAllByRole('button', { name: 'Expand' })).toHaveLength(1)
     expect(screen.getByRole('button', { name: 'Collapse' })).toBeInTheDocument()
+  })
+})
+
+describe('GeneratePage — a stream that ends without a final event', () => {
+  const DROPPED = 'Connection dropped; the result will appear in History.'
+
+  it('says the connection dropped when a generation stream ends after only running events', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 100, message: 'Almost done' })
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    await waitFor(() => expect(screen.getAllByText(DROPPED)).toHaveLength(2)) // banner + log
+    expect(screen.getByRole('button', { name: /Generate Test/ })).not.toBeDisabled()
+  })
+
+  it('says the connection dropped when an execution stream ends after only running events', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Executing' })
+    })
+    renderPage()
+    pasteCode()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+
+    await waitFor(() => expect(screen.getAllByText(DROPPED)).toHaveLength(2))
+  })
+
+  it('shows no such sentence when the streams end with a complete event', async () => {
+    allowFeedbackMount()
+    mockStreamSSE.mockImplementation(async (path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'working' })
+      if (path === '/generate-test') onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+      else {
+        onEvent({
+          status: 'complete',
+          result: { report_html: '/reports/RUN-1/log.html', logs: 'Results: 1 passed, 0 failed' },
+          test_status: 'passed',
+        })
+      }
+    })
+    renderPage()
+    typeQuery()
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+    await screen.findByRole('button', { name: /^Run Test/ })
+    fireEvent.click(screen.getByRole('button', { name: /^Run Test/ }))
+    await screen.findByText('Test passed! 🎉')
+
+    expect(screen.queryByText(DROPPED)).toBeNull()
+  })
+
+  it('does not add the sentence to a stream that ended with an error event', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'error', message: 'The planner produced no usable steps' })
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    await waitFor(() => expect(screen.getAllByText('The planner produced no usable steps')).toHaveLength(2))
+    expect(screen.queryByText(DROPPED)).toBeNull()
   })
 })

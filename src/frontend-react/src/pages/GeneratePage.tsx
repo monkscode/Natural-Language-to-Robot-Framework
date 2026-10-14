@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { api, isAccessLoss } from '@/lib/api'
-import { streamSSE } from '@/lib/sse'
+import { StreamDroppedError, streamSSE } from '@/lib/sse'
 import { Zap, Play, Plus, Download, Copy, Check, ChevronDown, ExternalLink, CheckCircle2, XCircle, FileText, X, ThumbsUp, ThumbsDown, Brain, ScanSearch, Code2, ShieldCheck, Crosshair, AlertTriangle, Info } from 'lucide-react'
 import RobotCodeEditor from '@/components/RobotCodeEditor'
 import { ALREADY_RECORDED_HEADING, SWITCHED_OFF_MARKER } from '@/components/RecordedCorrections'
@@ -1207,8 +1207,12 @@ export default function GeneratePage() {
     workflowId.current = null
     generatedQuery.current = ''
     setPhase('generating')
+    // A stream that ends with neither a complete nor an error event was cut
+    // short (the run itself carries on server-side and lands in History).
+    let ended = false
     try {
       await streamSSE('/generate-test', { query }, (data) => {
+        if (data.status === 'complete' || data.status === 'error') ended = true
         if (data.status === 'running') {
           // The backend sends a monotonic 0–100 `progress` on stage boundaries;
           // events without it (e.g. dryrun repair iterations) hold the bar.
@@ -1228,6 +1232,7 @@ export default function GeneratePage() {
           setError(data.message || 'Generation failed')
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Generation failed'
       addGen('error', msg); setError(msg)
@@ -1243,6 +1248,7 @@ export default function GeneratePage() {
     execStart.current = Date.now()
     setExecSecs(null)
     setPhase('executing')
+    let ended = false // as in handleGenerate: no complete / error event = cut short
     try {
       await streamSSE('/execute-test', {
         robot_code: robot,
@@ -1253,6 +1259,7 @@ export default function GeneratePage() {
         user_query: generatedQuery.current || null,
         workflow_id: workflowId.current || null,
       }, (data) => {
+        if (data.status === 'complete' || data.status === 'error') ended = true
         if (data.status === 'running') {
           addExec('info', data.message || data.log || '…')
         } else if (data.status === 'complete' && data.result) {
@@ -1276,6 +1283,7 @@ export default function GeneratePage() {
           setError(data.message || 'Execution failed')
         }
       })
+      if (!ended) throw new StreamDroppedError()
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Execution failed'
       addExec('error', msg); setError(msg)
