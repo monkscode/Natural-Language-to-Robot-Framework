@@ -277,11 +277,11 @@ Which runner image to run tests in. Set this in the **root `.env`** (next to
 for `${VAR}` substitution.
 
 ```env
-TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-develop
+TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-latest
 ```
 
 Keep the suffix the same as the other three image tags in that file. Pre-pull it
-with `docker pull monkscode/nlrf:test-runner-develop` so your first run does not
+with `docker pull monkscode/nlrf:test-runner-latest` so your first run does not
 wait on the download (~0.5 GB compressed, ~1.9 GB on disk).
 
 ### PREFER_REMOTE_DOCKER_IMAGE
@@ -428,7 +428,7 @@ unless this is set explicitly, is at least 32 characters, and is not a placehold
 Generate one with:
 
 ```bash
-docker run --rm monkscode/nlrf:fastapi-develop python -c "import secrets; print(secrets.token_urlsafe(48))"
+docker run --rm monkscode/nlrf:fastapi-latest python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
 Running outside Compose (plain `docker run`, Kubernetes, more than one replica)

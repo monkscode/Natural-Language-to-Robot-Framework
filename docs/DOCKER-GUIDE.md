@@ -111,15 +111,16 @@ This file also needs a database password: Compose refuses to start without
 (`echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> .env`). On an existing install,
 read the README's "Database password" note first.
 
-The file contains three variables — one per container image:
+The file sets four image tags — one per published image:
 
 ```env
 # .env
-# All three should use the same version tag.
+# All four should use the same version tag.
 
 FASTAPI_IMAGE_TAG=monkscode/nlrf:fastapi-latest
 BROWSER_SERVICE_IMAGE_TAG=monkscode/nlrf:browser-service-latest
 TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-latest
+FRONTEND_IMAGE_TAG=monkscode/nlrf:frontend-latest
 ```
 
 **Available tag variants:**
@@ -131,7 +132,7 @@ TEST_RUNNER_IMAGE_TAG=monkscode/nlrf:test-runner-latest
 | `fastapi-pr-<N>` | A specific pull request build, e.g. `fastapi-pr-50` |
 | `fastapi-<commit>` | Pinned to a specific commit SHA |
 
-> Always use the same suffix for all three tags. Mixing versions (e.g. fastapi-latest with test-runner-develop) can cause compatibility issues.
+> Always use the same suffix for all four tags. Mixing versions (e.g. fastapi-latest with test-runner-develop) can cause compatibility issues.
 
 ---
 
