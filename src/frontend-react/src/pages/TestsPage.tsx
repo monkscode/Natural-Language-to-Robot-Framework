@@ -798,7 +798,7 @@ function UpdateDialog({ target, onClose, onFinished }: Readonly<{
         // The version lands in the Tests list, not History, so the error's own
         // sentence would send them to the wrong page. After the version event
         // there is nothing to report, as in the other stream handlers.
-        if (!out.saved) setError('The connection dropped before the server said whether a version was written. Reload the list to see whether it is there.')
+        if (!out.saved && !out.failed) setError('The connection dropped before the server said whether a version was written. Reload the list to see whether it is there.')
       } else {
         setError(e instanceof Error ? e.message : 'The update request failed')
       }

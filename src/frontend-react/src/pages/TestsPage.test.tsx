@@ -1291,6 +1291,22 @@ describe('TestsPage — the Update dialog', () => {
     expect(within(dialog).queryByText(/History/)).not.toBeInTheDocument()
   })
 
+  it('keeps the server’s error when the stream drops after it', async () => {
+    setup()
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'error', message: 'The model refused the request' })
+      throw new StreamDroppedError()
+    })
+    renderPage()
+
+    const dialog = await openUpdate()
+    await waitFor(() => expect(description(dialog).value).toBe('search flipkart for shoes'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update this test' }))
+
+    expect(await within(dialog).findByText('The model refused the request')).toBeInTheDocument()
+    expect(within(dialog).queryByText(/connection dropped/i)).not.toBeInTheDocument()
+  })
+
   it('stays quiet when the stream drops after the version event', async () => {
     const spies = setup()
     mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
