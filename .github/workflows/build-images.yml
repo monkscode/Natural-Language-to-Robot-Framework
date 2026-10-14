@@ -5,6 +5,8 @@ on:
     paths:
       - 'src/**'
       - 'tools/**'
+      - 'scripts/**'
+      - 'clients/**'
       - 'pyproject.toml'
       - 'browser_service/**'
       - 'browser-service/**'
@@ -21,6 +23,8 @@ on:
     paths:
       - 'src/**'
       - 'tools/**'
+      - 'scripts/**'
+      - 'clients/**'
       - 'pyproject.toml'
       - 'browser_service/**'
       - 'browser-service/**'
@@ -60,8 +64,8 @@ jobs:
   # Nothing may be built, and above all nothing may be PUSHED, until the suite
   # that judges this commit has passed. build-images.yml and sonarqube.yml are
   # both fired by the same push and were completely independent, so a red suite
-  # still overwrote `-develop` — the tag the README tells every user to pull —
-  # with no signal that anything was wrong.
+  # still overwrote a published tag — `-develop` on a push to `develop`, `-latest`
+  # on a push to `main` — with no signal that anything was wrong.
   #
   # This deliberately re-runs a suite sonarqube.yml also runs. The alternatives
   # were worse: `workflow_run` gating only fires from the DEFAULT branch, which

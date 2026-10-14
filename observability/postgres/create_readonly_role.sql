@@ -30,16 +30,35 @@ GRANT USAGE ON SCHEMA public TO grafana_ro;
 -- Revoke first, so a previous, wider version of this script can never leave
 -- stale privileges behind; then grant exactly the seven tables this profile
 -- is allowed to read.
+--
+-- These tables are created by the API at its own start, not by this script.
+-- grafana-db-init waits for the API to be healthy, but a table can still be
+-- missing (a fresh install whose API failed before creating it, a table
+-- renamed later). A bare GRANT on a missing table would fail under
+-- ON_ERROR_STOP=1 and keep Grafana from starting, so a missing table is
+-- skipped with a notice and granted on the next run, once the table exists.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_ro;
-GRANT SELECT ON
-    workflow_metrics,
-    test_runs,
-    llm_traces,
-    execution_records,
-    learning_metrics,
-    nl_feedback_corrections,
-    trigger_events
-TO grafana_ro;
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'workflow_metrics',
+        'test_runs',
+        'llm_traces',
+        'execution_records',
+        'learning_metrics',
+        'nl_feedback_corrections',
+        'trigger_events'
+    ] LOOP
+        IF to_regclass(format('public.%I', t)) IS NOT NULL THEN
+            EXECUTE format('GRANT SELECT ON public.%I TO grafana_ro', t);
+        ELSE
+            RAISE NOTICE 'table public.% does not exist yet - not granted; start the profile again once the API has created it', t;
+        END IF;
+    END LOOP;
+END
+$$;
 
 -- Bench-history corpus, schema `bench`. A separate GRANT block from the app
 -- tables above, deliberately: the two are matched independently by

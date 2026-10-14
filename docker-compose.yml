@@ -225,6 +225,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # The role script grants SELECT on tables the API creates at its own start.
+      fastapi:
+        condition: service_healthy
     environment:
       - PGPASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env - see README "Database password"}
       - GRAFANA_DB_PASSWORD=${GRAFANA_DB_PASSWORD:-}

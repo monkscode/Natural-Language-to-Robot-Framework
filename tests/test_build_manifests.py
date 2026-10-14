@@ -111,8 +111,9 @@ def test_robot_toolchain_pin_matches_runner_libdoc_stage_and_committed_libdocs(p
 # The publish gate.
 #
 # build-images.yml and sonarqube.yml are both triggered by a push to develop,
-# and nothing connected them: the images that overwrite `-develop` — the tag the
-# README tells every user to pull — were published whether or not the suite that
+# and nothing connected them: the images that overwrite a published tag —
+# `-develop` on a push to develop, `-latest` on a push to main — were published
+# whether or not the suite that
 # runs alongside them passed. The two workflows simply raced. This holds the
 # gate in place, because a `needs:` line is exactly the kind of thing that gets
 # dropped while making an unrelated job faster.
