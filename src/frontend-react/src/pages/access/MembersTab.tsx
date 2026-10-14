@@ -38,7 +38,7 @@ export default function MembersTab() {
       setError(e instanceof ApiError ? e.message : 'Failed to load users')
     }
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => { void load() }, [])
 
   async function mutate(id: string, path: string, body?: unknown) {
     setBusy(id)

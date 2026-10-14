@@ -27,7 +27,7 @@ export default function PendingTab() {
       setError(e instanceof ApiError ? e.message : 'Failed to load pending users')
     }
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => { void load() }, [])
 
   async function act(id: string, action: 'approve' | 'reject') {
     setBusy(id)
