@@ -529,7 +529,8 @@ class TestFeedbackLoop:
         fl, em, fa, se, ke, ae, mt, cd, conn = _build_feedback_loop(in_memory_db)
         fl.process_execution(
             workflow_id="wf-p1", user_query="click button",
-            url="https://example.com", robot_code="*** Test Cases ***",
+            url="https://example.com",
+            robot_code="*** Test Cases ***\nT\n    Click    id=btn\n",
             test_status="passed",
         )
         # Should have stored in execution_memory

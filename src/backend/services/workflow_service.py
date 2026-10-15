@@ -575,6 +575,17 @@ def _process_learning_attribution(
             and (pre_run_record is None or not pre_run_record.hint_attribution_done)
             and feedback_loop.nl_engine is not None
         ):
+            # Evaluated last, so a run without hints never pays for the checker.
+            # A hollow pass is no evidence a hint was used: no judgment, no credit,
+            # and hint_attribution_done stays 0 for a later clean pass (issue #132).
+            from src.backend.crew_ai.optimization.feedback_loop import hollow_pass_shapes
+            hollow = hollow_pass_shapes(robot_code, user_query)
+            if hollow:
+                logging.info(
+                    "[LEARNING] %s: hollow pass (%s) — hint usage not judged",
+                    run_id, ", ".join(sorted(hollow)),
+                )
+                return
             from src.backend.crew_ai.optimization.learning_config import extract_domain
             from src.backend.crew_ai.optimization.conflict_detection import (
                 fire_usage_attribution,

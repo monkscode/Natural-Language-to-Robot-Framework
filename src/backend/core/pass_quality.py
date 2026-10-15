@@ -63,7 +63,9 @@ and EMPTY_TEST.
 
 Referenced by: bench/gate_hollow.py (the bench gate's hollow registry),
 api/history_endpoints.py (the History detail's suggestions, via pass_suggestions),
-crew_ai/robot_code_normalizer.py (the text-check rewrite, via check_pass_quality and norm_locator).
+crew_ai/robot_code_normalizer.py (the text-check rewrite, via check_pass_quality and norm_locator),
+crew_ai/optimization/feedback_loop.py and services/workflow_service.py (the learning gate and
+the hint-attribution gate, via hollow_shapes).
 Depends on: bisect, re, dataclasses. Standard library only: importing this module must
 never load config, a database driver or an LLM client.
 """
