@@ -55,13 +55,13 @@ def main() -> None:
         except EmailAlreadyExists:
             print(f"{email} was registered while this ran; run the command again")
             sys.exit(1)
-        password = "created"
+        login_change = "created"
     elif row.get("google_sub"):
-        password = "unchanged (Google account)"
+        login_change = "unchanged (Google account)"
     else:
         # Whoever registered this address first loses it: the reset revokes every token.
         gone = repo.reset_password(email, prompt_new_password()) is None
-        password = "reset, every session revoked"
+        login_change = "reset, every session revoked"
         _exit_if_gone(email, gone)
 
     user_id = str(row["id"])
@@ -71,7 +71,7 @@ def main() -> None:
     # A row the command just created had no earlier role or status.
     was_role, was_status = (row["role"], row["status"]) if existed else (None, None)
     detail = {"email": email, "from_role": was_role, "from_status": was_status,
-              "to_role": "admin", "to_status": "active", "password": password}
+              "to_role": "admin", "to_status": "active", "password": login_change}
     try:
         write_audit_log(actor_email="host-operator", actor_user_id=None, org_id=None,
                         method="CLI", path="tools.make_admin", status_code=200,
@@ -80,7 +80,7 @@ def main() -> None:
         print(f"warning: admin granted but the audit row was not written: {exc}")
     was = f"was {row['role']}/{row['status']}" if existed else "was: new account"
     print(f"{email} is now an active platform admin (id={user_id}; {was}; "
-          f"password {password}). Sign in at the web app.")
+          f"password {login_change}). Sign in at the web app.")
 
 
 if __name__ == "__main__":
