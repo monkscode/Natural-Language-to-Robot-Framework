@@ -1331,12 +1331,26 @@ class RunRegistry:
                     and existing["test_user_id"] == user_id
                     and robot_code.strip() != (
                         existing["version_code"] or "").strip()):
-                version_id = self._append_version(
-                    conn, existing["test_id"], existing["version_query"],
-                    robot_code, user_id, user_email, "code_edited")
+                # Re-read under the test lock (tests before test_runs, the
+                # folder-move routes' order): two simultaneous edited runs of
+                # one row both read the old version above, and "append at
+                # most once per run" is this branch's rule, not its callers'.
                 conn.execute(
-                    "UPDATE test_runs SET test_version_id = %s"
-                    " WHERE run_id = %s", (version_id, run_id))
+                    "SELECT 1 FROM tests WHERE test_id = %s"
+                    " FOR NO KEY UPDATE", (existing["test_id"],))
+                fresh = conn.execute(
+                    "SELECT r.test_version_id, v.robot_code, v.user_query"
+                    " FROM test_runs r LEFT JOIN test_versions v"
+                    " ON v.version_id = r.test_version_id"
+                    " WHERE r.run_id = %s", (run_id,)).fetchone()
+                version_id = fresh["test_version_id"]
+                if robot_code.strip() != (fresh["robot_code"] or "").strip():
+                    version_id = self._append_version(
+                        conn, existing["test_id"], fresh["user_query"],
+                        robot_code, user_id, user_email, "code_edited")
+                    conn.execute(
+                        "UPDATE test_runs SET test_version_id = %s"
+                        " WHERE run_id = %s", (version_id, run_id))
             resolved_org = existing["org_id"]
             if resolved_org is None and org_id is not None:
                 # Two guards, both about authority rather than identity (owner

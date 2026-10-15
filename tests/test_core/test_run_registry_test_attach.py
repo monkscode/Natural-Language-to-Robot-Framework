@@ -4,6 +4,8 @@ record_start is an UPSERT called several times per run — at generation start
 (no code), at generation success (code), and again at execute. Attachment must
 therefore be idempotent on run_id, or a single run would spawn several tests.
 """
+import threading
+import time
 import uuid
 from unittest.mock import patch
 
@@ -167,6 +169,53 @@ def test_a_whitespace_only_difference_at_the_ends_appends_nothing(
     r.record_start("run-1", USER_A, "q", "running", robot_code=executed)
 
     assert len(_versions(admin)) == 1
+
+
+def test_two_simultaneous_edited_runs_of_one_row_append_once(reg):
+    """The at-most-once rule is a property of this branch, not of its callers.
+    An outside transaction holds the test row's lock while both calls read the
+    row (both see version 1 and the code differs); the lock is released only
+    once BOTH are waiting on it, so the interleaving is forced, not lucky."""
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-1")[0]
+    schema = admin.execute("SHOW search_path").fetchone()[0]
+    holder = psycopg.connect(settings.DATABASE_URL)
+    done = []
+
+    def _edited_run():
+        r.record_start("run-1", USER_A, None, "running",
+                       robot_code="code-EDITED")
+        done.append(1)
+
+    try:
+        holder.execute(f"SET search_path TO {schema}")
+        holder.execute("SELECT 1 FROM tests WHERE test_id = %s"
+                       " FOR NO KEY UPDATE", (test_id,))
+        workers = [threading.Thread(target=_edited_run) for _ in range(2)]
+        for w in workers:
+            w.start()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            waiting = admin.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database()"
+                " AND wait_event_type = 'Lock'").fetchone()[0]
+            if waiting >= 2:
+                break
+            time.sleep(0.05)
+        assert waiting >= 2, "both calls did not reach the test lock"
+        holder.commit()
+        for w in workers:
+            w.join(timeout=30)
+        assert len(done) == 2, "a call never returned"
+    finally:
+        holder.close()
+
+    versions = _versions(admin)
+    assert len(versions) == 2
+    assert versions[1][1] == "code-EDITED"
+    assert _row(admin, "run-1")[1] == versions[1][6]
 
 
 def test_a_code_less_upsert_after_the_edited_run_appends_nothing(reg):
