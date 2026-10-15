@@ -948,6 +948,21 @@ describe('TestsPage — the drawer’s code and versions', () => {
     expect(rows[1]).not.toContain('current')
   })
 
+  it('names a code_edited version in words, not the raw reason', async () => {
+    setup({
+      detail: {
+        ...DETAIL,
+        versions: [{ ...DETAIL.versions[0], n: 3, reason: 'code_edited' }, ...DETAIL.versions.slice(1)],
+      },
+    })
+    renderPage()
+    const drawer = await openDrawer()
+
+    const list = await within(drawer).findByRole('list', { name: 'Versions, newest first' })
+    expect(list.textContent).toContain('code edited')
+    expect(list.textContent).not.toContain('code_edited')
+  })
+
   it('names no author rather than the wrong one when the server gives none', async () => {
     setup({
       detail: { ...DETAIL, versions: [{ ...DETAIL.versions[0], created_by_email: null }] },
