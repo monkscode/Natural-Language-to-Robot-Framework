@@ -389,14 +389,12 @@ _SCHEMA_DDL = (
     # earlier writers (the mint below and the migration collapse above) set
     # it from the same value they write into tests.user_id.
     "ALTER TABLE test_versions ADD COLUMN IF NOT EXISTS created_by_email TEXT",
-    # Results point at their test, and at the version they ran — with one
-    # known exception: EDIT-then-execute. record_start replaces robot_code
-    # newest-non-NULL-wins while _attach_test short-circuits on the run's
-    # existing test_id, so a run whose generated code was edited before
-    # execution holds the edited code against the GENERATED version's id.
-    # Minting a version on edit is P2's Update dialog, and P1 pins the current
-    # behaviour deliberately (test_run_registry_test_attach.py::
-    # test_an_edited_code_execution_does_not_mint_a_second_version).
+    # Results point at their test, and at the version they ran. EDIT-then-
+    # execute (a Generate-page Run of edited code, same run id) appends a
+    # 'code_edited' version in _attach_test's existing-test branch, so the row
+    # names the version that holds the edited code (test_run_registry_test_
+    # attach.py::test_an_edited_code_execution_appends_a_code_edited_version);
+    # only a non-author's edited run keeps the version it names.
     # Both stay NULLABLE: test_id IS NULL is a permanently legal state for a
     # generation that failed before any code existed (owner decision D8).
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_id TEXT",
@@ -913,6 +911,57 @@ class RunRegistry:
                 group_id, e)
             return None
 
+    @staticmethod
+    def _append_version(
+        conn,
+        test_id: str,
+        user_query: Optional[str],
+        robot_code: str,
+        user_id: Optional[str],
+        user_email: Optional[str],
+        reason: str,
+    ) -> str:
+        """Append version n+1 to a test, make it current, return its id.
+
+        The one writer of an appended version: a regeneration (named-test
+        branch) and an edited Run (existing-test branch) both land here.
+
+        FOR NO KEY UPDATE, and taken BEFORE max(n) + 1 is read: that
+        ordering is what makes the counter safe against a simultaneous
+        regeneration of the same test, and UNIQUE (test_id, n) is left
+        as the backstop rather than as the mechanism — a
+        UniqueViolation-and-retry loop was measured to LOSE the third
+        of three simultaneous writers, while the lock kept all three.
+        Not FOR UPDATE: that mode also conflicts with the FOR KEY SHARE
+        a foreign-key check takes, so it would stall every concurrent
+        INSERT of a run referencing this test (measured: 1.01s of a 1s
+        hold, against 0.00s for this mode), and spec case 25 says two
+        results of one test may run at once."""
+        conn.execute(
+            "SELECT 1 FROM tests WHERE test_id = %s FOR NO KEY UPDATE",
+            (test_id,))
+        n = conn.execute(
+            "SELECT coalesce(max(n), 0) + 1 AS n FROM test_versions"
+            " WHERE test_id = %s", (test_id,)).fetchone()["n"]
+        version_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO test_versions (version_id, test_id, n,"
+            " user_query, robot_code, created_by, created_by_email,"
+            " reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (version_id, test_id, n, user_query, robot_code,
+             user_id, user_email, reason))
+        # The pointer and the description move WITH the version.
+        # Without current_version the new code is written and never
+        # executed — every later run resolves its code through that
+        # column — and without user_query the Tests row and the
+        # Update dialog keep prefilling the description this
+        # regeneration replaced.
+        conn.execute(
+            "UPDATE tests SET current_version = %s, user_query = %s,"
+            " updated_at = now() WHERE test_id = %s",
+            (n, user_query, test_id))
+        return version_id
+
     def _attach_test(
         self,
         conn,
@@ -1116,7 +1165,11 @@ class RunRegistry:
 
         Idempotent on run_id: record_start is an upsert called at generation
         start, at generation success and again at execute, so this must return
-        the SAME test for all three or one run would spawn three tests.
+        the SAME test for all three or one run would spawn three tests. The
+        existing-test branch returns the row's stored version, with one
+        exception: the test's author executing code that differs (trimmed)
+        from that version appends a 'code_edited' version and re-points the
+        row at it, so a repeat of the same edit finds it and appends nothing.
 
         Spec section 10 case 35 — the test wins, but only when it HAS an org.
         A test whose org_id is NULL falls back to the caller's on all THREE
@@ -1215,20 +1268,8 @@ class RunRegistry:
                         if stored_org and stored_org["org_id"] is not None
                         else org_id)
             appending = version_reason is not None and bool(robot_code)
-            # FOR NO KEY UPDATE, and taken BEFORE max(n) + 1 is read: that
-            # ordering is what makes the counter safe against a simultaneous
-            # regeneration of the same test, and UNIQUE (test_id, n) is left
-            # as the backstop rather than as the mechanism — a
-            # UniqueViolation-and-retry loop was measured to LOSE the third
-            # of three simultaneous writers, while the lock kept all three.
-            # Not FOR UPDATE: that mode also conflicts with the FOR KEY SHARE
-            # a foreign-key check takes, so it would stall every concurrent
-            # INSERT of a run referencing this test (measured: 1.01s of a 1s
-            # hold, against 0.00s for this mode), and spec case 25 says two
-            # results of one test may run at once.
             target = conn.execute(
-                "SELECT org_id FROM tests WHERE test_id = %s"
-                + (" FOR NO KEY UPDATE" if appending else ""),
+                "SELECT org_id FROM tests WHERE test_id = %s",
                 (test_id,)).fetchone()
             if target is None:
                 # A named test that does not exist. NEVER mint: minting here
@@ -1238,26 +1279,9 @@ class RunRegistry:
                 return (None, None, org_id)
             version_id = None
             if appending:
-                n = conn.execute(
-                    "SELECT coalesce(max(n), 0) + 1 AS n FROM test_versions"
-                    " WHERE test_id = %s", (test_id,)).fetchone()["n"]
-                version_id = str(uuid.uuid4())
-                conn.execute(
-                    "INSERT INTO test_versions (version_id, test_id, n,"
-                    " user_query, robot_code, created_by, created_by_email,"
-                    " reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                    (version_id, test_id, n, user_query, robot_code,
-                     user_id, user_email, version_reason))
-                # The pointer and the description move WITH the version.
-                # Without current_version the new code is written and never
-                # executed — every later run resolves its code through that
-                # column — and without user_query the Tests row and the
-                # Update dialog keep prefilling the description this
-                # regeneration replaced.
-                conn.execute(
-                    "UPDATE tests SET current_version = %s, user_query = %s,"
-                    " updated_at = now() WHERE test_id = %s",
-                    (n, user_query, test_id))
+                version_id = self._append_version(
+                    conn, test_id, user_query, robot_code, user_id,
+                    user_email, version_reason)
             elif test_version_id is not None:
                 # Executing a named version. The PAIR is checked rather than
                 # trusted: a result claiming a version of some other test
@@ -1285,10 +1309,34 @@ class RunRegistry:
 
         existing = conn.execute(
             "SELECT r.test_id, r.test_version_id, t.user_id AS test_user_id,"
-            " t.org_id"
+            " t.org_id, v.robot_code AS version_code,"
+            " v.user_query AS version_query"
             " FROM test_runs r LEFT JOIN tests t ON t.test_id = r.test_id"
+            " LEFT JOIN test_versions v ON v.version_id = r.test_version_id"
             " WHERE r.run_id = %s", (run_id,)).fetchone()
         if existing and existing["test_id"]:
+            version_id = existing["test_version_id"]
+            # An EDITED Run of the Generate page reuses the generation's row:
+            # the code sent differs from the version the row names, so it gets
+            # a version of its own, and the row, the Tests page and its Run
+            # all see the code that ran. Trimmed at both ends because the
+            # page sends code.trim(); a NULL version code counts as different.
+            # Only the test's AUTHOR (the gate the write-back below uses, so
+            # NULLs never match): any other caller's run keeps the version it
+            # names, as before (owner, 2026-10-15) -- the Update dialog's
+            # identity rule. The source version's description is kept: the
+            # request carries none (History rows) or the run's, not an edit.
+            if (robot_code and version_id is not None
+                    and user_id is not None
+                    and existing["test_user_id"] == user_id
+                    and robot_code.strip() != (
+                        existing["version_code"] or "").strip()):
+                version_id = self._append_version(
+                    conn, existing["test_id"], existing["version_query"],
+                    robot_code, user_id, user_email, "code_edited")
+                conn.execute(
+                    "UPDATE test_runs SET test_version_id = %s"
+                    " WHERE run_id = %s", (version_id, run_id))
             resolved_org = existing["org_id"]
             if resolved_org is None and org_id is not None:
                 # Two guards, both about authority rather than identity (owner
@@ -1324,8 +1372,7 @@ class RunRegistry:
                         and existing["test_user_id"] == user_id):
                     _write_back_org(existing["test_id"])
                 resolved_org = org_id
-            return (existing["test_id"], existing["test_version_id"],
-                    resolved_org)
+            return (existing["test_id"], version_id, resolved_org)
 
         if rerun_of:
             src = conn.execute(
@@ -1478,7 +1525,9 @@ class RunRegistry:
         /versions and Tests-page-Run paths pass them. test_id selects the
         test; version_reason alongside robot_code appends version n+1 to it
         and is the label spec section 7.4 records ('regenerated' when the
-        description came back unchanged, 'edited' when it did not);
+        description came back unchanged, 'edited' when it did not; a third
+        label, 'code_edited', is written by _attach_test itself for an
+        edited Run of an existing row and is never passed in);
         test_version_id says which existing version a run is executing.
         _attach_test's first branch is the authority on what each combination
         does — in particular that a named test is never created and never

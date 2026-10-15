@@ -97,19 +97,135 @@ def test_attachment_is_idempotent_across_the_upserts_of_one_run(reg):
         "SELECT count(*) FROM test_versions").fetchone()[0] == 1
 
 
-def test_an_edited_code_execution_does_not_mint_a_second_version(reg):
-    """P1 is the spine only. Versioning on edit is P2's Update dialog; doing it
-    here would inflate every version count on day one."""
+def _versions(admin):
+    return admin.execute(
+        "SELECT n, robot_code, reason, user_query, created_by,"
+        " created_by_email, version_id FROM test_versions ORDER BY n"
+    ).fetchall()
+
+
+def _current(admin):
+    return admin.execute("SELECT current_version FROM tests").fetchone()[0]
+
+
+def test_an_edited_code_execution_appends_a_code_edited_version(reg):
+    """The Generate page reuses one run row for the edited Run. The row must
+    name the version that holds the code that ran, not the generated one."""
     r, admin = reg
     r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
-    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+    test_id = _row(admin, "run-1")[0]
+    # The History-row form: no description on the execute call.
+    r.record_start("run-1", USER_A, None, "running", robot_code="code-EDITED")
 
-    assert admin.execute(
-        "SELECT count(*) FROM test_versions").fetchone()[0] == 1
+    versions = _versions(admin)
+    assert len(versions) == 2
+    n, code, reason, query, by, email, v2_id = versions[1]
+    assert (n, code, reason, query, by, email) == (
+        2, "code-EDITED", "code_edited", "q", "alice", "a@x.com")
+    assert _current(admin) == 2
+    assert _row(admin, "run-1")[1] == v2_id
     # test_runs.robot_code still follows newest-non-NULL-wins, unchanged.
     assert admin.execute(
         "SELECT robot_code FROM test_runs WHERE run_id = 'run-1'"
     ).fetchone()[0] == "code-EDITED"
+    head = r.get_test_head(test_id, user_id="alice", org_id="org-a",
+                           folder_org_id="org-a", include_unowned=False)
+    assert head["robot_code"] == "code-EDITED"
+    assert head["user_query"] == "q"
+
+
+def test_the_same_edit_run_twice_appends_once(reg):
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+
+    assert len(_versions(admin)) == 2
+
+
+def test_editing_back_to_the_generated_code_appends_a_third_version(reg):
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-1")
+
+    versions = _versions(admin)
+    assert len(versions) == 3
+    assert versions[2][:3] == (3, "code-1", "code_edited")
+    assert _current(admin) == 3
+    assert _row(admin, "run-1")[1] == versions[2][6]
+
+
+@pytest.mark.parametrize("generated, executed", [
+    ("code-1", "\n  code-1  \n"),
+    ("code-1\n", "code-1"),
+])
+def test_a_whitespace_only_difference_at_the_ends_appends_nothing(
+        reg, generated, executed):
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code=generated)
+    r.record_start("run-1", USER_A, "q", "running", robot_code=executed)
+
+    assert len(_versions(admin)) == 1
+
+
+def test_a_code_less_upsert_after_the_edited_run_appends_nothing(reg):
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+    r.record_start("run-1", USER_A, "q", "running", robot_code=None)
+    r.set_status("run-1", "passed")
+
+    assert len(_versions(admin)) == 2
+
+
+def test_the_tests_page_first_run_appends_nothing(reg):
+    """Update dialog: the regeneration's own run executes the code it just
+    appended, under the same run id."""
+    r, admin = reg
+    r.record_start("run-0", USER_A, "q", "generated", robot_code="code-1")
+    test_id = _row(admin, "run-0")[0]
+    r.record_start("run-2", USER_A, "q2", "generated", robot_code="code-2",
+                   test_id=test_id, version_reason="edited")
+    r.record_start("run-2", USER_A, "q2", "running", robot_code="code-2")
+
+    versions = _versions(admin)
+    assert len(versions) == 2
+    assert _row(admin, "run-2")[1] == versions[1][6]
+
+
+def test_a_caller_who_did_not_author_the_test_appends_nothing(reg):
+    """The Update dialog's identity rule: such a run keeps the version it
+    names, as before."""
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    v1 = _row(admin, "run-1")[1]
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+
+    assert len(_versions(admin)) == 1
+    assert _row(admin, "run-1")[1] == v1
+
+
+def test_a_token_less_caller_on_a_token_less_test_appends_nothing(reg):
+    r, admin = reg
+    r.record_start("run-1", None, "q", "generated", robot_code="code-1")
+    v1 = _row(admin, "run-1")[1]
+    r.record_start("run-1", None, "q", "running", robot_code="code-EDITED")
+
+    assert len(_versions(admin)) == 1
+    assert _row(admin, "run-1")[1] == v1
+
+
+def test_run_again_of_the_edited_run_is_labelled_with_the_edited_version(reg):
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    r.record_start("run-1", USER_A, "q", "running", robot_code="code-EDITED")
+    r.record_start("run-3", USER_A, "q", "running", robot_code="code-EDITED",
+                   rerun_of="run-1")
+
+    versions = _versions(admin)
+    assert len(versions) == 2
+    assert _row(admin, "run-3")[1] == versions[1][6]
 
 
 def test_a_rerun_joins_its_source_test_and_adds_no_version(reg):
