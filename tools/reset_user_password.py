@@ -26,11 +26,7 @@ from src.backend.auth.repository import MAX_PASSWORD_BYTES, UserRepository
 MIN_LEN = 8
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        print("usage: python -m tools.reset_user_password <email>")
-        sys.exit(2)
-    email = sys.argv[1].strip().lower()
+def prompt_new_password() -> str:
     new_password = getpass.getpass("New password: ")
     if len(new_password) < MIN_LEN:
         print(f"refusing: password must be at least {MIN_LEN} characters")
@@ -41,6 +37,15 @@ def main() -> None:
     if getpass.getpass("Confirm new password: ") != new_password:
         print("refusing: passwords do not match")
         sys.exit(2)
+    return new_password
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        print("usage: python -m tools.reset_user_password <email>")
+        sys.exit(2)
+    email = sys.argv[1].strip().lower()
+    new_password = prompt_new_password()
 
     # Go through the repository so the password hashing, the token_version
     # revocation, and the users-table SQL stay in the one place the app owns

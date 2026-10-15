@@ -53,15 +53,6 @@ def test_duplicate_email_rejected(repo):
         r.create_user(email, "Another1!")
 
 
-def test_admin_role_from_settings(repo, monkeypatch):
-    r, created = repo
-    email = _unique_email()
-    created.append(email)
-    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
-    row = r.create_user(email, "S3cretpw!")
-    assert row["role"] == "admin"
-
-
 def test_google_user_create_is_idempotent(repo):
     r, created = repo
     email = _unique_email()
@@ -98,20 +89,18 @@ def test_google_login_rejects_inactive_account(repo):
         r.get_or_create_google_user(sub, email, "G User")
 
 
-def test_role_synced_to_allowlist_at_signin(repo, monkeypatch):
-    """ADMIN_EMAILS promotes at sign-in (promote-only). Removing an email from
-    ADMIN_EMAILS no longer demotes — the DB role is the source of truth; revoke
-    via set_platform_role instead."""
+def test_sign_in_never_changes_role(repo, monkeypatch):
+    """A listed address signing in stays a pending user: an address is not proof
+    the caller owns it, so sign-in never grants admin."""
     r, created = repo
     email = _unique_email()
     created.append(email)
     assert r.create_user(email, "S3cretpw!")["role"] == "user"
-    # Adding the email to ADMIN_EMAILS promotes at next sign-in.
     monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
-    assert r.verify_credentials(email, "S3cretpw!")["role"] == "admin"
-    # Removing the email from ADMIN_EMAILS does NOT demote — admin stays admin.
-    monkeypatch.setattr(settings, "ADMIN_EMAILS", "")
-    assert r.verify_credentials(email, "S3cretpw!")["role"] == "admin"
+    signed_in = r.verify_credentials(email, "S3cretpw!")
+    assert signed_in["role"] == "user"
+    assert signed_in["status"] == "pending"
+    assert r.get_by_email(email)["role"] == "user"
 
 
 def test_google_only_account_denies_password_login(repo):
@@ -165,38 +154,21 @@ def test_reset_password_sets_password_on_google_only_account(repo):
     assert r.verify_credentials(email, "Whatever1!") is not None
 
 
-def test_admin_email_signup_is_active_immediately(repo, monkeypatch):
-    """An ADMIN_EMAILS address that self-registers must land active+admin — the
-    owner can never be stuck pending (parent spec §Bootstrap)."""
+def test_listed_address_signup_lands_pending_user(repo, monkeypatch):
+    """A listed address that self-registers lands a pending user, never an admin."""
     r, created = repo
     email = _unique_email()
     created.append(email)
     monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
     row = r.create_user(email, "S3cretpw!")
     full = r.get_by_id(str(row["id"]))
-    assert full["role"] == "admin"
-    assert full["status"] == "active"
-    assert full["is_active"] is True
+    assert full["role"] == "user"
+    assert full["status"] == "pending"
+    assert full["is_active"] is False
 
 
-def test_sync_activates_already_admin_but_pending_row(repo, monkeypatch):
-    """A user who is role=admin but somehow still pending is normalised to active
-    on their next sign-in (defence in depth for any legacy/raced row)."""
-    r, created = repo
-    email = _unique_email()
-    created.append(email)
-    r.create_user(email, "S3cretpw!")  # created as user/pending
-    with auth_db.get_pool().connection() as conn:
-        conn.execute("UPDATE users SET role='admin', status='pending', is_active=FALSE WHERE email=%s", (email,))
-        conn.commit()
-    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
-    r.verify_credentials(email, "S3cretpw!")
-    full = r.get_by_email(email)
-    assert full["status"] == "active" and full["is_active"] is True
-
-
-def test_google_admin_email_signup_is_active_immediately(repo, monkeypatch):
-    """An allowlisted Google signup must also land active+admin, not pending."""
+def test_google_listed_address_signup_lands_pending_user(repo, monkeypatch):
+    """A Google signup of a listed address lands a pending user as well."""
     r, created = repo
     email = _unique_email()
     created.append(email)
@@ -204,6 +176,21 @@ def test_google_admin_email_signup_is_active_immediately(repo, monkeypatch):
     row, was_created = r.get_or_create_google_user(f"google-{uuid.uuid4().hex}", email, "G Admin")
     assert was_created is True
     full = r.get_by_id(str(row["id"]))
-    assert full["role"] == "admin"
-    assert full["status"] == "active"
-    assert full["is_active"] is True
+    assert full["role"] == "user"
+    assert full["status"] == "pending"
+    assert full["is_active"] is False
+
+
+def test_google_signin_of_existing_account_with_listed_address_stays_pending_user(repo, monkeypatch):
+    """Signing in again with a listed address never promotes an existing Google account."""
+    r, created = repo
+    email = _unique_email()
+    created.append(email)
+    sub = f"google-{uuid.uuid4().hex}"
+    r.get_or_create_google_user(sub, email, "G Admin")
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", email)
+    row, was_created = r.get_or_create_google_user(sub, email, "G Admin")
+    assert was_created is False
+    assert (row["role"], row["status"]) == ("user", "pending")
+    full = r.get_by_email(email)
+    assert (full["role"], full["status"]) == ("user", "pending")

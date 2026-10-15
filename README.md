@@ -160,29 +160,22 @@ turns login back on with the new password if it is ever started again):
 docker exec nlrf-postgres psql -U nlrf -d nlrf -c "ALTER ROLE grafana_ro NOLOGIN"
 ```
 
-In **`src/backend/.env`**, set the Vertex AI project and location, and add your own
-email as an admin:
+In **`src/backend/.env`**, set the Vertex AI project and location:
 
 ```env
 MODEL_PROVIDER=vertex
 VERTEXAI_PROJECT=your-project-id
 VERTEXAI_LOCATION=global
 ONLINE_MODEL=gemini-3.8-flash
-ADMIN_EMAILS=you@example.com
 ```
 
-Those three — project, location and admin email — are the only values you must change in this file;
+Those two — project and location — are the only values you must change in this file;
 everything below is background on what they mean.
 
 - **`JWT_SECRET_KEY`** — leave it alone. It ships commented out, and on first start the
   app generates a strong random secret and stores it in `data/jwt_secret`, so you stay
   signed in across restarts. Delete that file and everyone is signed out. Production is
   different — see the hardening note at the end of this section.
-
-- **`ADMIN_EMAILS`** — set this **before the first start**. Mark 1 is approval-gated:
-  a new signup lands `pending` and sees an Access Gate rather than the Generate page.
-  Emails listed here are created `active` and can approve everyone else. Miss it and
-  you lock yourself out of your own instance with no one able to let you in.
 
 - **`VERTEXAI_PROJECT`** — the setup script prints this at the end (it is also the `project_id` field inside `credentials.json`).
 - **`VERTEXAI_LOCATION`** — where Vertex AI serves requests. Use `global` (recommended) unless your data must stay in one region: Google routes each global request to a region with capacity, so fewer runs fail with 429, but global gives no data-residency guarantee. Otherwise pick a region that offers `ONLINE_MODEL`, such as `asia-south1` (Mumbai).
@@ -222,10 +215,19 @@ Your generated tests and logs live in local folders (`./robot_tests`, `./logs`, 
 
 ### 5. Open the app & generate your first test
 
-Open **[http://localhost:3000](http://localhost:3000)** and **create an account**, using the
-email you put in `ADMIN_EMAILS`. That account is active immediately and lands on the
-**Generate** page; any other email lands on the Access Gate until an admin approves it.
-Then:
+Mark 1 is approval-gated, and a signup never makes an admin, so make the first one on
+the host:
+
+```bash
+docker exec -it nlrf-fastapi python -m tools.make_admin you@example.com
+```
+
+It asks for a password and makes that account an active admin (on Git Bash for Windows,
+prefix the command with `winpty`). An address that already signed up with Google and has
+no password is promoted without a prompt; that account signs in with Google. Open
+**[http://localhost:3000](http://localhost:3000)** and sign in; you land on the **Generate**
+page. Every other signup lands on the Access Gate until an admin approves it under
+**Access**. Then:
 
 1. Enter a description:
    ```text

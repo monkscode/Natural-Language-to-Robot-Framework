@@ -396,19 +396,23 @@ operator actually has to think about.
 
 ### ADMIN_EMAILS
 
-Comma-separated emails that receive the `admin` role at signup.
+**No longer used.** A signup never makes an admin — an email address is not proof that
+the person signing up owns it — so listing an address here grants nothing. The app only
+logs a startup warning while the setting is non-empty; remove it from `src/backend/.env`.
 
-```env
-ADMIN_EMAILS=you@company.com,cofounder@company.com
+Make the first admin on the host instead:
+
+```bash
+docker exec -it nlrf-fastapi python -m tools.make_admin you@company.com
 ```
 
-**Default:** empty.
-
-> ⚠️ **Set this before your first start.** Every new signup lands `pending` and sees
-> an Access Gate instead of the Generate page. Accounts listed here are created
-> `active` and can approve everyone else. Miss it and nobody can get in — including
-> you. Admins approve others under **Access** in the sidebar; there is no email
-> notification, so check that page after a teammate signs up.
+It asks for a password and makes that account an active admin: it creates the account,
+or resets the password of an existing account that has one and promotes it. A Google
+account with no password is promoted without a prompt and signs in with Google. Every
+other signup lands `pending` and sees an Access Gate instead of the Generate page. Admins
+approve others, and can make more admins,
+under **Access** in the sidebar; there is no email notification, so check that page after
+a teammate signs up.
 
 ### JWT_SECRET_KEY
 
@@ -497,9 +501,6 @@ VERTEXAI_PROJECT=your-gcp-project-id
 VERTEXAI_LOCATION=global
 ONLINE_MODEL=gemini-3.8-flash
 
-# Access — set BEFORE the first start
-ADMIN_EMAILS=you@company.com
-
 # JWT_SECRET_KEY intentionally unset: auto-generated into data/jwt_secret
 
 ROBOT_LIBRARY=browser
@@ -521,7 +522,6 @@ runs in production.
 MODEL_PROVIDER=gemini
 GEMINI_API_KEY=your-ai-studio-key   # https://aistudio.google.com/apikey
 ONLINE_MODEL=gemini-3.8-flash
-ADMIN_EMAILS=you@company.com
 ```
 
 Start it without the overlay: `docker compose up -d`

@@ -144,10 +144,10 @@ def _token_payload(row: dict) -> dict:
         # Self-heal: an ACTIVE user must never mint an org-less token — org_id
         # None means UNSCOPED learning reads (every org's hints injected into
         # their runs) and unattributed writes. The state is reachable outside
-        # the approve flow: _sync_role_to_allowlist force-flips a pending
-        # allowlisted user to active at login without provisioning, and the
-        # Google callback's existing-user branch never provisions. Minting is
-        # the one choke point every login path funnels through, so heal here.
+        # the approve flow: an admin made with tools.make_admin is activated
+        # without provisioning, and the Google callback's existing-user branch
+        # never provisions. Minting is the one choke point every login path
+        # funnels through, so heal here.
         # No-op for pending signups (they get their org at approval) and for
         # anyone already provisioned.
         provision_on_approval(str(row["id"]))
@@ -235,13 +235,6 @@ async def register(request: Request, req: RegisterRequest, response: Response):
     logger.info("[AUTH] Registered user %s (role=%s)",
                 sanitize_for_log(row["email"]), row["role"])
     match_invite_on_signup(str(row["id"]), row["email"])
-    # An allowlisted (ADMIN_EMAILS) signup lands instantly active and never
-    # passes through the Approve step — the only other place org membership is
-    # materialised — so provision here, BEFORE the token is minted, so the first
-    # token already carries the org. No-op for pending signups (they get their
-    # org at approval) and for anyone who already has a membership.
-    if row.get("status") == "active":
-        provision_on_approval(str(row["id"]))
     payload = _token_payload(row)
     _set_report_cookie(response, payload["access_token"])
     return payload
@@ -442,16 +435,12 @@ async def google_callback(request: Request):
     except AccountInactive:
         return _error_redirect("account_disabled")
     # Only a brand-new pending signup may consume an invite. An existing/active
-    # user (or the bootstrapped admin, whom _sync flips to active) must NOT — the
-    # invite→membership link is materialised only at approval of a pending user
-    # (provision_on_approval). Consuming here for an existing user would silently
-    # burn the org-owner's open invite with no membership ever created.
+    # user must NOT — the invite→membership link is materialised only at
+    # approval of a pending user (provision_on_approval). Consuming here for an
+    # existing user would silently burn the org-owner's open invite with no
+    # membership ever created.
     if created:
         match_invite_on_signup(str(row["id"]), row["email"])
-        # Same as /register: an allowlisted Google signup is instantly active and
-        # skips Approve, so provision its org now (no-op for pending signups).
-        if row.get("status") == "active":
-            provision_on_approval(str(row["id"]))
     token = _token_payload(row)["access_token"]
     # NOTE: land on /oauth/callback (NOT /auth/callback) — the SPA dev proxy and
     # the nginx container both forward /auth/* to this backend, so a /auth/*

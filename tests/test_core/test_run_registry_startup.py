@@ -62,7 +62,6 @@ def _run_startup(calls, registry_side_effect, sweeps=None, migrations=None,
         patch.object(main, "init_org_db"),
         patch.object(main, "init_invitations_db"),
         patch("src.backend.core.audit_log.init_audit_log"),
-        patch("src.backend.auth.admin_seed.seed_platform_admins"),
         patch("src.backend.core.org_backfill.backfill_data_org_ids"),
         patch(
             "src.backend.auth.migration_state.run_migration_once",
@@ -154,3 +153,20 @@ def test_startup_survives_a_result_folder_alignment_failure(caplog):
                      "temp_cleanup"]
     assert sweeps == [1]
     assert isinstance(task, asyncio.Task)
+
+
+def test_startup_warns_when_admin_emails_is_set(caplog):
+    """ADMIN_EMAILS no longer makes anyone an admin; a boot that still finds it
+    set says so and names the host command, and a boot without it stays quiet."""
+    with caplog.at_level(logging.INFO):
+        with patch.object(main.settings, "ADMIN_EMAILS", "x@example.com"):
+            _run_startup([], lambda: MagicMock())
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING]
+    assert any("tools.make_admin" in m for m in warnings)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        with patch.object(main.settings, "ADMIN_EMAILS", ""):
+            _run_startup([], lambda: MagicMock())
+    assert not any("tools.make_admin" in r.getMessage() for r in caplog.records)
