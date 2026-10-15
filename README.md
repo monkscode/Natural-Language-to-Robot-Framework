@@ -223,9 +223,11 @@ docker exec -it nlrf-fastapi python -m tools.make_admin you@example.com
 ```
 
 It asks for a password and makes that account an active admin (on Git Bash for Windows,
-prefix the command with `winpty`). Open **[http://localhost:3000](http://localhost:3000)**
-and sign in with it; you land on the **Generate** page. Every other signup lands on the
-Access Gate until an admin approves it under **Access**. Then:
+prefix the command with `winpty`). An address that already signed up with Google and has
+no password is promoted without a prompt; that account signs in with Google. Open
+**[http://localhost:3000](http://localhost:3000)** and sign in; you land on the **Generate**
+page. Every other signup lands on the Access Gate until an admin approves it under
+**Access**. Then:
 
 1. Enter a description:
    ```text

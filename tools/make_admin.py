@@ -5,10 +5,11 @@ it. The first platform admin is made here instead, by whoever has a shell on the
 host; after that, admins grant admin in the Access Console.
 
 - No account for the address: asks a password and creates the account.
-- A password account (possibly registered by someone else first): asks a NEW
-  password and resets it, which revokes every session of that account.
-- A Google account (google_sub set): no password asked — Google verified the
-  address when the account was created.
+- A password account (possibly registered by someone else first, or a Google
+  account given a password by tools.reset_user_password): asks a NEW password
+  and resets it, which revokes every session of that account.
+- A Google-only account (google_sub set, no password): no password asked —
+  Google verified the address when the account was created.
 Then the account is made admin and active, and one audit_log row records it.
 
 Run:  docker exec -it nlrf-fastapi python -m tools.make_admin <email>
@@ -56,7 +57,7 @@ def main() -> None:
             print(f"{email} was registered while this ran; run the command again")
             sys.exit(1)
         login_change = "created"
-    elif row.get("google_sub"):
+    elif row.get("google_sub") and not row.get("hashed_password"):
         login_change = "unchanged (Google account)"
     else:
         # Whoever registered this address first loses it: the reset revokes every token.
