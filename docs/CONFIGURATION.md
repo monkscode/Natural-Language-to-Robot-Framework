@@ -407,9 +407,10 @@ docker exec -it nlrf-fastapi python -m tools.make_admin you@company.com
 ```
 
 It asks for a password and makes that account an active admin: it creates the account,
-or resets the password of an existing password account and promotes it. A Google account
-is promoted without a password. Every other signup lands `pending` and sees an Access
-Gate instead of the Generate page. Admins approve others, and can make more admins,
+or resets the password of an existing account that has one and promotes it. A Google
+account with no password is promoted without a prompt and signs in with Google. Every
+other signup lands `pending` and sees an Access Gate instead of the Generate page. Admins
+approve others, and can make more admins,
 under **Access** in the sidebar; there is no email notification, so check that page after
 a teammate signs up.
 

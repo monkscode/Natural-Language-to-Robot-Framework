@@ -99,6 +99,26 @@ def test_promotes_a_google_account_without_asking_a_password():
         _cleanup(email)
 
 
+def test_resets_the_password_a_google_account_also_holds():
+    repo, email = UserRepository(), _email()
+    try:
+        repo.get_or_create_google_user(f"sub-{uuid.uuid4().hex}", email, "G")
+        repo.reset_password(email, "password-A1")  # tools.reset_user_password on a Google account
+        before = repo.get_by_email(email)["token_version"]
+        gp = _run(email, ["password-B2", "password-B2"])
+        assert gp.call_count == 2
+        row = repo.get_by_email(email)
+        assert (row["role"], row["status"]) == ("admin", "active")
+        assert repo.verify_credentials(email, "password-A1") is None
+        assert repo.verify_credentials(email, "password-B2") is not None
+        assert row["token_version"] >= before + 1
+        rows = _audit_rows(email)
+        assert len(rows) == 1
+        assert json.loads(rows[0]["detail"])["password"] == "reset, every session revoked"
+    finally:
+        _cleanup(email)
+
+
 def test_reactivates_a_suspended_account():
     repo, email = UserRepository(), _email()
     try:
