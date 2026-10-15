@@ -394,7 +394,8 @@ _SCHEMA_DDL = (
     # 'code_edited' version in _attach_test's existing-test branch, so the row
     # names the version that holds the edited code (test_run_registry_test_
     # attach.py::test_an_edited_code_execution_appends_a_code_edited_version);
-    # only a non-author's edited run keeps the version it names.
+    # only a non-author's edited run keeps the version it names. Rows written
+    # before this change are not back-filled (owner, 2026-10-15).
     # Both stay NULLABLE: test_id IS NULL is a permanently legal state for a
     # generation that failed before any code existed (owner decision D8).
     "ALTER TABLE test_runs ADD COLUMN IF NOT EXISTS test_id TEXT",
@@ -1321,11 +1322,10 @@ class RunRegistry:
             # a version of its own, and the row, the Tests page and its Run
             # all see the code that ran. Trimmed at both ends because the
             # page sends code.trim(); a NULL version code counts as different.
-            # Only the test's AUTHOR (the gate the write-back below uses, so
-            # NULLs never match): any other caller's run keeps the version it
-            # names, as before (owner, 2026-10-15) -- the Update dialog's
-            # identity rule. The source version's description is kept: the
-            # request carries none (History rows) or the run's, not an edit.
+            # The test's author only (owner, 2026-10-15; NULLs never match):
+            # a non-author's run keeps the version it names, as before. The
+            # source version's description is kept: the request carries none
+            # (History rows) or the run's, not an edit.
             if (robot_code and version_id is not None
                     and user_id is not None
                     and existing["test_user_id"] == user_id
@@ -1558,9 +1558,11 @@ class RunRegistry:
                     user_email = COALESCE(test_runs.user_email, EXCLUDED.user_email),
                     user_query = COALESCE(test_runs.user_query, EXCLUDED.user_query),
                     robot_code = COALESCE(EXCLUDED.robot_code, test_runs.robot_code),
-                    -- write-once, like ownership: _attach_test is idempotent
-                    -- and returns the row's existing test, so this only ever
-                    -- fills a NULL left by a failed or code-less first write.
+                    -- COALESCE keeps the row's value, so this only ever fills
+                    -- a NULL left by a failed or code-less first write.
+                    -- _attach_test returns the row's existing test, and
+                    -- re-points test_version_id itself (UPDATE) when an
+                    -- edited Run appends a code_edited version.
                     test_id         = COALESCE(test_runs.test_id, EXCLUDED.test_id),
                     test_version_id = COALESCE(test_runs.test_version_id,
                                                EXCLUDED.test_version_id),
@@ -3188,26 +3190,20 @@ class RunRegistry:
                 versions = conn.execute(
                     "SELECT v.n, v.user_query, v.robot_code, v.created_by,"
                     " v.created_by_email, v.reason, v.created_at,"
-                    # D7 per VERSION: has this row's OWN creator EVER run
-                    # this version with platform-admin authority? Any run of
-                    # theirs attributed to this version counts: the mint or
-                    # append that made it and every later run labelled with
-                    # it -- including a re-run of a code-less run the
-                    # collapse attached, which _attach_test's rerun_of branch
-                    # labels with the test's CURRENT version. So a version a
-                    # member made flips once they run it again as a platform
-                    # admin. "Ever" can only withhold more than "when it was
-                    # made", never less. Task 7 lets someone other than the
+                    # D7 per version creator: has this row's OWN creator EVER
+                    # run ANY result of this test with platform-admin
+                    # authority? Per test, not per version, because an edited
+                    # Generate run moves its row to the version it creates --
+                    # a per-version check would un-flag the version it came
+                    # from and show the admin's address there. It only ever
+                    # withholds more. Task 7 lets someone other than the
                     # author append, so the test-level answer above cannot
-                    # stand in for this one.
+                    # stand in for this one (it names the author only).
                     #
-                    # ra.test_id is redundant for correctness and load-bearing
-                    # for cost: nothing indexes test_version_id, so without it
-                    # this is a scan of test_runs per version rather than an
-                    # index probe under idx_test_runs_test_time.
+                    # ra.test_id is load-bearing for cost: it is what lets
+                    # this probe idx_test_runs_test_time.
                     " EXISTS (SELECT 1 FROM test_runs ra"
                     "          WHERE ra.test_id = v.test_id"
-                    "            AND ra.test_version_id = v.version_id"
                     "            AND ra.user_id = v.created_by"
                     "            AND ra.ran_as_platform_admin)"
                     "        AS creator_is_platform_admin"
@@ -3456,7 +3452,7 @@ class RunRegistry:
                 # nothing and needs nothing: it has no test to contend over.
                 #
                 # FOR NO KEY UPDATE, not FOR UPDATE, for the reason
-                # _attach_test states at its own lock: FOR UPDATE also
+                # _append_version states at its lock: FOR UPDATE also
                 # conflicts with the FOR KEY SHARE a foreign-key check takes,
                 # so it would stall every concurrent INSERT of a run
                 # referencing these tests. ORDER BY test_id so two callers

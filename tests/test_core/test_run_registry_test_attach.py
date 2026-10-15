@@ -206,6 +206,23 @@ def test_a_caller_who_did_not_author_the_test_appends_nothing(reg):
     assert _row(admin, "run-1")[1] == v1
 
 
+def test_the_gate_is_the_tests_author_not_the_runs_owner(reg):
+    """B owns run-2 (a re-run of A's test) yet did not author the test: B's
+    edited execute of their own row appends nothing."""
+    r, admin = reg
+    r.record_start("run-1", USER_A, "q", "generated", robot_code="code-1")
+    v1 = _row(admin, "run-1")[1]
+    r.record_start("run-2", USER_B, "q", "running", robot_code="code-1",
+                   rerun_of="run-1")
+    assert admin.execute("SELECT user_id FROM test_runs WHERE run_id = 'run-2'"
+                         ).fetchone()[0] == "bob"
+    r.record_start("run-2", USER_B, None, "running",
+                   robot_code="code-B-EDITED")
+
+    assert len(_versions(admin)) == 1
+    assert _row(admin, "run-2")[1] == v1
+
+
 def test_a_token_less_caller_on_a_token_less_test_appends_nothing(reg):
     r, admin = reg
     r.record_start("run-1", None, "q", "generated", robot_code="code-1")
