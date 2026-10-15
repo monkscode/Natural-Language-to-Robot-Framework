@@ -22,7 +22,8 @@ Design decisions:
 Referenced by: workflow_service.py (DAY_07), /api/feedback endpoint (DAY_08).
 Depends on: execution_memory.py (DAY_01), failure_analyzer.py (DAY_02),
             structural_rule_engine.py (DAY_03), keyword_correction_engine.py (DAY_03),
-            anti_pattern_engine.py (DAY_04), learning_config.py (DAY_00).
+            anti_pattern_engine.py (DAY_04), learning_config.py (DAY_00),
+            src/backend/core/pass_quality.py (hollow_shapes).
 """
 
 import base64
@@ -66,7 +67,9 @@ def hollow_pass_shapes(robot_code: str, user_query: str) -> set[str]:
         return hollow_shapes(robot_code, user_query)
     except Exception as e:
         logger.warning(
-            "[LEARNING] hollow-pass checker failed, treating the pass as hollow: %s", e
+            # The exception type only: its message could quote the test code.
+            "[LEARNING] hollow-pass checker failed, treating the pass as hollow: %s",
+            type(e).__name__,
         )
         return {"CHECKER_ERROR"}
 

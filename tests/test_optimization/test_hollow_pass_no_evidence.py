@@ -107,8 +107,10 @@ class TestProcessExecution:
         for learner in _learners(fl):
             learner.assert_not_called()
         fl.circuit_breaker.record_error.assert_not_called()
+        # The exception type is logged; its message (it could quote the code) is not.
         assert any(r.levelno == logging.WARNING and "[LEARNING]" in r.getMessage()
-                   and "boom" in r.getMessage() for r in caplog.records)
+                   and "RuntimeError" in r.getMessage() for r in caplog.records)
+        assert not any("boom" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("status", ["failed", "error"])
     def test_failed_run_never_calls_the_checker(self, status):
@@ -173,9 +175,12 @@ class TestAttribution:
 
     @patch(_FIRE)
     @patch("src.backend.services.workflow_service.get_feedback_loop")
-    def test_hollow_rerun_leaves_attribution_open_for_a_later_clean_pass(
+    def test_failed_then_hollow_then_clean_run_id_is_judged_standalone_not_case_b(
             self, mock_get_fl, mock_fire):
-        """Same run id: a hollow pass credits nothing; a later clean pass still can."""
+        """Same run id, failed -> hollow -> clean. The hollow re-run judges nothing but
+        flips the stored record to `passed` (postgres_execution_memory.py:249-251), so the
+        later clean pass still gets its judgment, standalone: the failed-then-fixed
+        (Case B) judgment of that run id is lost. Accepted (controller's ruling)."""
         mock_get_fl.return_value = MagicMock()
         pre = MagicMock()
         pre.test_status = "failed"
@@ -183,6 +188,8 @@ class TestAttribution:
         pre.hint_attribution_done = 0
         self._attribute(HOLLOW, pre=pre)
         mock_fire.assert_not_called()
-        assert pre.hint_attribution_done == 0
+        # What production hands over after the hollow re-run: the record now reads passed.
+        pre.test_status = "passed"
         self._attribute(CLEAN, pre=pre)
         mock_fire.assert_called_once()
+        assert mock_fire.call_args.kwargs["case_b"] is False
