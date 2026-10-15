@@ -51,8 +51,24 @@ from src.backend.crew_ai.optimization.postgres_execution_memory import (
 )
 from src.backend.crew_ai.optimization.failure_analyzer import FailureAnalyzer
 from src.backend.crew_ai.optimization.pattern_learning import QueryPatternMatcher
+from src.backend.core.pass_quality import hollow_shapes
 
 logger = logging.getLogger(__name__)
+
+
+def hollow_pass_shapes(robot_code: str, user_query: str) -> set[str]:
+    """Hollow shapes of a PASSED test; a checker error counts as hollow.
+
+    A hollow pass is no evidence its keywords work, so learning skips it. A
+    checker that cannot answer must not let a possibly hollow pass be learned.
+    """
+    try:
+        return hollow_shapes(robot_code, user_query)
+    except Exception as e:
+        logger.warning(
+            "[LEARNING] hollow-pass checker failed, treating the pass as hollow: %s", e
+        )
+        return {"CHECKER_ERROR"}
 
 
 # ---------------------------------------------------------------------------
@@ -1033,18 +1049,31 @@ class FeedbackLoop:
             # Step 3: Store via write queue (non-blocking)
             self.write_queue.submit(self.execution_memory.store, record)
 
-            # Step 4: Route to learning engines (non-blocking)
-            self.write_queue.submit(self.structural_engine.learn, record)
-            self.write_queue.submit(self.keyword_engine.learn, record)
-            self.write_queue.submit(self.anti_pattern_engine.learn, record)
-
-            # Step 4b: Pattern learning — keyword-to-query association
-            # Only learn from PASSED tests to avoid learning wrong keyword mappings
-            if test_status == "passed" and self.pattern_learner is not None:
-                self.write_queue.submit(
-                    self.pattern_learner.learn_from_execution,
-                    user_query, robot_code, record.org_id,
+            # A passing test that would pass whatever the page shows is no
+            # evidence its keywords work: store and count it (Steps 3, 5, 6)
+            # but do not learn from it (Steps 4, 4b). Issue #132.
+            hollow = (
+                hollow_pass_shapes(robot_code, user_query)
+                if test_status == "passed" else set()
+            )
+            if hollow:
+                logger.info(
+                    "[LEARNING] %s: hollow pass (%s) — stored, not learned",
+                    workflow_id, ", ".join(sorted(hollow)),
                 )
+            else:
+                # Step 4: Route to learning engines (non-blocking)
+                self.write_queue.submit(self.structural_engine.learn, record)
+                self.write_queue.submit(self.keyword_engine.learn, record)
+                self.write_queue.submit(self.anti_pattern_engine.learn, record)
+
+                # Step 4b: Pattern learning — keyword-to-query association
+                # Only learn from PASSED tests to avoid learning wrong keyword mappings
+                if test_status == "passed" and self.pattern_learner is not None:
+                    self.write_queue.submit(
+                        self.pattern_learner.learn_from_execution,
+                        user_query, robot_code, record.org_id,
+                    )
 
             # Step 5: Record learning metrics (non-blocking)
             self.write_queue.submit(
