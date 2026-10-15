@@ -18,6 +18,9 @@ from unittest.mock import MagicMock, patch
 
 from src.backend.services import workflow_service as ws
 
+# A passed test the hollow-pass checker accepts (learning skips hollow passes).
+_CLEAN = "*** Test Cases ***\nT\n    Click    id=go\n"
+
 
 def _drain(agen):
     async def _run():
@@ -137,11 +140,11 @@ class TestPhaseHandoff:
 
         self._set_cache("split-2", [5, 12])
         ctx = ws._process_learning_record(
-            "split-2", "search on example.com", "code", {"test_status": "passed"})
+            "split-2", "search on example.com", _CLEAN, {"test_status": "passed"})
         assert "split-2" not in ws._hint_metadata_cache
 
         ws._process_learning_attribution(
-            "split-2", "search on example.com", "code", {"test_status": "passed"}, *ctx)
+            "split-2", "search on example.com", _CLEAN, {"test_status": "passed"}, *ctx)
 
         mock_fire.assert_called_once()
         assert mock_fire.call_args.kwargs["injected_hint_ids"] == "[5, 12]"
@@ -157,7 +160,7 @@ class TestPhaseHandoff:
         mock_get_fl.return_value = mock_fl
 
         ws._process_learning_attribution(
-            "split-3", "search on example.com", "code", {"test_status": "passed"},
+            "split-3", "search on example.com", _CLEAN, {"test_status": "passed"},
             None, "[5, 12]")
 
         mock_fl.execution_memory.get.assert_not_called()
