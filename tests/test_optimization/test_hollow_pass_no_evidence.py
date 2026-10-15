@@ -89,7 +89,9 @@ class TestProcessExecution:
         fl.circuit_breaker.record_success.assert_called_once()
         lines = [r.getMessage() for r in caplog.records if "hollow pass" in r.getMessage()]
         assert len(lines) == 1
-        assert "wf-132" in lines[0] and "not learned" in lines[0] and "[LEARNING]" in lines[0]
+        assert "wf-132" in lines[0]
+        assert "not learned" in lines[0]
+        assert "[LEARNING]" in lines[0]
 
     def test_clean_pass_is_learned(self):
         fl = _loop()
