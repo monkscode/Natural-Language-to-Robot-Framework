@@ -10,12 +10,13 @@ removed. The factory shape is kept so a future second library is an emission-lay
 feature, not a rewrite.
 """
 
-from .base import LibraryContext
+from .base import LibraryContext, assembler_base_context
 from .browser_context import BrowserLibraryContext
 
 __all__ = [
     "LibraryContext",
     "BrowserLibraryContext",
+    "assembler_base_context",
     "get_library_context"
 ]
 

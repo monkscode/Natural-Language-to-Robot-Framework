@@ -176,9 +176,12 @@ class TestAssemblerBackstory:
         assert "Any text before *** Settings ***" not in backstory
 
     def test_still_carries_library_knowledge(self):
-        """code_assembly_context stays in the backstory (system) — the
-        description's duplicate copy is the one that goes (F1)."""
-        assert "BROWSER LIBRARY CODE STRUCTURE" in self._backstory()
+        """The base text (intro + core_rules) reaches the system prompt on
+        both learning paths (owner, 2026-10-16); the code-structure text no
+        longer does on the main call — only the repair call sends it."""
+        backstory = self._backstory()
+        assert "**BROWSER LIBRARY CORE RULES:**" in backstory
+        assert "BROWSER LIBRARY CODE STRUCTURE" not in backstory
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -196,8 +199,8 @@ class TestAssemblerDescription:
         assert "MANDATORY STRUCTURE" not in desc
 
     def test_viewport_block_not_duplicated(self):
-        """The viewport rule lives ONCE, in code_assembly_context (system).
-        The description's dedicated viewport block (~13 repetitions of the
+        """The viewport rule lives ONCE, in the system prompt (the main call
+        gets it through core_rules). The description's dedicated viewport block (~13 repetitions of the
         rule across the request) goes."""
         desc = _capture_assemble_description()
         assert "--- VIEWPORT CONFIGURATION" not in desc

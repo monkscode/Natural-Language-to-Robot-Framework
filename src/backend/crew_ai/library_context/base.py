@@ -180,3 +180,19 @@ class LibraryContext(ABC):
             return self.code_assembly_context
         else:
             raise ValueError(f"Unknown agent role: {agent_role}")
+
+
+def assembler_base_context(library_context) -> str:
+    """
+    The Code Assembler main call's library text, on every path.
+
+    Learning ON appends its learned keyword block to this text and nothing
+    else; learning OFF sends it as is. The dryrun repair call is the one
+    exception: it sends library_context.code_assembly_context instead.
+
+    Duck-typed: reads only .library_name and .core_rules.
+    """
+    return (
+        f"\nYou are an expert Robot Framework developer using {library_context.library_name}.\n\n"
+        f"{library_context.core_rules}\n"
+    )

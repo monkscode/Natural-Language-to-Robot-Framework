@@ -752,6 +752,17 @@ class TestRegression:
         assert "CORE RULES" in result.context
         assert "keyword_search" not in result.context.lower()
 
+    def test_full_context_fallback_assembler_is_base_text(self):
+        """The assembler's Tier-3 fallback is the base text, never the
+        structure text (owner, 2026-10-16)."""
+        p = create_provider()
+        p._format_zero_context = Mock(side_effect=RuntimeError("format failed"))
+        result = p.get_agent_context("find element", "assembler")
+        assert result.context == (
+            "\nYou are an expert Robot Framework developer using Browser.\n\n"
+            "CORE RULES: Use Browser library keywords.\n"
+        )
+
     def test_full_context_fallback_unknown_role(self):
         """Unknown roles fall back to code_assembly_context with a warning
         (the 'identifier' branch was removed in Task 16 — it was dead code).

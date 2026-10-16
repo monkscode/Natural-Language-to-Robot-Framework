@@ -14,6 +14,7 @@ and hint metadata for downstream metrics tracking.
 import logging
 import random
 from typing import Optional, List, Dict, NamedTuple
+from src.backend.crew_ai.library_context import assembler_base_context
 from .pattern_learning import QueryPatternMatcher
 from .keyword_vector_store import KeywordVectorStore
 from .context_pruner import ContextPruner
@@ -538,7 +539,8 @@ class SmartKeywordProvider:
         Used when no predictions are available from pattern learning.
         (This tier used to teach the retired keyword-search tool's ReAct
         call syntax — Task 24R Stage 1 reduced it to the core rules; the
-        static KEYWORD REFERENCE list lives in code_assembly_context.)
+        static KEYWORD REFERENCE list now reaches only the dryrun repair
+        call, through code_assembly_context.)
 
         Args:
             agent_role: "planner" or "assembler"
@@ -546,13 +548,7 @@ class SmartKeywordProvider:
         Returns:
             Formatted context string with core rules
         """
-        core_rules = self._get_core_rules()
-
-        return f"""
-You are an expert Robot Framework developer using {self.library_context.library_name}.
-
-{core_rules}
-"""
+        return assembler_base_context(self.library_context)
 
     def _format_predicted_context(self, predicted_keywords: List[str], agent_role: str, user_query: str = "") -> str:
         """
@@ -570,9 +566,6 @@ You are an expert Robot Framework developer using {self.library_context.library_
         Returns:
             Formatted context string with core rules + predicted keyword docs
         """
-        # Get core rules
-        core_rules = self._get_core_rules()
-
         # Apply context pruning if enabled
         keywords_to_fetch = predicted_keywords[:5]  # Limit to top 5 for efficiency
 
@@ -642,14 +635,10 @@ You are an expert Robot Framework developer using {self.library_context.library_
         # Combine core rules + predicted keywords
         predicted_docs = '\n'.join(keyword_docs) if keyword_docs else 'No predicted keywords available'
 
-        return f"""
-You are an expert Robot Framework developer using {self.library_context.library_name}.
-
-{core_rules}
-
-**RELEVANT KEYWORDS (from similar queries):**
-{predicted_docs}
-"""
+        return (
+            f"{assembler_base_context(self.library_context)}\n"
+            f"**RELEVANT KEYWORDS (from similar queries):**\n{predicted_docs}\n"
+        )
 
     # ------------------------------------------------------------------
     # Main Entry Point
@@ -815,7 +804,7 @@ You are an expert Robot Framework developer using {self.library_context.library_
         if agent_role == "planner":
             return self.library_context.planning_context
         elif agent_role == "assembler":
-            return self.library_context.code_assembly_context
+            return assembler_base_context(self.library_context)
         else:
             # Default to code assembly context
             logger.warning(f"Unknown agent role '{agent_role}', using code_assembly_context")
