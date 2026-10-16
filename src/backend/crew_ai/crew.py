@@ -426,7 +426,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
-            logger.warning("⚠️ Falling back to baseline behavior (full context)")
+            logger.warning("⚠️ Falling back to baseline behavior (base library text, no learned context)")
             assembler_context = None
             smart_provider = None
             optimization_metrics = None

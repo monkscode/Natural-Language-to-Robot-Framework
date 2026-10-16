@@ -474,7 +474,9 @@ Stage 2 — Element identification (deterministic Python, NOT an agent):
 Stage 3 — Code Assembler (LLM agent, own single-task crew):
   Input:  Steps with validated locators
   Uses:   assembler_base_context (intro + library_context.core_rules) on both
-          learning paths; learning ON appends the learned keyword block; the
+          learning paths; learning ON appends the learned keyword block only
+          when the org has learned keyword patterns (a fresh org gets the base
+          text alone); the
           dryrun repair call uses library_context.code_assembly_context
           (no tools — per-query keyword knowledge arrives via the
            optimized context when learning is ON)

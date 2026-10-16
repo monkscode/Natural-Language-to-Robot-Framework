@@ -5,7 +5,8 @@ This module orchestrates the 4-tier keyword retrieval system:
 0. Surgical Learning Hints (from learning engines — NEW in DAY_06)
 1. Core Rules (always included, ~300 tokens)
 2. Predicted Keywords (from pattern learning) OR Zero-Context (core rules only)
-3. Full Context Fallback (if both fail)
+3. Base-Text Fallback (if both fail): the assembler's base text, or the
+   planner's planning_context
 
 Returns AgentContextResult (NamedTuple) containing both the context string
 and hint metadata for downstream metrics tracking.
@@ -130,7 +131,7 @@ class SmartKeywordProvider:
     - Tier 0: Surgical Learning Hints (from past executions)
     - Tier 1: Core Rules (always included)
     - Tier 2: Predicted Keywords OR Zero-Context (core rules only)
-    - Tier 3: Full Context Fallback
+    - Tier 3: Base-Text Fallback (assembler base text / planner planning_context)
     """
 
     # R7 random-holdout: fraction of workflows on which otherwise-available
@@ -654,7 +655,7 @@ class SmartKeywordProvider:
         0. Surgical Learning Hints (from past executions — NEW)
         1. Core Rules (always)
         2. Predicted Keywords OR Zero-Context (core rules only)
-        3. Full Context Fallback
+        3. Base-Text Fallback (assembler base text / planner planning_context)
 
         Args:
             user_query: User's natural language query
@@ -767,9 +768,9 @@ class SmartKeywordProvider:
             try:
                 existing_context = self._format_zero_context(agent_role)
             except Exception as e:
-                logger.error(f"Zero-context formatting failed: {e}, falling back to full context")
-                # Tier 3: Full context fallback (baseline behavior)
-                logger.warning("Using full context as fallback - optimization failed")
+                logger.error(f"Zero-context formatting failed: {e}, falling back to the base text")
+                # Tier 3: base-text fallback (baseline behavior)
+                logger.warning("Using the base text as fallback - optimization failed")
                 existing_context = self._get_full_context_fallback(agent_role)
 
         context_parts.append(existing_context)
@@ -786,7 +787,7 @@ class SmartKeywordProvider:
 
     def _get_full_context_fallback(self, agent_role: str) -> str:
         """
-        Get full context as fallback when optimization fails.
+        Get the base text as fallback when optimization fails.
 
         This ensures graceful degradation to baseline behavior.
 
@@ -794,9 +795,10 @@ class SmartKeywordProvider:
             agent_role: "planner" or "assembler"
 
         Returns:
-            Full context string from library_context
+            For "assembler", assembler_base_context(library_context) (intro +
+            core_rules, no learned context); for "planner", planning_context.
         """
-        logger.info(f"Fallback to full context for {agent_role} agent")
+        logger.info(f"Fallback to the base text for {agent_role} agent")
 
         # NOTE: the "identifier" branch was removed in Task 16 — it was
         # pre-existing dead code (zero callers even before the element

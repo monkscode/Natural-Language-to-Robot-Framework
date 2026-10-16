@@ -172,7 +172,10 @@ class LibraryContext(ABC):
             agent_role: One of "planner", "assembler"
 
         Returns:
-            Complete context string for that agent
+            Complete context string for that agent. For "assembler" this is
+            the structure text (code_assembly_context, the dryrun repair
+            call's text), NOT the main call's text, which is
+            assembler_base_context.
         """
         if agent_role == "planner":
             return self.planning_context

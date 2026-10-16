@@ -226,7 +226,7 @@ Keyboard Key, Wait For Elements State, Close Browser
 """
             # NOTE: the Tom Select recipe lives in the DROPDOWN_HANDLING prompt
             # component (conditional assembly block) — not here (Task 24R F1/F2
-            # dedup: this context is the assembler's always-on system prompt).
+            # dedup: this context is the dryrun repair call's system-prompt text).
             self._code_assembly_context_cache = code_structure
         
         return self._code_assembly_context_cache
