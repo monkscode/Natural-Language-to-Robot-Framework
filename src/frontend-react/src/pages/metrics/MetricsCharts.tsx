@@ -14,6 +14,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { formatReductionPct } from './format'
 
 export interface MetricsRow {
   workflow_id: string
@@ -292,7 +293,7 @@ export function PerformanceChartCard({ rows }: { rows: MetricsRow[] }) {
                 <YAxis tick={{ fontSize: 11 }} label={{ value: 'Tokens', angle: -90, position: 'insideLeft', fontSize: 11 }} />
                 <Tooltip formatter={(v, name, item) => {
                   const pct = (item as { payload?: { ctxPct?: number } } | undefined)?.payload?.ctxPct
-                  return [`${Number(v ?? 0).toLocaleString()}${name === 'Optimized tokens' && pct ? ` (−${pct.toFixed(1)}%)` : ''}`, String(name)]
+                  return [`${Number(v ?? 0).toLocaleString()}${name === 'Optimized tokens' && pct ? ` (${formatReductionPct(pct)})` : ''}`, String(name)]
                 }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar dataKey="ctxBase" name="Baseline tokens" fill={SLATE} fillOpacity={0.6} />
