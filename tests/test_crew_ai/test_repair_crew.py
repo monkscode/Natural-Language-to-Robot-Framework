@@ -48,7 +48,8 @@ def _mock_crew_cls():
     return mock_cls, crew, task
 
 
-def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browser.Click"):
+def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browser.Click",
+                library_context=None):
     mock_cls, crew, task = _mock_crew_cls()
     # _monitor and _token_usage are CleanedLLMWrapper/BaseLLM instance
     # attributes (invisible to spec=); RobotAgents shares both between the
@@ -62,7 +63,7 @@ def _run_repair(errors="No keyword with name 'Cilck' found. Did you mean: Browse
     with patch("crewai.Crew", mock_cls), \
          patch("src.backend.crew_ai.agents.get_llm", return_value=mock_llm), \
          patch("src.backend.crew_ai.library_context.get_library_context",
-               return_value=_fake_library_context()):
+               return_value=library_context or _fake_library_context()):
         out, usage, guardrails = ds.repair_robot_code(
             "rid", "*** Settings ***\nLibrary    Browser\n", errors,
             "gemini", "gemini-2.5-flash",
@@ -111,6 +112,22 @@ class TestRepairCrew:
         assert errors in tasks[0].description
         # And the conservative-repair guardrails are present.
         assert "verbatim" in tasks[0].description.lower()
+
+    def test_repair_backstory_ends_with_the_structure_text(self):
+        """The repair call keeps code_assembly_context (owner, 2026-10-16);
+        the fake context has no core_rules, so the base text cannot be built."""
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair()
+        backstory = mock_cls.call_args.kwargs["agents"][0].backstory
+        assert backstory.endswith("\n\nCODE ASSEMBLY CONTEXT")
+
+    def test_repair_backstory_with_real_context_is_structure_not_base_text(self):
+        from src.backend.crew_ai.library_context import BrowserLibraryContext
+
+        ctx = BrowserLibraryContext()
+        out, usage, mock_cls, crew, task, _guardrails = _run_repair(library_context=ctx)
+        backstory = mock_cls.call_args.kwargs["agents"][0].backstory
+        assert backstory.endswith("\n\n" + ctx.code_assembly_context)
+        assert "**BROWSER LIBRARY CORE RULES:**" not in backstory
 
     def test_kickoff_called_once(self):
         out, usage, mock_cls, crew, task, _guardrails = _run_repair()

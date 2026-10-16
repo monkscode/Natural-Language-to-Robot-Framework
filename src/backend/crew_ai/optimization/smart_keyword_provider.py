@@ -5,7 +5,8 @@ This module orchestrates the 4-tier keyword retrieval system:
 0. Surgical Learning Hints (from learning engines — NEW in DAY_06)
 1. Core Rules (always included, ~300 tokens)
 2. Predicted Keywords (from pattern learning) OR Zero-Context (core rules only)
-3. Full Context Fallback (if both fail)
+3. Base-Text Fallback (if both fail): the assembler's base text, or the
+   planner's planning_context
 
 Returns AgentContextResult (NamedTuple) containing both the context string
 and hint metadata for downstream metrics tracking.
@@ -14,6 +15,7 @@ and hint metadata for downstream metrics tracking.
 import logging
 import random
 from typing import Optional, List, Dict, NamedTuple
+from src.backend.crew_ai.library_context import assembler_base_context
 from .pattern_learning import QueryPatternMatcher
 from .keyword_vector_store import KeywordVectorStore
 from .context_pruner import ContextPruner
@@ -129,7 +131,7 @@ class SmartKeywordProvider:
     - Tier 0: Surgical Learning Hints (from past executions)
     - Tier 1: Core Rules (always included)
     - Tier 2: Predicted Keywords OR Zero-Context (core rules only)
-    - Tier 3: Full Context Fallback
+    - Tier 3: Base-Text Fallback (assembler base text / planner planning_context)
     """
 
     # R7 random-holdout: fraction of workflows on which otherwise-available
@@ -538,7 +540,8 @@ class SmartKeywordProvider:
         Used when no predictions are available from pattern learning.
         (This tier used to teach the retired keyword-search tool's ReAct
         call syntax — Task 24R Stage 1 reduced it to the core rules; the
-        static KEYWORD REFERENCE list lives in code_assembly_context.)
+        static KEYWORD REFERENCE list now reaches only the dryrun repair
+        call, through code_assembly_context.)
 
         Args:
             agent_role: "planner" or "assembler"
@@ -546,13 +549,7 @@ class SmartKeywordProvider:
         Returns:
             Formatted context string with core rules
         """
-        core_rules = self._get_core_rules()
-
-        return f"""
-You are an expert Robot Framework developer using {self.library_context.library_name}.
-
-{core_rules}
-"""
+        return assembler_base_context(self.library_context)
 
     def _format_predicted_context(self, predicted_keywords: List[str], agent_role: str, user_query: str = "") -> str:
         """
@@ -570,9 +567,6 @@ You are an expert Robot Framework developer using {self.library_context.library_
         Returns:
             Formatted context string with core rules + predicted keyword docs
         """
-        # Get core rules
-        core_rules = self._get_core_rules()
-
         # Apply context pruning if enabled
         keywords_to_fetch = predicted_keywords[:5]  # Limit to top 5 for efficiency
 
@@ -642,14 +636,10 @@ You are an expert Robot Framework developer using {self.library_context.library_
         # Combine core rules + predicted keywords
         predicted_docs = '\n'.join(keyword_docs) if keyword_docs else 'No predicted keywords available'
 
-        return f"""
-You are an expert Robot Framework developer using {self.library_context.library_name}.
-
-{core_rules}
-
-**RELEVANT KEYWORDS (from similar queries):**
-{predicted_docs}
-"""
+        return (
+            f"{assembler_base_context(self.library_context)}\n"
+            f"**RELEVANT KEYWORDS (from similar queries):**\n{predicted_docs}\n"
+        )
 
     # ------------------------------------------------------------------
     # Main Entry Point
@@ -665,7 +655,7 @@ You are an expert Robot Framework developer using {self.library_context.library_
         0. Surgical Learning Hints (from past executions — NEW)
         1. Core Rules (always)
         2. Predicted Keywords OR Zero-Context (core rules only)
-        3. Full Context Fallback
+        3. Base-Text Fallback (assembler base text / planner planning_context)
 
         Args:
             user_query: User's natural language query
@@ -777,10 +767,10 @@ You are an expert Robot Framework developer using {self.library_context.library_
         if existing_context is None:
             try:
                 existing_context = self._format_zero_context(agent_role)
-            except Exception as e:
-                logger.error(f"Zero-context formatting failed: {e}, falling back to full context")
-                # Tier 3: Full context fallback (baseline behavior)
-                logger.warning("Using full context as fallback - optimization failed")
+            except Exception:
+                logger.exception("Zero-context formatting failed, falling back to the base text")
+                # Tier 3: base-text fallback (baseline behavior)
+                logger.warning("Using the base text as fallback - optimization failed")
                 existing_context = self._get_full_context_fallback(agent_role)
 
         context_parts.append(existing_context)
@@ -797,7 +787,7 @@ You are an expert Robot Framework developer using {self.library_context.library_
 
     def _get_full_context_fallback(self, agent_role: str) -> str:
         """
-        Get full context as fallback when optimization fails.
+        Get the base text as fallback when optimization fails.
 
         This ensures graceful degradation to baseline behavior.
 
@@ -805,9 +795,10 @@ You are an expert Robot Framework developer using {self.library_context.library_
             agent_role: "planner" or "assembler"
 
         Returns:
-            Full context string from library_context
+            For "assembler", assembler_base_context(library_context) (intro +
+            core_rules, no learned context); for "planner", planning_context.
         """
-        logger.info(f"Fallback to full context for {agent_role} agent")
+        logger.info(f"Fallback to the base text for {agent_role} agent")
 
         # NOTE: the "identifier" branch was removed in Task 16 — it was
         # pre-existing dead code (zero callers even before the element
@@ -815,7 +806,7 @@ You are an expert Robot Framework developer using {self.library_context.library_
         if agent_role == "planner":
             return self.library_context.planning_context
         elif agent_role == "assembler":
-            return self.library_context.code_assembly_context
+            return assembler_base_context(self.library_context)
         else:
             # Default to code assembly context
             logger.warning(f"Unknown agent role '{agent_role}', using code_assembly_context")

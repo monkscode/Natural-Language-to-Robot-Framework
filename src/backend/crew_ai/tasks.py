@@ -395,10 +395,13 @@ class RobotTasks:
         # Cache static context - computed once on initialization
         # These values depend on library_context which is set at init time
         # NOTE (Task 24R Stage 1): code-structure and viewport instructions are
-        # NOT cached/shipped here anymore — they live ONCE in the assembler
-        # agent's system prompt (library_context.code_assembly_context via
-        # RobotAgents._get_agent_context); the task description used to re-ship
-        # both verbatim (~1,130 tokens/run, finding F1).
+        # NOT cached/shipped here anymore; the task description used to
+        # re-ship both verbatim (~1,130 tokens/run, finding F1). Neither text
+        # ships in the description: the assembler's system prompt carries the
+        # base text on the main call (+ the learned keyword block when learning
+        # is on) and code_assembly_context on the repair call
+        # (RobotAgents._get_agent_context). The viewport rule reaches the main
+        # call through core_rules; the code structure reaches only the repair call.
         self._cached_keyword_guidelines = self._get_keyword_guidelines()
 
     def _track_guardrail(self, name: str):
@@ -540,8 +543,9 @@ class RobotTasks:
             len(included_blocks), len(_ALL_CONDITIONAL_BLOCKS),
         )
 
-        # Code structure + viewport rules are NOT shipped here — they live
-        # once, in the assembler's system prompt (F1 dedup).
+        # Code structure + viewport rules are NOT shipped here (F1 dedup): the
+        # viewport rule reaches the main call through core_rules in the
+        # assembler's system prompt; the code structure only the repair call.
         rule_sections = "\n".join(
             getattr(PromptComponents, name)
             for name, trigger in _ASSEMBLER_RULE_SECTIONS

@@ -43,11 +43,16 @@ def _provider_mock():
     return provider
 
 
-def _run_crew_optimized(provider):
+def _run_crew_optimized(provider, library_context=None, count_tokens_mock=None,
+                        vector_store_error=None):
     """Call run_crew() on the optimization path with all seams mocked.
 
     Returns (RobotAgents class mock, RobotTasks class mock).
     """
+    if library_context is None:
+        library_context = MagicMock(library_name="Browser")
+    if count_tokens_mock is None:
+        count_tokens_mock = MagicMock(return_value=42)
     agents_mock = MagicMock()
     agents_mock.llm._monitor.get_stats.return_value = {}
     tasks_mock = MagicMock()
@@ -82,15 +87,16 @@ def _run_crew_optimized(provider):
         stack.enter_context(patch("src.backend.crew_ai.crew._rotate_crewai_log"))
         stack.enter_context(patch(
             "src.backend.crew_ai.library_context.get_library_context",
-            return_value=MagicMock(library_name="Browser")))
+            return_value=library_context))
         stack.enter_context(patch("src.backend.core.config.settings",
                                   mock_settings))
         stack.enter_context(patch("src.backend.crew_ai.crew.count_tokens",
-                                  return_value=42))
+                                  count_tokens_mock))
         # Optimization seams — run_crew imports these from the package at
         # call time, so patching the package attributes is sufficient.
         stack.enter_context(patch.object(
-            opt, "get_keyword_vector_store", return_value=MagicMock()))
+            opt, "get_keyword_vector_store", return_value=MagicMock(),
+            side_effect=vector_store_error))
         stack.enter_context(patch.object(opt, "QueryPatternMatcher",
                                          MagicMock()))
         stack.enter_context(patch.object(opt, "SmartKeywordProvider",
@@ -139,3 +145,30 @@ class TestPlannerHintsOnlyWiring:
         _, robot_tasks_cls = _run_crew_optimized(provider)
         hint_context = robot_tasks_cls.call_args.kwargs["hint_context"]
         assert hint_context["planner"] == "PLANNER_HINT"
+
+
+class TestSetupFailureHandOff:
+
+    def test_setup_failure_hands_agents_no_learned_context(self):
+        """A learning-setup failure (crew.py's `except`) hands the agents no
+        learned context, so they build the base text, never the structure
+        text (Ruling R11 closed, owner 2026-10-16)."""
+        robot_agents_cls, _ = _run_crew_optimized(
+            _provider_mock(), vector_store_error=RuntimeError("pgvector down"))
+        assert robot_agents_cls.call_args.kwargs["assembler_context"] is None
+
+
+class TestReductionBaseline:
+
+    def test_reduction_baseline_is_the_base_text(self):
+        """The context-reduction baseline is the text the assembler gets
+        without learned context, not the structure text (owner, 2026-10-16)."""
+        from src.backend.crew_ai.library_context import assembler_base_context
+
+        library_context = MagicMock(library_name="Browser", core_rules="RULES")
+        count_tokens_mock = MagicMock(return_value=42)
+
+        _run_crew_optimized(_provider_mock(), library_context, count_tokens_mock)
+
+        assert count_tokens_mock.call_args_list[0].args[0] == \
+            assembler_base_context(library_context)

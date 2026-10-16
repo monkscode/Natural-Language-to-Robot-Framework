@@ -14,6 +14,7 @@ import {
   Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { LEARNED_CONTEXT_BAR, formatContextTooltip } from './format'
 
 export interface MetricsRow {
   workflow_id: string
@@ -76,7 +77,7 @@ const PERF_CHARTS = [
   { key: 'scatter', label: 'Time vs Cost Scatter' },
   { key: 'fallback-depth', label: 'Locator Strategy Distribution' },
   { key: 'llm-cleaning-rate', label: 'LLM Cleaning Rate' },
-  { key: 'context-reduction', label: 'Context Reduction (Optimization)' },
+  { key: 'context-reduction', label: 'Context Change (Learning)' },
 ] as const
 
 const COST_CHARTS = [
@@ -290,13 +291,10 @@ export function PerformanceChartCard({ rows }: { rows: MetricsRow[] }) {
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                 <XAxis dataKey="when" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
                 <YAxis tick={{ fontSize: 11 }} label={{ value: 'Tokens', angle: -90, position: 'insideLeft', fontSize: 11 }} />
-                <Tooltip formatter={(v, name, item) => {
-                  const pct = (item as { payload?: { ctxPct?: number } } | undefined)?.payload?.ctxPct
-                  return [`${Number(v ?? 0).toLocaleString()}${name === 'Optimized tokens' && pct ? ` (−${pct.toFixed(1)}%)` : ''}`, String(name)]
-                }} />
+                <Tooltip formatter={(v, name, item) => [formatContextTooltip(v, name, (item as { payload?: { ctxPct?: number } } | undefined)?.payload?.ctxPct), String(name)]} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Bar dataKey="ctxBase" name="Baseline tokens" fill={SLATE} fillOpacity={0.6} />
-                <Bar dataKey="ctxOpt" name="Optimized tokens" fill={GREEN} fillOpacity={0.7} />
+                <Bar dataKey="ctxOpt" name={LEARNED_CONTEXT_BAR} fill={GREEN} fillOpacity={0.7} />
               </BarChart>
             ) : (
               <ScatterChart>

@@ -91,8 +91,8 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
 
     with ExitStack() as stack:
         mock_crew_cls = stack.enter_context(patch("src.backend.crew_ai.crew.Crew"))
-        stack.enter_context(patch("src.backend.crew_ai.crew.RobotAgents",
-                                  return_value=agents_mock))
+        mock_agents_cls = stack.enter_context(patch(
+            "src.backend.crew_ai.crew.RobotAgents", return_value=agents_mock))
         stack.enter_context(patch("src.backend.crew_ai.crew.RobotTasks",
                                   return_value=tasks_mock))
         mock_identify = stack.enter_context(
@@ -122,6 +122,7 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
         )
 
     mocks = {
+        "agents_cls": mock_agents_cls,
         "crew_cls": mock_crew_cls,
         "agents": agents_mock,
         "tasks": tasks_mock,
@@ -198,6 +199,12 @@ class TestRunCrewReturnShape:
         agents_mock = _make_agents_mock()
         out, _ = _run_crew_with_mocks(agents_mock=agents_mock)
         assert out[4] is agents_mock.llm._monitor
+
+    def test_agents_get_no_assembler_context_when_optimization_disabled(self):
+        """Learning off: RobotAgents is built with assembler_context=None, so
+        the agent falls back to assembler_base_context itself."""
+        _, mocks = _run_crew_with_mocks(optimization_enabled=False)
+        assert mocks["agents_cls"].call_args.kwargs["assembler_context"] is None
 
     def test_two_crews_one_kickoff_each(self):
         """Task 16: planner crew + assembler crew, each kicked off once."""

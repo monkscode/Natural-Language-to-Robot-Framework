@@ -10,6 +10,7 @@ from src.backend.core.config import settings
 
 # Import LLM factory function
 from .cleaned_llm_wrapper import get_llm
+from .library_context import assembler_base_context
 from .tasks import AssemblyOutput, PlanOutput
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,10 @@ class RobotAgents:
             model_provider: "local", "gemini", or "vertex"
             model_name: Model identifier
             library_context: LibraryContext instance (optional, for dynamic keyword knowledge)
-            assembler_context: Optimized context for Code Assembler (optional).
+            assembler_context: Context for the Code Assembler (optional):
+                the learned context, or the repair call's
+                code_assembly_context. None or empty → the base text
+                (assembler_base_context).
                 The planner has NO context slot by design — it runs on the
                 static minimal planning context (see step_planner_agent);
                 its learning hints arrive via the task description instead
@@ -75,8 +79,9 @@ class RobotAgents:
         Unified context retrieval with consistent priority chain.
 
         Priority:
-        1. Optimized context (from SmartKeywordProvider - pattern learning/zero-context+tool)
-        2. Library context (static context from library_context)
+        1. The context passed in (SmartKeywordProvider's learned context, or
+           the repair call's code_assembly_context)
+        2. The base text (assembler_base_context of library_context)
         3. Empty string (graceful degradation)
 
         Args:
@@ -91,24 +96,24 @@ class RobotAgents:
             "assembler": self.assembler_context,
         }
 
-        # Map agent type to library context property
+        # Map agent type to the base-text builder
         library_context_map = {
-            "assembler": "code_assembly_context",
+            "assembler": assembler_base_context,
         }
         
         optimized_context = optimized_context_map.get(agent_type)
         
-        # Priority 1: Use optimized context if available
+        # Priority 1: Use the context passed in if available
         if optimized_context:
-            logger.info(f"🎯 {agent_type.capitalize()} using optimized context")
+            logger.info(f"🎯 {agent_type.capitalize()} using the context passed in")
             return f"\n\n{optimized_context}"
         
-        # Priority 2: Fall back to library context
+        # Priority 2: Fall back to the base text
         if self.library_context:
-            library_property = library_context_map.get(agent_type)
-            if library_property:
-                static_context = getattr(self.library_context, library_property)
-                logger.info(f"📚 {agent_type.capitalize()} using static library context (optimization not available)")
+            build_base = library_context_map.get(agent_type)
+            if build_base:
+                static_context = build_base(self.library_context)
+                logger.info(f"📚 {agent_type.capitalize()} using the base text (no learned context)")
                 return f"\n\n{static_context}"
         
         # Priority 3: Graceful degradation

@@ -200,7 +200,10 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     """
     # Load library context based on configuration
     from src.backend.core.config import settings
-    from src.backend.crew_ai.library_context import get_library_context
+    from src.backend.crew_ai.library_context import (
+        assembler_base_context,
+        get_library_context,
+    )
 
     logger.info(f"🔧 Loading library context for: {settings.ROBOT_LIBRARY}")
     library_context = get_library_context(settings.ROBOT_LIBRARY)
@@ -330,8 +333,9 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 org_id=org_id,
             )
             
-            # Calculate baseline context size (full context)
-            baseline_context = library_context.code_assembly_context
+            # Baseline = the text the assembler gets without learned context
+            # (owner, 2026-10-16).
+            baseline_context = assembler_base_context(library_context)
             baseline_context_tokens = count_tokens(baseline_context, token_model)
             
             # Optimized context for the assembler; hints for BOTH agents.
@@ -422,7 +426,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
-            logger.warning("⚠️ Falling back to baseline behavior (full context)")
+            logger.warning("⚠️ Falling back to baseline behavior (base library text, no learned context)")
             assembler_context = None
             smart_provider = None
             optimization_metrics = None

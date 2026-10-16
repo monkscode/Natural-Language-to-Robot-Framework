@@ -163,6 +163,20 @@ describe('MetricsCharts — the cards themselves', () => {
     expect(screen.getByRole('option', { name: 'Cost Breakdown (Pie)' })).toBeInTheDocument()
   })
 
+  it('names the context chart for what it shows, not for a reduction', () => {
+    // A learned run's context is usually LARGER than the base text, so
+    // "Reduction" / "Optimized" would be wrong for most of its bars.
+    render(<PerformanceChartCard rows={[row({
+      context_reduction: { baseline_tokens: 541, optimized_tokens: 1267, reduction_percentage: -134.2 },
+    })]} />)
+
+    expect(screen.getByRole('option', { name: 'Context Change (Learning)' })).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'context-reduction' } })
+
+    expect(screen.getByText('With learned context')).toBeInTheDocument()
+    expect(screen.queryByText('Optimized tokens')).toBeNull()
+  })
+
   it('starts each card on its first option', () => {
     render(<PerformanceChartCard rows={[row()]} />)
 

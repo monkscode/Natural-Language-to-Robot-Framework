@@ -484,9 +484,11 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
 
     # FRESH instances — own CleanedLLMWrapper + monitor, so the MAIN crew's
     # calculate_usage_metrics()/llm_monitor never see these repair calls (no
-    # double-count; §5). The assembler relies on library_context for keyword
-    # knowledge (§8.2).
-    agents = RobotAgents(model_provider, model_name, library_context)
+    # double-count; §5). The repair call keeps the code-structure text
+    # (code_assembly_context) on both learning paths (owner, 2026-10-16);
+    # the main call gets the base text instead.
+    agents = RobotAgents(model_provider, model_name, library_context,
+                         assembler_context=library_context.code_assembly_context)
     tasks = RobotTasks(library_context)
     # run_id == workflow_id. These calls run after the workflow OTel span has
     # closed, so metadata is the ONLY thing that can attribute them.
