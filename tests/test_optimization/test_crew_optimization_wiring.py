@@ -43,7 +43,8 @@ def _provider_mock():
     return provider
 
 
-def _run_crew_optimized(provider, library_context=None, count_tokens_mock=None):
+def _run_crew_optimized(provider, library_context=None, count_tokens_mock=None,
+                        vector_store_error=None):
     """Call run_crew() on the optimization path with all seams mocked.
 
     Returns (RobotAgents class mock, RobotTasks class mock).
@@ -94,7 +95,8 @@ def _run_crew_optimized(provider, library_context=None, count_tokens_mock=None):
         # Optimization seams — run_crew imports these from the package at
         # call time, so patching the package attributes is sufficient.
         stack.enter_context(patch.object(
-            opt, "get_keyword_vector_store", return_value=MagicMock()))
+            opt, "get_keyword_vector_store", return_value=MagicMock(),
+            side_effect=vector_store_error))
         stack.enter_context(patch.object(opt, "QueryPatternMatcher",
                                          MagicMock()))
         stack.enter_context(patch.object(opt, "SmartKeywordProvider",
@@ -143,6 +145,17 @@ class TestPlannerHintsOnlyWiring:
         _, robot_tasks_cls = _run_crew_optimized(provider)
         hint_context = robot_tasks_cls.call_args.kwargs["hint_context"]
         assert hint_context["planner"] == "PLANNER_HINT"
+
+
+class TestSetupFailureHandOff:
+
+    def test_setup_failure_hands_agents_no_learned_context(self):
+        """A learning-setup failure (crew.py's `except`) hands the agents no
+        learned context, so they build the base text, never the structure
+        text (Ruling R11 closed, owner 2026-10-16)."""
+        robot_agents_cls, _ = _run_crew_optimized(
+            _provider_mock(), vector_store_error=RuntimeError("pgvector down"))
+        assert robot_agents_cls.call_args.kwargs["assembler_context"] is None
 
 
 class TestReductionBaseline:

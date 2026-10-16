@@ -205,6 +205,8 @@ describe('MetricsPage — the recent-runs table', () => {
     })] })
     fireEvent.click(screen.getByText('https://flipkart.com'))
     expect(screen.getByText('541 → 1,267 (+134.2%)')).toBeInTheDocument()
+    expect(screen.getByText('Context change')).toBeInTheDocument()
+    expect(screen.queryByText('Context reduction')).toBeNull()
 
     cleanup()
     setup({ recent: [metricsRow({

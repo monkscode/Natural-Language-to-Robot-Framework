@@ -763,6 +763,20 @@ class TestRegression:
             "CORE RULES: Use Browser library keywords.\n"
         )
 
+    def test_zero_context_failure_logs_the_traceback(self, caplog):
+        """The failed zero-context formatting is logged with its traceback."""
+        p = create_provider()
+        p._format_zero_context = Mock(side_effect=RuntimeError("format failed"))
+        with caplog.at_level("ERROR"):
+            p.get_agent_context("find element", "assembler")
+        records = [
+            r for r in caplog.records
+            if r.getMessage() == "Zero-context formatting failed, falling back to the base text"
+        ]
+        assert len(records) == 1
+        assert records[0].levelname == "ERROR"
+        assert records[0].exc_info is not None
+
     def test_full_context_fallback_unknown_role(self):
         """Unknown roles fall back to code_assembly_context with a warning
         (the 'identifier' branch was removed in Task 16 — it was dead code).

@@ -767,8 +767,8 @@ class SmartKeywordProvider:
         if existing_context is None:
             try:
                 existing_context = self._format_zero_context(agent_role)
-            except Exception as e:
-                logger.error(f"Zero-context formatting failed: {e}, falling back to the base text")
+            except Exception:
+                logger.exception("Zero-context formatting failed, falling back to the base text")
                 # Tier 3: base-text fallback (baseline behavior)
                 logger.warning("Using the base text as fallback - optimization failed")
                 existing_context = self._get_full_context_fallback(agent_role)

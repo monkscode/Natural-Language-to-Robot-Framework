@@ -251,7 +251,7 @@ export default function MetricsPage() {
                                     : 'N/A'}
                                 />
                                 <DetailCell
-                                  label="Context reduction"
+                                  label="Context change"
                                   value={r.context_reduction?.baseline_tokens != null
                                     ? `${r.context_reduction.baseline_tokens.toLocaleString()} → ${(r.context_reduction.optimized_tokens ?? 0).toLocaleString()} (${formatReductionPct(r.context_reduction.reduction_percentage ?? 0)})`
                                     : 'N/A'}
