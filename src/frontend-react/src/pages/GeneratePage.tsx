@@ -14,7 +14,7 @@ import { ALREADY_RECORDED_HEADING, SWITCHED_OFF_MARKER } from '@/components/Reco
 /* ── Types ── */
 type Phase = 'idle' | 'generating' | 'executing'
 type Outcome = 'pass' | 'fail' | null
-interface LogEntry { kind: 'info' | 'success' | 'error'; ts: string; msg: string }
+interface LogEntry { kind: 'info' | 'success' | 'error' | 'warning'; ts: string; msg: string }
 
 const PLACEHOLDER = `Examples:
 
@@ -86,6 +86,7 @@ const LOG_BORDER_CLASS: Record<LogEntry['kind'], string> = {
   success: 'border-l-green-500',
   error: 'border-l-destructive',
   info: 'border-l-blue-400',
+  warning: 'border-l-amber-500',
 }
 
 /* ── Collapsible logs card with an indeterminate bar while running ── */
@@ -178,7 +179,7 @@ function PlanActivity({ progress }: Readonly<{ progress: number }>) {
 }
 
 /* Locate: element → locator pairs being captured from the live page */
-function LocateActivity({ progress, elementCount }: Readonly<{ progress: number; elementCount: number | null }>) {
+function LocateActivity({ progress }: Readonly<{ progress: number }>) {
   const widths: [string, string][] = [['w-24', 'w-48'], ['w-28', 'w-40'], ['w-20', 'w-56']]
   return (
     <div>
@@ -190,9 +191,6 @@ function LocateActivity({ progress, elementCount }: Readonly<{ progress: number;
           <span className={cn('ghost-bar relative h-3 overflow-hidden rounded-sm bg-[#21262d]', widths[i][1])} />
         </div>
       ))}
-      {elementCount != null && (
-        <p className="ghost-line mt-1 text-[11px] text-[#484f58]">{elementCount} elements found on the page</p>
-      )}
     </div>
   )
 }
@@ -260,10 +258,9 @@ const STAGE_LABEL_CLASSES: Record<StageState, string> = {
 }
 
 function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: number; stage: string; logs: LogEntry[] }>) {
-  // The element-scan SSE event carries the only real artifact count we get
-  // ("📍 Found N elements on the page") — surface it in the Locate block.
-  const elMatch = logs.map(l => /Found (\d+) elements/.exec(l.msg)).find(Boolean)
-  const elementCount = elMatch ? Number(elMatch[1]) : null
+  // The 60% line is the only one sent on every path (the 55% one is skipped
+  // with no web address); "Identified X of Y" means something was not found.
+  const partial = logs.map(l => /Identified (\d+) of (\d+) elements/.exec(l.msg)).find(Boolean)
   return (
     <div className="flex min-h-[300px] flex-1 flex-col overflow-hidden rounded-lg border border-border bg-[#0d1117] shadow-sm">
       {/* Stage rail + live status line */}
@@ -316,14 +313,21 @@ function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: numb
           const done = progress >= nextAt
           const active = !done && progress >= s.at
           if (!done && !active) return null
+          if (done && s.key === 'locate' && partial) {
+            return (
+              <div key={s.key} className="ghost-line flex items-center gap-2 text-xs">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                <span className="text-amber-400">
+                  {`Locators found for ${partial[1]} of ${partial[2]} element${partial[2] === '1' ? '' : 's'}`}
+                </span>
+              </div>
+            )
+          }
           if (done) {
             return (
               <div key={s.key} className="ghost-line flex items-center gap-2 text-xs">
                 <Check className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                <span className="text-[#8b949e]">
-                  {s.doneLabel}
-                  {s.key === 'locate' && elementCount != null ? ` — ${elementCount} elements` : ''}
-                </span>
+                <span className="text-[#8b949e]">{s.doneLabel}</span>
               </div>
             )
           }
@@ -334,7 +338,7 @@ function GenerationPipeline({ progress, stage, logs }: Readonly<{ progress: numb
                 <Icon className="h-3.5 w-3.5 shrink-0 text-sky-300" /> {s.title}
               </div>
               {s.key === 'plan' && <PlanActivity progress={progress} />}
-              {s.key === 'locate' && <LocateActivity progress={progress} elementCount={elementCount} />}
+              {s.key === 'locate' && <LocateActivity progress={progress} />}
               {s.key === 'assemble' && <AssembleActivity />}
               {s.key === 'verify' && <VerifyActivity />}
             </div>
@@ -1034,9 +1038,16 @@ function generationCompleteLogs(data: {
   dryrun_status?: unknown
   dryrun_message?: unknown
   dryrun_errors?: unknown
+  not_found_lines?: unknown
 }): { kind: LogEntry['kind']; msg: string }[] {
+  // Backend-built sentences for elements not found; absent when all were found.
+  const notFound = Array.isArray(data.not_found_lines) && data.not_found_lines.length > 0
+    ? data.not_found_lines.map(msg => ({ kind: 'warning' as const, msg: String(msg) }))
+    : []
   if (data.dryrun_status !== 'failed' && data.dryrun_status !== 'unverified') {
-    return [{ kind: 'success', msg: `Generated test.robot (${String(data.robot_code).split('\n').length} lines)` }]
+    return notFound.length
+      ? notFound
+      : [{ kind: 'success', msg: `Generated test.robot (${String(data.robot_code).split('\n').length} lines)` }]
   }
   const lines: { kind: LogEntry['kind']; msg: string }[] = [{
     kind: 'error',
@@ -1046,7 +1057,7 @@ function generationCompleteLogs(data: {
   }]
   if (data.dryrun_message) lines.push({ kind: 'error', msg: String(data.dryrun_message) })
   if (data.dryrun_errors) lines.push({ kind: 'error', msg: String(data.dryrun_errors) })
-  return lines
+  return [...lines, ...notFound]
 }
 
 /* ── The single adaptive action button: code present → Run Test; otherwise
@@ -1157,6 +1168,7 @@ export default function GeneratePage() {
   const [logUrl, setLogUrl]     = useState<string | null>(null)
   const [summary, setSummary]   = useState<RobotSummary | null>(null)
   const [failureSentence, setFailureSentence] = useState<string | null>(null)
+  const [notFoundNotice, setNotFoundNotice] = useState<string | null>(null)
   const [error, setError]   = useState('')
   const [copied, setCopied] = useState(false)
 
@@ -1202,7 +1214,7 @@ export default function GeneratePage() {
 
   async function handleGenerate() {
     if (!query.trim() || busy) return
-    setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setCode('')
+    setError(''); setGenLogs([]); setExecLogs([]); setOutcome(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setNotFoundNotice(null); setCode('')
     setGenProgress(0); setGenStage('Starting test generation…')
     workflowId.current = null
     generatedQuery.current = ''
@@ -1226,6 +1238,7 @@ export default function GeneratePage() {
           setCode(data.robot_code)
           generatedQuery.current = query
           workflowId.current = data.workflow_id || null
+          if (typeof data.not_found_notice === 'string') setNotFoundNotice(data.not_found_notice)
           generationCompleteLogs(data).forEach(line => addGen(line.kind, line.msg))
         } else if (data.status === 'error') {
           addGen('error', data.message || 'Generation failed')
@@ -1314,7 +1327,7 @@ export default function GeneratePage() {
     if (code.trim() && !window.confirm('This will clear your current test. Start a new test?')) return
     setQuery(''); setCode(''); setPhase('idle')
     setGenProgress(0); setGenStage('')
-    setGenLogs([]); setExecLogs([]); setOutcome(null); setExecSecs(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setError('')
+    setGenLogs([]); setExecLogs([]); setOutcome(null); setExecSecs(null); setReportUrl(null); setLogUrl(null); setSummary(null); setFailureSentence(null); setNotFoundNotice(null); setError('')
     workflowId.current = null; feedbackId.current = null; generatedQuery.current = ''; execStart.current = null
   }
 
@@ -1366,7 +1379,9 @@ export default function GeneratePage() {
           <CardHeader className="flex-row items-start justify-between space-y-0 pb-3">
             <div>
               <CardTitle className="text-sm">Generated Code</CardTitle>
-              <CardDescription className="text-xs">Editable — tweak it or paste your own, then run</CardDescription>
+              <CardDescription className={cn('text-xs', notFoundNotice && 'text-amber-700 dark:text-amber-400')}>
+                {notFoundNotice ?? 'Editable — tweak it or paste your own, then run'}
+              </CardDescription>
             </div>
             <CodePanelControls
               phase={phase}
@@ -1397,6 +1412,7 @@ export default function GeneratePage() {
                     if (!v.trim()) {
                       workflowId.current = null
                       generatedQuery.current = ''
+                      setNotFoundNotice(null)
                     }
                   }}
                   disabled={busy}

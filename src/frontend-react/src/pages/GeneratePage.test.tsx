@@ -175,9 +175,11 @@ describe('GeneratePage — the generation pipeline rail', () => {
     expect(await screen.findByText(expectedTitle)).toBeInTheDocument()
   })
 
-  it('surfaces the element count once the locate stage reports one', async () => {
+  it('locate turns amber from the 60% line', async () => {
+    // No 55% line here: a test with no web address never sends one.
     mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
-      onEvent({ status: 'running', progress: 30, message: 'Found 12 elements on the page' })
+      onEvent({ status: 'running', progress: 60, message: '⚠️ Identified 0 of 1 elements' })
+      onEvent({ status: 'running', progress: 90, message: 'Dry-run verification' })
       return new Promise(() => {})
     })
     renderPage()
@@ -185,7 +187,25 @@ describe('GeneratePage — the generation pipeline rail', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
 
-    expect(await screen.findByText('12 elements found on the page')).toBeInTheDocument()
+    const line = await screen.findByText('Locators found for 0 of 1 element')
+    expect(line.parentElement!.querySelector('svg')).toHaveClass('lucide-triangle-alert')
+    expect(screen.queryByText('Element locators captured')).toBeNull()
+  })
+
+  it('locate stays green when all found', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 60, message: '✅ All page elements identified' })
+      onEvent({ status: 'running', progress: 90, message: 'Dry-run verification' })
+      return new Promise(() => {})
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    const line = await screen.findByText('Element locators captured')
+    expect(line.parentElement!.querySelector('svg')).toHaveClass('lucide-check')
+    expect(screen.queryByText(/Locators found for/)).toBeNull()
   })
 
   it('marks earlier stages done, with their own summaries, once progress passes them', async () => {
@@ -282,6 +302,112 @@ describe('GeneratePage — a completed generation', () => {
     expect(screen.getByText('Keyword not found: Click Buttonn')).toBeInTheDocument()
     // Error-kind log lines get their own left-border color too.
     expect(screen.getByText('Keyword not found: Click Buttonn').parentElement).toHaveClass('border-l-destructive')
+  })
+
+  describe('with elements not found', () => {
+    const NOT_FOUND_LINES = [
+      'Delivered — 1 element was not found while this test was generated',
+      '“main heading on the page” — not found on the page, so the test has no working locator for it and will most likely fail at that step. If the web address is right and the element is on the page, describe it more specifically and generate again.',
+      'You can still edit the code or run the test.',
+    ]
+    const NOTICE = '1 element was not found while generating — details in Generation Logs below'
+    const DEFAULT_SUBTITLE = 'Editable — tweak it or paste your own, then run'
+
+    function streamComplete(extra: Record<string, unknown> = {}) {
+      mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+        onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1', ...extra })
+      })
+    }
+
+    async function generateNotFound() {
+      streamComplete({ not_found_lines: NOT_FOUND_LINES, not_found_notice: NOTICE })
+      renderPage()
+      typeQuery()
+      fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+      await screen.findByRole('button', { name: /^Run Test/ })
+    }
+
+    it('not-found lines replace the green line', async () => {
+      await generateNotFound()
+
+      for (const line of NOT_FOUND_LINES) {
+        expect(screen.getByText(line).parentElement).toHaveClass('border-l-amber-500')
+      }
+      expect(screen.queryByText(/Generated test\.robot/)).toBeNull()
+    })
+
+    it('failed dryrun, then the not-found lines', async () => {
+      streamComplete({
+        dryrun_status: 'failed', dryrun_message: 'Keyword not found: Click Buttonn',
+        not_found_lines: NOT_FOUND_LINES, not_found_notice: NOTICE,
+      })
+      renderPage()
+      typeQuery()
+      fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+      const error = await screen.findByText('Keyword not found: Click Buttonn')
+      const firstAmber = screen.getByText(NOT_FOUND_LINES[0])
+      expect(error.compareDocumentPosition(firstAmber) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+
+    it('all found is unchanged', async () => {
+      streamComplete()
+      renderPage()
+      typeQuery()
+      fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+      const line = await screen.findByText('Generated test.robot (6 lines)')
+      expect(line.parentElement).toHaveClass('border-l-green-500')
+      expect(screen.getByText(DEFAULT_SUBTITLE)).not.toHaveClass('text-amber-700')
+    })
+
+    it('subtitle shows the notice in amber', async () => {
+      await generateNotFound()
+
+      expect(screen.getByText(NOTICE)).toHaveClass('text-amber-700', 'dark:text-amber-400')
+      expect(screen.queryByText(DEFAULT_SUBTITLE)).toBeNull()
+    })
+
+    it('subtitle resets on new generation, New Test and clear', async () => {
+      // clear: emptying the editor
+      await generateNotFound()
+      pasteCode('')
+      expect(screen.getByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
+      expect(screen.queryByText(NOTICE)).toBeNull()
+
+      // new generation: Regenerate clears it as soon as the stream starts
+      pasteCode()
+      mockStreamSSE.mockImplementation(() => new Promise(() => {}))
+      fireEvent.click(screen.getByRole('button', { name: /Regenerate/ }))
+      expect(await screen.findByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
+    })
+
+    it('subtitle resets on New Test', async () => {
+      await generateNotFound()
+      vi.stubGlobal('confirm', vi.fn(() => true))
+
+      fireEvent.click(screen.getByRole('button', { name: /New Test/ }))
+
+      expect(screen.getByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
+      expect(screen.queryByText(NOTICE)).toBeNull()
+    })
+
+    it('subtitle survives a partial edit', async () => {
+      await generateNotFound()
+      pasteCode(CODE + '\n    Close Browser')
+      expect(screen.getByText(NOTICE)).toBeInTheDocument()
+    })
+
+    it('non-array lines are ignored', async () => {
+      streamComplete({ not_found_lines: 'x', not_found_notice: 42 })
+      renderPage()
+      typeQuery()
+      fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+      const line = await screen.findByText('Generated test.robot (6 lines)')
+      expect(line.parentElement).toHaveClass('border-l-green-500')
+      expect(screen.getByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
+    })
   })
 
   it('shows the SSE error message and re-enables the form on status: error', async () => {
