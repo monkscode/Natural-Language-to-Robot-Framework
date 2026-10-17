@@ -805,8 +805,103 @@ def _stage_summary_message(found: int, total: int) -> str:
         return "✅ No page elements needed for this test"
     if found == total:
         return "✅ All page elements identified"
-    return (f"⚠️ Identified {found} of {total} elements — "
-            "placeholders will mark the rest")
+    return f"⚠️ Identified {found} of {total} elements"
+
+
+def not_found_entries(
+    steps: list[dict[str, Any]],
+    step_element_ids: dict[int, str],
+    locator_mapping: dict[str, dict[str, Any]],
+    url: str | None,
+) -> list[dict[str, Any]]:
+    """The locator steps that end up without a working locator, and why, in plan order.
+
+    One entry per element (folded steps share one) and one per step that names no
+    element. The description is the user's own words (the first step's), never the
+    form rewrite build_elements keys on. A step's value is never recorded: it may
+    be a password.
+    """
+    entries: list[dict[str, Any]] = []
+    listed: set[str] = set()
+    for index, raw_step in enumerate(steps):
+        step = _as_dict(raw_step)
+        if not step_needs_locator(step):
+            continue
+        element_id = step_element_ids.get(index)
+        if element_id is None:
+            entries.append({"cause": "no_description", "keyword": step.get("keyword")})
+            continue
+        if element_id in listed:
+            continue
+        if not url:  # the same test identify_elements applies before calling the tool
+            cause = "no_url"
+        elif element_id not in locator_mapping:
+            # A tool error, a raise and a crash-shaped "success" all land here; a
+            # normal run backfills a record for every element it was given.
+            cause = "not_checked"
+        elif not _entry_found(locator_mapping[element_id]):
+            cause = "not_found"
+        else:
+            continue
+        listed.add(element_id)
+        entries.append({"cause": cause, "description": (step.get("element_description") or "").strip()})
+    return entries
+
+
+def not_found_lines(entries: list[dict[str, Any]]) -> list[str]:
+    """The Generation Logs copy: title, one line per cause present, footer. [] for no entries."""
+    if not entries:
+        return []
+    n = len(entries)
+    lines = [
+        "Delivered — 1 element was not found while this test was generated" if n == 1
+        else f"Delivered — {n} elements were not found while this test was generated"
+    ]
+
+    def of(cause: str) -> list[dict[str, Any]]:
+        return [e for e in entries if e["cause"] == cause]
+
+    def quoted(group: list[dict[str, Any]]) -> str:
+        return ", ".join(f"“{e['description']}”" for e in group)
+
+    if group := of("not_found"):
+        if len(group) == 1:
+            lines.append(
+                f"{quoted(group)} — not found on the page, so the test has no working locator for it "
+                "and will most likely fail at that step. If the web address is right and the element "
+                "is on the page, describe it more specifically and generate again.")
+        else:
+            lines.append(
+                f"{quoted(group)} — not found on the page, so the test has no working locator for them "
+                "and will most likely fail at those steps. If the web address is right and the elements "
+                "are on the page, describe them more specifically and generate again.")
+    if group := of("not_checked"):
+        pronoun = "it" if len(group) == 1 else "them"
+        lines.append(
+            f"{quoted(group)} — the page could not be checked just now, so no locator was found for "
+            f"{pronoun}. Generate the test again in a minute.")
+    if group := of("no_url"):
+        lines.append(
+            f"{quoted(group)} — not checked: your description has no web address, so no page was "
+            "opened. Add the page's address (for example https://example.com) and generate again.")
+    if group := of("no_description"):
+        if len(group) == 1:
+            lines.append(
+                f"A “{group[0]['keyword']}” step does not name an element. Describe the element in "
+                "your test description and generate again.")
+        else:
+            keywords = ", ".join(f"“{k}”" for k in dict.fromkeys(e["keyword"] for e in group))
+            lines.append(
+                f"{len(group)} steps do not name an element ({keywords}). Describe each element in "
+                "your test description and generate again.")
+    lines.append("You can still edit the code or run the test.")
+    return lines
+
+
+def not_found_notice(count: int) -> str:
+    """The Generated Code card's subtitle."""
+    noun = "1 element was" if count == 1 else f"{count} elements were"
+    return f"{noun} not found while generating — details in Generation Logs below"
 
 
 def identify_elements(
@@ -871,9 +966,13 @@ def identify_elements(
         notify(55, f"📍 Found {found} of {len(elements)} elements on the page")
 
     merged = merge_locators(dict_steps, step_element_ids, locator_mapping)
+    # Kept beside the steps like change_waits: the assembler never sees it. A locator
+    # step that names no element has no element, so it is added to the count here.
+    not_found = not_found_entries(dict_steps, step_element_ids, locator_mapping, url)
+    no_description = sum(1 for e in not_found if e["cause"] == "no_description")
     # Progress still reaches 60 either way (forward-only ladder) — only the
     # completion text differs on partial/failed identification.
-    notify(60, _stage_summary_message(found, len(elements)))
+    notify(60, _stage_summary_message(found, len(elements) + no_description))
 
     # F1: browser-service's marks are external input — a malformed one costs
     # the wait, never the generation.
@@ -891,4 +990,5 @@ def identify_elements(
             "not_found": len(elements) - found,
         },
         "change_waits": change_waits,
+        "not_found": not_found,
     }
