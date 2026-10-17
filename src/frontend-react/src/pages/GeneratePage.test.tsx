@@ -368,18 +368,26 @@ describe('GeneratePage — a completed generation', () => {
       expect(screen.queryByText(DEFAULT_SUBTITLE)).toBeNull()
     })
 
-    it('subtitle resets on new generation, New Test and clear', async () => {
-      // clear: emptying the editor
+    it('subtitle resets on new generation', async () => {
       await generateNotFound()
-      pasteCode('')
+      // Regenerate WITHOUT emptying the editor; the stream never resolves, so
+      // only handleGenerate's own reset can have cleared the notice.
+      mockStreamSSE.mockImplementation(() => new Promise(() => {}))
+
+      fireEvent.click(screen.getByRole('button', { name: /Regenerate/ }))
+
+      expect(await screen.findByRole('button', { name: /Generating/ })).toBeDisabled()
       expect(screen.getByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
       expect(screen.queryByText(NOTICE)).toBeNull()
+    })
 
-      // new generation: Regenerate clears it as soon as the stream starts
-      pasteCode()
-      mockStreamSSE.mockImplementation(() => new Promise(() => {}))
-      fireEvent.click(screen.getByRole('button', { name: /Regenerate/ }))
-      expect(await screen.findByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
+    it('subtitle resets when the editor is emptied', async () => {
+      await generateNotFound()
+
+      pasteCode('')
+
+      expect(screen.getByText(DEFAULT_SUBTITLE)).toBeInTheDocument()
+      expect(screen.queryByText(NOTICE)).toBeNull()
     })
 
     it('subtitle resets on New Test', async () => {
