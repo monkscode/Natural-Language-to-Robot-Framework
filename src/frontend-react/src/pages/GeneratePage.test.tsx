@@ -192,6 +192,21 @@ describe('GeneratePage — the generation pipeline rail', () => {
     expect(screen.queryByText('Element locators captured')).toBeNull()
   })
 
+  it('locate shows the plural count', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', progress: 60, message: '⚠️ Identified 2 of 3 elements' })
+      onEvent({ status: 'running', progress: 90, message: 'Dry-run verification' })
+      return new Promise(() => {})
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    expect(await screen.findByText('Locators found for 2 of 3 elements')).toBeInTheDocument()
+    expect(screen.queryByText('Element locators captured')).toBeNull()
+  })
+
   it('locate stays green when all found', async () => {
     mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
       onEvent({ status: 'running', progress: 60, message: '✅ All page elements identified' })

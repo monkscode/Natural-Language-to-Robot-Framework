@@ -1255,6 +1255,10 @@ class TestNotFound:
         result, _, _ = self._run([OPEN, self.SEARCH], self._ok({"elem_1": {"found": False}}))
         assert result["not_found"]
         assert "cause" not in json.dumps({"steps": result["steps"]})
+        plan = [OPEN, self.SEARCH]
+        _, ids = build_elements(plan)
+        assert ids == {1: "elem_1"}
+        assert result["steps"] == merge_locators(plan, ids, {"elem_1": {"found": False}})
 
 
 class TestNotFoundCopy:

@@ -817,8 +817,8 @@ def not_found_entries(
     """The locator steps that end up without a working locator, and why, in plan order.
 
     One entry per element (folded steps share one) and one per step that names no
-    element. The description is the user's own words (the first step's), never the
-    form rewrite build_elements keys on. A step's value is never recorded: it may
+    element. The description is the planner's element_description as written (the
+    first step's), never the form rewrite build_elements keys on. A step's value is never recorded: it may
     be a password.
     """
     entries: list[dict[str, Any]] = []
