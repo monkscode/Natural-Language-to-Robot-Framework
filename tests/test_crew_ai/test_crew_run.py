@@ -145,11 +145,11 @@ class TestRunCrewReturnShape:
     assertion below still holds.
     """
 
-    def test_returns_nine_member_tuple(self):
-        """Success path: result is a 9-member tuple (change_waits is the 9th)."""
+    def test_returns_ten_member_tuple(self):
+        """Success path: result is a 10-member tuple (not_found is the 10th)."""
         result, _ = _run_crew_with_mocks()
         assert isinstance(result, tuple)
-        assert len(result) == 9
+        assert len(result) == 10
 
     def test_named_access_matches_positional(self):
         """It is a NamedTuple: names and indices address the same members."""
@@ -294,6 +294,24 @@ class TestRunCrewElementStage:
         call = mocks["tasks"].assemble_code_task.call_args
         steps_json = call.kwargs.get("identified_steps_json") or call.args[1]
         assert "change_waits" not in steps_json
+        assert json.loads(steps_json) == {"steps": _IDENTIFICATION_RESULT["steps"]}
+
+    def test_not_found_is_empty_when_identification_has_none(self):
+        """Warn at generation: no not_found key in the identification result -> ()."""
+        result, _ = _run_crew_with_mocks()
+        assert result.not_found == ()
+        assert result[9] == ()
+
+    def test_not_found_carries_the_identification_list_as_a_tuple(self):
+        """The not-found list travels beside the steps, never inside them."""
+        entries = [{"cause": "not_found", "description": "search box"}]
+        result, mocks = _run_crew_with_mocks(
+            identification_result={**_IDENTIFICATION_RESULT, "not_found": entries})
+        assert result.not_found == tuple(entries)
+        assert isinstance(result.not_found, tuple)
+        call = mocks["tasks"].assemble_code_task.call_args
+        steps_json = call.kwargs.get("identified_steps_json") or call.args[1]
+        assert "not_found" not in steps_json
         assert json.loads(steps_json) == {"steps": _IDENTIFICATION_RESULT["steps"]}
 
     def test_identify_elements_failure_propagates(self):

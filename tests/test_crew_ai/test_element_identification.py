@@ -32,6 +32,8 @@ from src.backend.crew_ai.element_identification import (
     extract_plan_url,
     identify_elements,
     merge_locators,
+    not_found_lines,
+    not_found_notice,
     rewrite_form_description,
     step_needs_locator,
 )
@@ -1167,11 +1169,159 @@ class TestStageCompletionMessages:
                                  "elem_2": {"found": False}},
              "summary": {}},
         )
-        assert "1 of 2" in self._final_message(events)
+        final = self._final_message(events)
+        assert "1 of 2" in final
+        assert "placeholders" not in final
 
     def test_no_elements_needed_message(self):
         events = self._events_for([OPEN, CLOSE], {"status": "success"})
         assert "No page elements needed" in self._final_message(events)
+
+
+# ─── the not-found list (warn at generation) ─────────────────────────────────
+
+class TestNotFound:
+
+    @staticmethod
+    def _run(steps, response, query="q"):
+        calls = []
+
+        def run_tool(elements, url, user_query):
+            calls.append(elements)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        events = []
+        result = identify_elements(steps, query, run_tool=run_tool,
+                                   on_progress=lambda p, m: events.append((p, m)))
+        return result, calls, events
+
+    @staticmethod
+    def _ok(mapping):
+        return {"status": "success", "locator_mapping": mapping, "summary": {}}
+
+    SEARCH = _step("Input Text", description="search box", value="x")
+
+    def test_all_found_gives_empty_list(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH], self._ok({"elem_1": _mapping_entry(locator="name=q")}))
+        assert result["not_found"] == []
+
+    def test_record_not_found_is_not_found(self):
+        result, _, _ = self._run([OPEN, self.SEARCH], self._ok({"elem_1": {"found": False}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_record_without_locator_is_not_found(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH], self._ok({"elem_1": {"found": True, "best_locator": ""}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_crash_shaped_answer_is_not_checked(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH], {"status": "success", "locator_mapping": {}})
+        assert result["not_found"] == [{"cause": "not_checked", "description": "search box"}]
+
+    def test_tool_error_and_raise_are_not_checked(self):
+        for response in ({"status": "error"}, RuntimeError("down")):
+            result, _, _ = self._run([OPEN, self.SEARCH], response)
+            assert result["not_found"] == [
+                {"cause": "not_checked", "description": "search box"}]
+
+    def test_no_url_is_no_url_and_tool_not_called(self):
+        result, calls, _ = self._run(
+            [_step("Click", description="login button")], self._ok({}), query="login")
+        assert calls == []
+        assert result["not_found"] == [{"cause": "no_url", "description": "login button"}]
+
+    def test_no_description_step_is_named_and_counted(self):
+        result, _, events = self._run(
+            [OPEN, _step("Click", description="")], self._ok({}))
+        assert result["not_found"] == [{"cause": "no_description", "keyword": "Click"}]
+        assert [m for p, m in events if p == 60] == ["⚠️ Identified 0 of 1 elements"]
+
+    def test_folded_steps_give_one_entry(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH, _step("Press Keys", description="search box", value="Enter")],
+            self._ok({"elem_1": {"found": False}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_step_without_locator_gives_no_entry(self):
+        result, _, _ = self._run([OPEN, CLOSE], self._ok({}))
+        assert result["not_found"] == []
+
+    def test_not_found_never_enters_the_steps(self):
+        import json
+        result, _, _ = self._run([OPEN, self.SEARCH], self._ok({"elem_1": {"found": False}}))
+        assert result["not_found"]
+        assert "cause" not in json.dumps({"steps": result["steps"]})
+        plan = [OPEN, self.SEARCH]
+        _, ids = build_elements(plan)
+        assert ids == {1: "elem_1"}
+        assert result["steps"] == merge_locators(plan, ids, {"elem_1": {"found": False}})
+
+
+class TestNotFoundCopy:
+
+    TITLE_ONE = "Delivered — 1 element was not found while this test was generated"
+    FOOTER = "You can still edit the code or run the test."
+
+    def test_lines_cd038b6b(self):
+        lines = not_found_lines(
+            [{"cause": "not_found", "description": "main heading on the page"}])
+        assert lines == [
+            self.TITLE_ONE,
+            ("“main heading on the page” — not found on the page, so the test has no working "
+             "locator for it and will most likely fail at that step. If the web address is "
+             "right and the element is on the page, describe it more specifically and "
+             "generate again."),
+            self.FOOTER,
+        ]
+
+    def test_lines_group_by_cause_in_order(self):
+        lines = not_found_lines([
+            {"cause": "no_description", "keyword": "Click"},
+            {"cause": "no_url", "description": "c"},
+            {"cause": "not_checked", "description": "a"},
+            {"cause": "no_description", "keyword": "Click"},
+            {"cause": "not_checked", "description": "b"},
+        ])
+        assert lines[0] == "Delivered — 5 elements were not found while this test was generated"
+        assert lines[1] == (
+            "“a”, “b” — the page could not be checked just now, so no locator was found "
+            "for them. Generate the test again in a minute.")
+        assert lines[2] == (
+            "“c” — not checked: your description has no web address, so no page was "
+            "opened. Add the page's address (for example https://example.com) and "
+            "generate again.")
+        assert lines[3] == (
+            "2 steps do not name an element (“Click”). Describe each element in your "
+            "test description and generate again.")
+        assert lines[4] == self.FOOTER
+        assert len(lines) == 5
+
+    def test_lines_several_not_found_and_one_no_description(self):
+        lines = not_found_lines([
+            {"cause": "not_found", "description": "a"},
+            {"cause": "not_found", "description": "b"},
+            {"cause": "no_description", "keyword": "Get Text"},
+        ])
+        assert lines[1] == (
+            "“a”, “b” — not found on the page, so the test has no working locator for them "
+            "and will most likely fail at those steps. If the web address is right and the "
+            "elements are on the page, describe them more specifically and generate again.")
+        assert lines[2] == (
+            "A “Get Text” step does not name an element. Describe the element in your test "
+            "description and generate again.")
+
+    def test_lines_empty(self):
+        assert not_found_lines([]) == []
+
+    def test_notice_singular_and_plural(self):
+        assert not_found_notice(1) == (
+            "1 element was not found while generating — details in Generation Logs below")
+        assert not_found_notice(3) == (
+            "3 elements were not found while generating — details in Generation Logs below")
 
 
 # ─── orphan navigation rendering ─────────────────────────────────────────────

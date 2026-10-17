@@ -66,6 +66,7 @@ def _make_run_crew_result(
     pydantic_code=None,
     json_dict_code=None,
     raw_code=None,
+    not_found=(),
 ):
     """Build the RunCrewResult returned by run_crew() — the single-task
     ASSEMBLER crew (Task 16). Delivered code comes from tasks[-1] (the
@@ -110,7 +111,8 @@ def _make_run_crew_result(
     }
 
     return RunCrewResult(MagicMock(), crew, None, {}, llm_monitor,
-                         stage_metrics, shared_llm, {"assembly_output": 1})
+                         stage_metrics, shared_llm, {"assembly_output": 1},
+                         not_found=not_found)
 
 
 def _run_workflow(query="login to github.com", provider="gemini", model="gemini-2.5-flash",
@@ -497,6 +499,41 @@ class TestWorkflowCompletionPaths:
         complete = next(e for e in events if e.get("status") == "complete")
         assert "dryrun_status" not in complete
         assert "dryrun_errors" not in complete
+
+    def test_all_found_event_and_lines_unchanged(self):
+        """Warn at generation: an all-found run adds no not_found_* key and
+        keeps today's celebratory line."""
+        events = _run_workflow()
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert "not_found_lines" not in complete
+        assert "not_found_notice" not in complete
+        assert any("🎉 Success! Generated" in e.get("message", "") for e in events)
+
+    def test_not_found_reaches_the_event(self):
+        from src.backend.crew_ai.element_identification import not_found_lines
+        entries = ({"cause": "not_found", "description": "main heading on the page"},)
+        events = _run_workflow(crew_result=_make_run_crew_result(not_found=entries))
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["not_found_lines"] == not_found_lines(list(entries))
+        assert complete["not_found_notice"] == (
+            "1 element was not found while generating — details in Generation Logs below")
+        lines = len(complete["robot_code"].split("\n"))
+        assert any(f"Generated {lines} lines of test code." in e.get("message", "")
+                   for e in events)
+        assert not any("Success!" in e.get("message", "") for e in events)
+
+    def test_failed_gate_and_not_found_both_reach_the_event(self):
+        entries = ({"cause": "not_checked", "description": "search box"},)
+
+        def failed_gate(workflow_id, code, *a, **k):
+            return {"code": code, "dryrun_status": "failed",
+                    "dryrun_errors": "No keyword with name 'Cilck' found", "repair_usage": {}}
+        events = _run_workflow(crew_result=_make_run_crew_result(not_found=entries),
+                               gate=failed_gate)
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["dryrun_status"] == "failed"
+        assert complete["not_found_lines"]
+        assert complete["not_found_notice"]
 
     def test_dryrun_failed_still_delivers_with_dryrun_fields(self):
         """SOFT gate: a failed dryrun STILL yields status:'complete' with robot_code

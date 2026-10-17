@@ -12,6 +12,7 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
+from src.backend.crew_ai.element_identification import not_found_lines, not_found_notice
 from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits
 from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
@@ -737,6 +738,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # F1: browser-service's change marks, kept beside the steps (never in the
             # assembler's prompt); an eight-member result has none.
             change_waits = getattr(run_result, "change_waits", ()) or ()
+            # Elements delivered without a working locator; reported on the complete event.
+            not_found = getattr(run_result, "not_found", ()) or ()
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -972,8 +975,11 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Show finalizing step before completion
         yield {"status": "running", "message": f"{EMOJI['success']} Finalizing test code..."}
 
-        # Confirm success with line count
-        yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
+        # Confirm the line count; "Success!" is claimed only when every element was found
+        if not_found:
+            yield {"status": "running", "message": f"Generated {lines} lines of test code."}
+        else:
+            yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
 
         # Terminal 100% — pushed here (the event bus now caps at 80 and crew.py no
         # longer pushes 100) so the bar reaches 100 only AFTER the dryrun gate has
@@ -986,6 +992,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # gate did not pass, attach dryrun_status + dryrun_errors so the frontend can
         # surface a warning without a new status.
         complete_event = {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
+        if not_found:
+            complete_event["not_found_lines"] = not_found_lines(list(not_found))
+            complete_event["not_found_notice"] = not_found_notice(len(not_found))
         if gate["dryrun_status"] != "passed":
             complete_event["dryrun_status"] = gate["dryrun_status"]
             complete_event["dryrun_errors"] = gate.get("dryrun_errors", "")
