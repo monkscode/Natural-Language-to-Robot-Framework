@@ -32,10 +32,10 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies six smaller deterministic rules defined
+The same cleanup step also applies seven smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
 `rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads`,
-`rewrite_typed_value_reads` and `rewrite_text_checks_whole_word`.
+`rewrite_typed_value_reads`, `rewrite_text_checks_whole_word` and `rewrite_empty_loop_checks`.
 
 Two further public functions are not part of that cleanup step:
 `insert_change_waits` puts a before-read and a never-failing wait around a read
@@ -1586,6 +1586,150 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     return _apply_rewrites(
         robot_code, suite, rewrites, _TEXT_CHECK_GUARD,
         "Text check normalizer", "Should Contain line(s)", f"{_SHOULD_MATCH_REGEXP} (whole words, any letter case)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Empty loops: a FOR over a `Get Elements` list that checks each row's text
+# passes when the list is empty. Runs on the shared suite reader above.
+# ---------------------------------------------------------------------------
+
+# Should Not Be Empty is what it writes; the others are the keywords whose meaning the rule reads.
+_EMPTY_LOOP_GUARD = (
+    "Should Not Be Empty", "Get Elements", "Get Text", "Should Contain", "Exit For Loop If", "Continue For Loop If",
+)
+_EMPTY_LOOP_MESSAGE = "No matching element was found, so nothing was checked"
+# The one blank-row skip accepted; group 1 is the variable it tests.
+_BLANK_ROW_SKIP_RE = re.compile(r"len\(\$(\w+)\.strip\(\)\) == 0")
+# `@{rows}=` / `${rows}=` with a plain name (no type, no attribute, no item, nothing nested).
+_LIST_ASSIGNMENT_RE = re.compile(r"[$@]\{([^${}@&%.\[\]:]+)\}\s*=?")
+_LIST_CELL_RE = re.compile(r"@\{([^{}]+)\}")
+
+
+def _is_marker(step: _Step, marker: str) -> bool:
+    """True when the step is exactly the upper-case Robot marker (`FOR`, `END`): Robot reads no other case."""
+    return step.keyword_idx is not None and step.parts[step.keyword_idx].strip() == marker
+
+
+def _is_text_check(step: _Step, text_var: str) -> bool:
+    """A BuiltIn `Should Contain    ${text}    VALUE [ignore_case=True]` on the variable `text_var`."""
+    if (step.setting or step.continued or step.assigns or step.keyword != "should contain"
+            or step.prefix not in _BUILTIN_PREFIXES or len(step.args) not in (2, 3)
+            or step.args[2:] not in ([], ["ignore_case=True"])):
+        return False
+    target = _SCALAR_CELL_RE.fullmatch(step.args[0])
+    value = step.args[1]
+    return (target is not None and _canon_variable(target.group(1)) == text_var
+            and not ("=" in value and value.split("=", 1)[0] in _SHOULD_CONTAIN_ARGUMENTS))
+
+
+def _empty_loop_line(suite: _Suite, test: _Test, i: int) -> str | None:
+    """The `Get Elements` line of `test.steps[i]` followed by the guard line, or None unless a loop of the
+    accepted shape follows it (see rewrite_empty_loop_checks)."""
+    steps = test.steps
+    get = steps[i]
+    if (get.continued or len(get.assigns) != 1 or get.keyword != "get elements"
+            or get.prefix not in _BROWSER_PREFIXES or len(get.args) != 1
+            or get.args[0].startswith(("@{", "&{")) or i + 1 >= len(steps)):
+        return None
+    assigned = _LIST_ASSIGNMENT_RE.fullmatch(get.parts[_content_cells(get.parts)[0]].strip())
+    loop = steps[i + 1]
+    if assigned is None or loop.continued or loop.assigns or not _is_marker(loop, "FOR") or len(loop.args) != 3:
+        return None
+    name = assigned.group(1)
+    row = _SCALAR_CELL_RE.fullmatch(loop.args[0])
+    source = _LIST_CELL_RE.fullmatch(loop.args[2])
+    if (row is None or loop.args[1] != "IN" or source is None
+            or _canon_variable(source.group(1)) != _canon_variable(name)):
+        return None
+    end = next((j for j in range(i + 2, len(steps)) if _is_marker(steps[j], "END")), None)
+    if end is None or steps[end].args or steps[end].assigns or steps[end].continued:
+        return None
+    body = steps[i + 2:end]
+    if len(body) < 2 or any(step.setting or step.continued for step in body):
+        return None
+    read, rest = body[0], body[1:]
+    if (not read.scalar_assign or len(read.assigns) != 1 or read.keyword != "get text"
+            or read.prefix not in _BROWSER_PREFIXES or len(read.args) != 1):
+        return None
+    read_of = _SCALAR_CELL_RE.fullmatch(read.args[0])
+    if read_of is None or _canon_variable(read_of.group(1)) != _canon_variable(row.group(1)):
+        return None
+    text_var = read.assigns[0]
+    if rest[0].keyword in ("exit for loop if", "continue for loop if"):
+        skip, rest = rest[0], rest[1:]
+        skips = _BLANK_ROW_SKIP_RE.fullmatch(skip.args[0]) if len(skip.args) == 1 else None
+        if skip.assigns or skip.prefix not in _BUILTIN_PREFIXES or skips is None or _canon_variable(skips.group(1)) != text_var:
+            return None
+    if not rest or not all(_is_text_check(step, text_var) for step in rest):
+        return None
+    canon = _canon_variable(name)
+    if any(n not in (get.line_no, loop.line_no) and _mentions_variable(suite.lines[n], canon) for n in test.line_nos):
+        return None
+    # A line Robot runs that the reader dropped (typed or item assignment, a one-space-indented line, an
+    # unindented `...` line) could sit anywhere between the loop's lines: only those lines may be there.
+    shown = {loop.line_no, *(step.line_no for step in body)}
+    for n in range(get.line_no + 1, steps[end].line_no):
+        stripped = suite.lines[n].strip()
+        if stripped and not stripped.startswith("#") and n not in shown:
+            return None
+    guard = f"{get.parts[1]}Should Not Be Empty    ${{{name}}}    msg={_EMPTY_LOOP_MESSAGE}{get.eol}"
+    return f"{suite.lines[get.line_no]}\n{guard}"
+
+
+def _empty_loop_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number of each accepted `Get Elements` line -> that line + "\\n" + the guard line."""
+    rewrites = {}
+    for test in suite.tests:
+        # Robot runs every row of a templated test, the guard included, as the template's arguments.
+        if any(step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[template]" for step in test.steps):
+            continue
+        for i, step in enumerate(test.steps):
+            line = _empty_loop_line(suite, test, i)
+            if line is not None:
+                rewrites[step.line_no] = line
+    return rewrites
+
+
+def rewrite_empty_loop_checks(robot_code: str) -> str:
+    """Put `Should Not Be Empty    ${rows}    msg=…` after a `Get Elements` line whose list is only checked in a loop.
+
+    A FOR over an empty list runs zero times, and `Get Elements` waits up to the Browser timeout for the first match
+    and then returns `[]` without failing: `Fill Text` a search that matches nothing, loop over the rows, and the
+    test passes having checked nothing.
+
+    Rewritten, inside one test: `@{rows}=    Get Elements    LOCATOR` (or `${rows}=`, plain name, one argument, no
+    library prefix or `Browser.`), the very next step `FOR    ${row}    IN    @{rows}`, and a body, up to the first
+    `END`, of exactly: `${text}=    Get Text    ${row}`; optionally one `Exit For Loop If` / `Continue For Loop If`
+    whose only argument is `len($text.strip()) == 0`; then one or more BuiltIn `Should Contain    ${text}    VALUE`
+    (optionally with `ignore_case=True`; VALUE not a named argument). The new line carries the `Get Elements`
+    line's indent and line end. Comment and blank lines may sit anywhere.
+
+    Left alone: any other body (a `Should Not Contain`, a `Log`, an `IF`, a count), a step between the two lines,
+    `IN RANGE` / `IN ENUMERATE`, any other skip condition, a read variable that is not the checked one, a list named
+    on any other line of the test (a second loop, a `Get Length`, a `Log` after `END`), lower-case `for` / `In` /
+    `end` (Robot reads them as keyword calls), a FOR with no `END`, a `...`-continued line, any line between
+    `Get Elements` and `END` that the shared reader drops (typed or item assignment, a one-space-indented line, an
+    unindented `...` line), a test with `[Template]`, a loop in a user keyword, and whole files that hold
+    `language:`, a `TRY`, or their own `Should Not Be Empty` / `Get Elements` / `Get Text` / `Should Contain` /
+    `Exit For Loop If` / `Continue For Loop If`, or that the reader refuses.
+
+    Idempotent: after the rewrite the next step is no longer the FOR. If `rewrite_text_checks_whole_word` ever
+    reaches loop bodies, accept `Should Match Regexp` here or run this first.
+    """
+    if not robot_code:
+        return robot_code
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.lower())
+    if "getelements" not in squashed or "shouldcontain" not in squashed:
+        return robot_code
+    if "language:" in robot_code.lower():
+        return robot_code  # translated settings (a template among them) are invisible to the reader
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _empty_loop_rewrites(suite), _EMPTY_LOOP_GUARD,
+        "Empty loop normalizer", "loop(s)", "a Should Not Be Empty guard (signal: empty-loop-guard)",
     )
 
 
