@@ -28,6 +28,35 @@ import pytest
 import src.backend.services.dryrun_service as ds
 from src.backend.services import dryrun_service
 
+# bench/runs/a909c8eb-74bb-4088-b9ec-bee0c4bae0ca/artifacts/test.robot (q06 r2, baseline): a row loop over
+# `Get Elements` whose check runs zero times when nothing matches.
+Q06_CODE = """*** Settings ***
+Library    Browser    timeout=30s
+Library    BuiltIn
+Library    Collections
+
+*** Variables ***
+${browser}    chromium
+${headless}    True
+${url}    https://demoqa.com/webtables
+${search_box_locator}    id=searchBox
+${table_rows_locator}    tbody tr
+
+*** Test Cases ***
+Verify Web Table Search
+    [Documentation]    Navigate to DemoQA webtables, search for Cierra, and verify rows
+    New Browser    ${browser}    headless=${headless}
+    New Context    viewport={'width': 1920, 'height': 1080}
+    New Page    ${url}
+    Fill Text    ${search_box_locator}    Cierra
+    @{elements}=    Get Elements    ${table_rows_locator}
+    FOR    ${element}    IN    @{elements}
+        ${text}=    Get Text    ${element}
+        Exit For Loop If    len($text.strip()) == 0
+        Should Contain    ${text}    Cierra
+    END
+    Close Browser"""
+
 
 # ---------------------------------------------------------------------------
 # output.xml fixtures (mirror the S1 spike structures)
@@ -741,7 +770,10 @@ class TestExtractAndNormalize:
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
         ("rewrite_text_checks_whole_word", _Q08_RAW,
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
-    ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises"])
+        ("rewrite_empty_loop_checks", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+    ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises",
+            "empty loop rewrite raises"])
     def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
             self, caplog, failing, raw, still_rewritten):
         with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),
@@ -753,6 +785,16 @@ class TestExtractAndNormalize:
         assert [r.getMessage() for r in warnings] == [
             f"{failing} failed; code left unchanged by it (non-blocking)"]
         assert warnings[0].exc_info is not None
+
+    def test_a_row_loop_gets_the_empty_guard_on_every_round(self):
+        guard = ("    Should Not Be Empty    ${elements}    "
+                 "msg=No matching element was found, so nothing was checked\n")
+        out = ds.extract_and_normalize_robot_code(self._task_output(pydantic=Q06_CODE))
+        assert out.count(guard) == 1
+        assert "    @{elements}=    Get Elements    ${table_rows_locator}\n" + guard in out
+        assert "Library    Browser    timeout=30s" in out
+        # a repair round passes the same cleanup again and must change nothing
+        assert ds.extract_and_normalize_robot_code(self._task_output(pydantic=out)) == out
 
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
