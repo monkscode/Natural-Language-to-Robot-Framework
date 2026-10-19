@@ -198,7 +198,8 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # Should Match Regexp — after the select rewrite, which must see the
     # select's Should Contain first.
     # Last, the empty-loop guard: a positive check inside a FOR over a Get Elements
-    # list gets one Should Not Be Empty line, so the rewrites above see today's bytes.
+    # list gets one Should Not Be Empty line. It runs last so that, on generation,
+    # the rewrites above see the code exactly as they did before it existed.
     # Same place as the visibility rewrite, for the same reason: every repair
     # round passes through here too. All four are optional and skip-only, so one
     # that raises costs only its own rewrite, never the generation.

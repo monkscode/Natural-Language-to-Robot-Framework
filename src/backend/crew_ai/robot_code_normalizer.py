@@ -1708,11 +1708,13 @@ def rewrite_empty_loop_checks(robot_code: str) -> str:
     Left alone: any other body (a `Should Not Contain`, a `Log`, an `IF`, a count), a step between the two lines,
     `IN RANGE` / `IN ENUMERATE`, any other skip condition, a read variable that is not the checked one, a list named
     on any other line of the test (a second loop, a `Get Length`, a `Log` after `END`), lower-case `for` / `In` /
-    `end` (Robot reads them as keyword calls), a FOR with no `END`, a `...`-continued line, any line between
-    `Get Elements` and `END` that the shared reader drops (typed or item assignment, a one-space-indented line, an
-    unindented `...` line), a test with `[Template]`, a loop in a user keyword, and whole files that hold
-    `language:`, a `TRY`, or their own `Should Not Be Empty` / `Get Elements` / `Get Text` / `Should Contain` /
-    `Exit For Loop If` / `Continue For Loop If`, or that the reader refuses.
+    `end` (Robot reads a lower-case `for` / `end` as a keyword call and rejects any other spelling of `IN`), a FOR
+    with no `END`, a `...`-continued line, any line between `Get Elements` and `END` that the shared reader drops
+    (typed or item assignment, a one-space-indented line, an unindented `...` line), a test with a `[Template]`
+    setting line in its body (a template on the test-name line is not seen; Robot then fails the file at dryrun with
+    or without the new line), a loop in a user keyword, and whole files that hold `language:`, a `TRY`, their own
+    keywords under an error-catching wrapper, or their own `Should Not Be Empty` / `Get Elements` / `Get Text` /
+    `Should Contain` / `Exit For Loop If` / `Continue For Loop If`, or that the reader refuses.
 
     Idempotent: after the rewrite the next step is no longer the FOR. If `rewrite_text_checks_whole_word` ever
     reaches loop bodies, accept `Should Match Regexp` here or run this first.
