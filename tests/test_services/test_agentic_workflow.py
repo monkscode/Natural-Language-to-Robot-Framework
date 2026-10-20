@@ -23,6 +23,7 @@ Scope:
       repair cost folded into crewai_*/total_* WorkflowMetrics
   - Workflow completion: success → complete event
   - run_agentic_workflow gemini key missing → early error event
+  - _browser_use_cost: browser-service's $0 browser-use cost priced from LiteLLM's table (bs #32)
 
 Task 16: run_crew returns the single-task ASSEMBLER crew (the pipeline is two
 single-task kickoffs around the deterministic element stage); delivered code
@@ -32,9 +33,11 @@ deterministic robot --dryrun gate.
 
 import os
 import json
+import logging
 import asyncio
 import threading
 import uuid
+import litellm
 import pytest
 from queue import Queue
 from unittest.mock import patch, MagicMock
@@ -879,6 +882,28 @@ class TestWorkflowCompletionPaths:
         assert result.shared_llm.get_workflow_usage.called
 
 
+def _capture_workflow_metrics(browser_metrics, model_name="gemini-2.5-flash"):
+    captured = {}
+
+    def _capture(metrics, **kwargs):
+        captured["m"] = metrics
+
+    with patch("src.backend.services.workflow_service.run_crew",
+               return_value=_make_run_crew_result()), \
+         patch("src.backend.services.workflow_service.validate_and_repair",
+               side_effect=_passthrough_gate), \
+         patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
+         patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
+         patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
+        mock_s.return_value.read_browser_metrics.return_value = browser_metrics
+        mock_coll.return_value.record_workflow.side_effect = _capture
+
+        from src.backend.services.workflow_service import run_agentic_workflow
+        list(run_agentic_workflow("q", "gemini", model_name))
+
+    return captured["m"]
+
+
 class TestTotalLlmCallsUsesActualCalls:
     """total_llm_calls must count real API calls, not history items.
 
@@ -898,25 +923,7 @@ class TestTotalLlmCallsUsesActualCalls:
     }
 
     def _capture_metrics(self, browser_metrics):
-        captured = {}
-
-        def _capture(metrics, **kwargs):
-            captured["m"] = metrics
-
-        with patch("src.backend.services.workflow_service.run_crew",
-                   return_value=_make_run_crew_result()), \
-             patch("src.backend.services.workflow_service.validate_and_repair",
-                   side_effect=_passthrough_gate), \
-             patch("src.backend.services.workflow_service.get_temp_metrics_storage") as mock_s, \
-             patch("src.backend.services.workflow_service.get_workflow_metrics_collector") as mock_coll, \
-             patch.dict(os.environ, {"GEMINI_API_KEY": "test"}):
-            mock_s.return_value.read_browser_metrics.return_value = browser_metrics
-            mock_coll.return_value.record_workflow.side_effect = _capture
-
-            from src.backend.services.workflow_service import run_agentic_workflow
-            list(run_agentic_workflow("q", "gemini", "gemini-2.5-flash"))
-
-        return captured["m"]
+        return _capture_workflow_metrics(browser_metrics)
 
     def _crewai_calls(self):
         from src.backend.core.workflow_metrics import calculate_crewai_cost
@@ -959,6 +966,103 @@ class TestTotalLlmCallsUsesActualCalls:
             m = self._capture_metrics(
                 {**self.BASE_BROWSER, 'agent_diagnostics': {'llm_calls_actual': bad}})
             assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"
+
+
+_PRICE_KEYS = (
+    "vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "gemini-3.5-flash",
+    "vertex_ai/gemini-3.8-flash", "gemini/gemini-3.8-flash", "gemini-3.8-flash",
+)
+# bench run fff8e5a3-e8c7-48b7-9923-11094bbe1a3f: real tokens, browser-service cost 0.0
+RUN = {'tokens': 23289, 'input_tokens': 22655, 'output_tokens': 634, 'cached_tokens': 0,
+       'actual_cost': 0.0, 'llm_calls': 2, 'elements_processed': 2}
+
+
+def _browser_use_cost(*args):
+    from src.backend.services.workflow_service import _browser_use_cost as helper
+    return helper(*args)
+
+
+def helper_warnings(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and r.getMessage().startswith("browser-use ")]
+
+
+@pytest.fixture
+def no_entry():
+    """LiteLLM's table as after a failed download: no 3.5 / 3.8 entry; restored afterwards."""
+    from src.backend.crew_ai import model_map_fallback
+    with patch.dict(litellm.model_cost), patch.object(model_map_fallback, "_checked", set()):
+        for key in _PRICE_KEYS:
+            litellm.model_cost.pop(key, None)
+        yield
+
+
+@pytest.fixture
+def pinned(no_entry):
+    """The table with the pinned 3.8 entries (all three keys) ensure_model_entry adds."""
+    from src.backend.crew_ai import model_map_fallback
+    model_map_fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.8-flash")
+
+
+class TestBrowserUseCostFallback:
+    """bs #32: browser-use reports $0 beside real tokens when it could not load prices."""
+
+    @pytest.mark.parametrize("provider, routed", [("vertex", "vertex_ai/gemini-3.8-flash"),
+                                                  ("gemini", "gemini/gemini-3.8-flash")])
+    def test_priced_when_tokens_and_zero_cost(self, pinned, caplog, provider, routed):
+        with caplog.at_level(logging.WARNING):
+            cost = _browser_use_cost(RUN, provider, "gemini-3.8-flash")
+        assert cost == pytest.approx(0.01936875, abs=1e-12)
+        [w] = helper_warnings(caplog)
+        assert routed in w and "22655" in w and "634" in w and "0.01936875" in w
+
+    def test_cached_tokens_at_cache_read_rate(self, pinned):
+        run = {**RUN, 'cached_tokens': 10000}
+        assert _browser_use_cost(run, "vertex", "gemini-3.8-flash") == pytest.approx(0.01261875, abs=1e-12)
+
+    def test_unpriceable_model_stays_zero_and_warns(self, no_entry, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert _browser_use_cost(RUN, "vertex", "gemini-3.8-flash") == 0.0
+        [w] = helper_warnings(caplog)
+        assert "vertex_ai/gemini-3.8-flash" in w and "isn't mapped" in w
+
+    def test_bs_cost_kept_when_positive(self, no_entry, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert _browser_use_cost({**RUN, 'actual_cost': 0.0123}, "vertex", "gemini-3.8-flash") == 0.0123
+        assert helper_warnings(caplog) == []
+
+    def test_zero_tokens_untouched(self, no_entry, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert _browser_use_cost({**RUN, 'tokens': 0}, "vertex", "gemini-3.8-flash") == 0.0
+            assert _browser_use_cost({}, "vertex", "gemini-3.8-flash") == 0.0
+        assert helper_warnings(caplog) == []
+
+    def test_tiered_model_priced_at_base_rate(self):
+        tiered = {"input_cost_per_token": 1.25e-06, "input_cost_per_token_above_200k_tokens": 2.5e-06,
+                  "output_cost_per_token": 1e-05, "output_cost_per_token_above_200k_tokens": 1.5e-05,
+                  "litellm_provider": "vertex_ai-language-models", "mode": "chat"}
+        run = {'tokens': 250000, 'input_tokens': 250000, 'output_tokens': 0, 'cached_tokens': 0,
+               'actual_cost': 0.0}
+        with patch.dict(litellm.model_cost, {"vertex_ai/bs32-tiered-test": tiered}):
+            # control: the tiered call prices the summed tokens at the higher rate
+            assert litellm.cost_per_token(model="vertex_ai/bs32-tiered-test", prompt_tokens=250000,
+                                          completion_tokens=0)[0] == pytest.approx(0.625)
+            assert _browser_use_cost(run, "vertex", "bs32-tiered-test") == pytest.approx(0.3125)
+
+    def test_metrics_row_uses_priced_cost(self, pinned):
+        m = _capture_workflow_metrics(RUN, "gemini-3.8-flash")
+        assert m.browser_use_cost == pytest.approx(0.01936875)
+        assert m.crewai_cost == 0.0008
+        assert m.total_cost == pytest.approx(0.0008 + 0.01936875)
+        assert m.avg_cost_per_element == pytest.approx(0.01936875 / 2)
+
+    def test_pricing_error_keeps_the_row(self, pinned, caplog):
+        with caplog.at_level(logging.WARNING), \
+             patch("litellm.get_model_info", side_effect=RuntimeError("boom")):
+            m = _capture_workflow_metrics(RUN, "gemini-3.8-flash")
+        assert m.browser_use_cost == 0.0 and m.total_cost == pytest.approx(0.0008)
+        [w] = helper_warnings(caplog)
+        assert "boom" in w
 
 
 class TestChangeWaitsReachTheGate:

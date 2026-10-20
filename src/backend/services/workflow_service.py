@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
 from src.backend.crew_ai.element_identification import not_found_lines, not_found_notice
+from src.backend.crew_ai.llm_provider_routing import resolve_model_string
 from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits
 from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
@@ -154,6 +155,35 @@ def _safe_delete_temp_metrics(workflow_id: str) -> None:
         get_temp_metrics_storage().delete_temp_file(workflow_id)
     except Exception as e:
         logging.debug("Temp metrics cleanup failed for %s (non-blocking): %s", workflow_id, e)
+
+
+def _browser_use_cost(browser_metrics: dict, model_provider: str, model_name: str) -> float:
+    """browser-service's cost for its browser-use calls, or our own price for them when it reports $0 (bs #32).
+
+    browser-use prices its calls from its own download of LiteLLM's list and reports $0 when that download fails or
+    lacks the model. Price the same tokens with browser-use's formula on the base prices in LiteLLM's table (the live
+    list, or the pin ensure_model_entry added). Never litellm.cost_per_token: it tiers the run's SUMMED tokens.
+    """
+    cost = browser_metrics.get('actual_cost', 0.0)
+    if cost or not browser_metrics.get('tokens', 0):
+        return cost
+    prompt = browser_metrics.get('input_tokens', 0)  # includes the cached ones
+    cached = browser_metrics.get('cached_tokens', 0)
+    completion = browser_metrics.get('output_tokens', 0)
+    try:
+        import litellm
+        model = resolve_model_string(model_provider, model_name)
+        info = litellm.get_model_info(model=model)
+        cost = ((prompt - cached) * (info.get('input_cost_per_token') or 0.0)
+                + cached * (info.get('cache_read_input_token_cost') or 0.0)
+                + completion * (info.get('output_cost_per_token') or 0.0))
+    except Exception as e:
+        logging.warning("browser-use cost lookup failed for model=%s (%s prompt / %s cached / %s completion tokens "
+                        "reported at $0): %s", model_name, prompt, cached, completion, e)
+        return 0.0
+    logging.warning("browser-use reported $0 for model=%s (%s prompt / %s cached / %s completion tokens); priced from "
+                    "LiteLLM's model table instead: $%.8f", model, prompt, cached, completion, cost)
+    return cost
 
 
 def _safe_evict_hint_metadata(workflow_id: str) -> None:
@@ -841,7 +871,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # Calculate averages
             total_elements = browser_metrics.get('elements_processed', 0)
             browser_llm_calls = browser_metrics.get('llm_calls', 0)
-            browser_actual_cost = browser_metrics.get('actual_cost', 0.0)
+            browser_actual_cost = _browser_use_cost(browser_metrics, model_provider, model_name)
 
             avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
             avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
