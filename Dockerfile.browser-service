@@ -58,6 +58,13 @@ WORKDIR /app
 # row rescue is addressed inside the anchored rows (it got the page-wide
 # `text="edit" >> nth=0`, another row's link once the rows move); runtime
 # dependencies identical.
+# Bumped 1.0.45 -> 1.0.47 on 2026-10-21: 1.0.46 makes the click-to-open
+# dropdown tier wait for the menu its own click opened (it waited for the first
+# menu in the page, so the second of two dropdowns failed), and 1.0.47 stamps a
+# flatpickr date picker inside an iframe (the DOM probe ran on the top document,
+# so the stamp was lost and the generated test typed into a readonly input) and
+# stops logging a false priority violation for a framed id; runtime
+# dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -90,7 +97,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.45 && \
+    browser-service==1.0.47 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
