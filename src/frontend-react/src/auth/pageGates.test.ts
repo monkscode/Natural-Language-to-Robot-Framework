@@ -37,6 +37,14 @@ describe('PAGES and the nav tables', () => {
     for (const item of NAV) expect(paths).toContain(item.url)
   })
 
+  // Hand-pinned: every org member may use Secrets, so neither table may gate it.
+  it('lists /secrets in both tables with no gate', () => {
+    const page = PAGES.find(p => p.path === '/secrets')!
+    const item = NAV_WORKSPACE.find(i => i.url === '/secrets')!
+    expect(shape(page)).toEqual({ admin: false, orgAdmin: false, viewLearning: false })
+    expect(shape(item)).toEqual({ admin: false, orgAdmin: false, viewLearning: false })
+  })
+
   // Equal shapes are the whole claim: shape() normalises exactly the three
   // flags gateAllowed reads, so two entries with equal shapes give equal
   // answers for every possible caller. Feeding both through gateAllowed for

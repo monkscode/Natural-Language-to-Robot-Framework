@@ -62,6 +62,7 @@ vi.mock('@/pages/LearningPage', () => ({ default: () => <span>LEARNING_PAGE</spa
 vi.mock('@/pages/SettingsPage', () => ({ default: () => <span>SETTINGS_PAGE</span> }))
 vi.mock('@/pages/AccessConsolePage', () => ({ default: () => <span>ACCESS_PAGE</span> }))
 vi.mock('@/pages/TeamPage', () => ({ default: () => <span>TEAM_PAGE</span> }))
+vi.mock('@/pages/SecretsPage', () => ({ default: () => <span>SECRETS_PAGE</span> }))
 vi.mock('@/pages/AccessGatePage', () => ({ default: () => <span>ACCESS_GATE_PAGE</span> }))
 vi.mock('@/pages/auth/LoginPage', () => ({ default: () => <span>LOGIN_PAGE</span> }))
 vi.mock('@/pages/auth/SignupPage', () => ({ default: () => <span>SIGNUP_PAGE</span> }))
@@ -125,6 +126,7 @@ const PAGE_CASES: Array<{ path: string; marker: string; gate: Gate }> = [
   { path: '/access', marker: 'ACCESS_PAGE', gate: { admin: true } },
   { path: '/settings', marker: 'SETTINGS_PAGE', gate: { admin: true } },
   { path: '/team', marker: 'TEAM_PAGE', gate: { orgAdmin: true } },
+  { path: '/secrets', marker: 'SECRETS_PAGE', gate: {} },
 ]
 
 describe('KeepAlivePages — the gate table, every page x every role', () => {
