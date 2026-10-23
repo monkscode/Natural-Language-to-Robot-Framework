@@ -16,7 +16,8 @@ its copy of the same error still printed the key in full. SecretRedactingFilter
 covers those; it must be attached to the HANDLER, because logger-level filters do
 not run for records that propagate up from a child logger.
 
-Referenced by: config/logging_config.py, services/workflow_service.py.
+Referenced by: config/logging_config.py, services/workflow_service.py,
+               crew_ai/optimization/failure_analyzer.py.
 Depends on: logging, re, traceback (stdlib only — this must never fail to import).
 """
 import logging
@@ -58,12 +59,68 @@ _PRIVATE_KEY_BLOCK = re.compile(
     re.DOTALL,
 )
 
+# Typed values (issue #131): Playwright quotes the call it failed on, `fill("<value>")`,
+# and an element preview echoes a password field's `value="<value>"`. Neither carries
+# a credential NAME the tiers above could key on, so they are matched by shape.
+# Playwright writes the value RAW — `fill("${value}")` and an element preview built
+# from ` name="value"` pairs, cut at 500 characters — so an inner quote, a trailing
+# backslash or a missing closing quote are all real shapes. Both masks therefore fail
+# closed and work per line (a call-log entry or a preview is one line): a linear scan,
+# no backtracking regex.
+_CALL_START = re.compile(r"""\b(?:fill|elementHandle\.type)\((["'])""")
+_INPUT_START = re.compile(r"<input\b", re.IGNORECASE)
+_TYPE_PASSWORD = re.compile(r"""\btype\s*=\s*["']?password\b""", re.IGNORECASE)
+_VALUE_OPEN = re.compile(r"""\bvalue\s*=\s*(["'])""", re.IGNORECASE)
+
+
+def _mask_call_values(line: str) -> str:
+    """`fill("<anything>")` -> `fill("***")`, running to the LAST `")` on the line
+    (or, with none, to the end of the line)."""
+    m = _CALL_START.search(line)
+    if not m:
+        return line
+    quote = m.group(1)
+    end = line.rfind(quote + ")")
+    rest = line[end + 2:] if end >= m.end() else ""
+    return f"{line[:m.end()]}***{quote}){rest}"
+
+
+def _mask_password_tag(segment: str) -> str:
+    """Hide everything from `value=<quote>` to the end of the tag (last `>`) or line."""
+    if not _TYPE_PASSWORD.search(segment):
+        return segment
+    opened = _VALUE_OPEN.search(segment)
+    if not opened:
+        return segment
+    close = segment.rfind(">")
+    if close < opened.end():
+        return f"{segment[:opened.end()]}***{opened.group(1)}"
+    slash = "/" if segment[close - 1] == "/" else ""
+    return f"{segment[:opened.end()]}***{opened.group(1)}{slash}{segment[close:]}"
+
+
+def _mask_password_inputs(line: str) -> str:
+    starts = [m.start() for m in _INPUT_START.finditer(line)]
+    if not starts:
+        return line
+    ends = starts[1:] + [len(line)]
+    return line[: starts[0]] + "".join(
+        _mask_password_tag(line[s:e]) for s, e in zip(starts, ends)
+    )
+
+
+def _mask_typed_values(text: str) -> str:
+    return "\n".join(
+        _mask_password_inputs(_mask_call_values(line)) for line in text.split("\n")
+    )
+
 
 def redact_secrets(value):
     """Mask credentials in `value`. Non-strings are returned unchanged."""
     if not isinstance(value, str):
         return value
     out = _PRIVATE_KEY_BLOCK.sub(_PLACEHOLDER, value)
+    out = _mask_typed_values(out)
     out = _GOOGLE_API_KEY.sub(_PLACEHOLDER, out)
     out = _QUERY_SECRET.sub(lambda m: f"{m.group(1)}{_PLACEHOLDER}", out)
     out = _BEARER.sub(lambda m: f"{m.group(1)}{_PLACEHOLDER}", out)

@@ -35,7 +35,8 @@ Caught failures: OutputXmlParser reports the first FAIL keyword that is not
                   _is_caught_try_branch and _first_uncaught_failure live here
                   and core/failure_sentences.py imports them, so there is one
                   copy of that rule.
-Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor.
+Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor;
+            core/secret_redaction.py (OutputXmlParser masks typed values).
 """
 
 import os
@@ -45,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from xml.etree import ElementTree
 
+from src.backend.core.secret_redaction import redact_secrets
 from src.backend.crew_ai.optimization.execution_memory import CodeStructureExtractor
 
 logger = logging.getLogger(__name__)
@@ -196,7 +198,7 @@ class OutputXmlParser:
                 "keyword_chain": keyword_chain,
                 "failed_keyword": failed_kw.name if failed_kw else None,
                 "failed_keyword_args": failed_keyword_args,
-                "error_message": error_message,
+                "error_message": redact_secrets(error_message),
                 "test_elapsed_ms": test_elapsed_ms,
             }
 

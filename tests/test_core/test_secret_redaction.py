@@ -246,3 +246,88 @@ class TestWiredIntoTheRealFormatter:
         rendered = formatter.format(record)
         assert _FAKE_KEY not in rendered
         assert "CrewAI workflow failed" in rendered
+
+
+class TestTypedValueMasks:
+    """A typed value must not survive in a failure reason (issue #131)."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ('Error: fill("pw_marker_131") failed', 'Error: fill("***") failed'),
+        ("locator.fill('pw_marker_131', timeout=1000)", "locator.fill('***')"),
+        # Playwright writes the value RAW: an inner quote is not escaped...
+        ('- fill("pw_mark"er_131")', '- fill("***")'),
+        # ...and a trailing backslash is not an escape of the closing quote.
+        ('- fill("pw_marker_131\\")\n  - waiting for element\n', '- fill("***")\n  - waiting for element\n'),
+        # Type Text / Type Secret log elementHandle.type("...") (ruling R8).
+        ('- elementHandle.type("pw_marker_131")', '- elementHandle.type("***")'),
+        ('- elementHandle.type("pw_mark"er_131")', '- elementHandle.type("***")'),
+    ])
+    def test_masks_the_value_of_a_fill_call(self, text, expected):
+        out = redact_secrets(text)
+        assert "pw_marker_131" not in out and "er_131" not in out
+        assert out == expected
+
+    def test_a_fill_call_with_no_closing_pair_is_masked_to_the_end_of_the_line(self):
+        out = redact_secrets('- fill("pw_marker_131\n  - next line stays')
+        assert out == '- fill("***")\n  - next line stays'
+
+    @pytest.mark.parametrize("tag", [
+        '<input id="p" type="password" value="pw_marker_131">',
+        '<input value="pw_marker_131" id="p" type="password" />',
+        "<input id='p' type='password' value='pw_marker_131'>",
+        '<input id="p" TYPE="PASSWORD" VALUE="pw_marker_131">',
+        '<input id="p" type=password value="pw_marker_131">',
+        '<input title="a>b" type="password" value="pw_marker_131">',
+    ])
+    def test_masks_the_value_of_a_password_input(self, tag):
+        out = redact_secrets(f"element is not enabled: {tag} ...")
+        assert "pw_marker_131" not in out
+        assert 'value="***"' in out.lower() or "value='***'" in out.lower()
+        assert "element is not enabled" in out
+
+    @pytest.mark.parametrize("tag, expected", [
+        # raw inner quote: Playwright does not escape attribute values
+        ('<input id="p" type="password" value="pw_mark"er_131"/>',
+         '<input id="p" type="password" value="***"/>'),
+        # a value holding `>`
+        ('<input id="p" type="password" value="pw_ma>rker_131"/>',
+         '<input id="p" type="password" value="***"/>'),
+        # preview cut at 500 chars inside the value: ellipsis, no closing quote
+        ('<input id="p" type="password" value="pw_marker_131…',
+         '<input id="p" type="password" value="***"'),
+        # attributes after the value are lost by design (fail closed)
+        ('<input id="p" type="password" value="pw_marker_131" name="pw">',
+         '<input id="p" type="password" value="***">'),
+    ])
+    def test_a_password_input_fails_closed_on_raw_or_cut_previews(self, tag, expected):
+        out = redact_secrets(f"locator resolved to {tag}")
+        assert "pw_marker_131" not in out and "er_131" not in out
+        assert out == f"locator resolved to {expected}"
+
+    def test_text_after_the_tag_on_the_same_line_survives(self):
+        out = redact_secrets('<input type="password" value="pw_marker_131"/> is not enabled')
+        assert out == '<input type="password" value="***"/> is not enabled'
+
+    def test_two_password_tags_on_one_line_are_both_masked(self):
+        out = redact_secrets(
+            '<input type="password" value="pw_marker_131"/><input type="password" value="pw_marker_132"/>'
+        )
+        assert "pw_marker_13" not in out
+        assert out.count('value="***"') == 2
+
+    def test_no_pattern_backtracks_on_a_huge_line(self):
+        import time
+
+        for unit in ('fill("', "<input type=password value='", '")', "<input ", 'fill("a" '):
+            text = unit * (500_000 // len(unit))
+            start = time.perf_counter()
+            redact_secrets(text)
+            assert time.perf_counter() - start < 5, f"slow on repeats of {unit!r}"
+
+    def test_a_text_input_is_left_alone(self):
+        text = '<input type="text" value="Cierra">'
+        assert redact_secrets(text) == text
+
+    def test_a_password_tag_without_a_value_is_left_alone(self):
+        text = '<input id="p" type="password">'
+        assert redact_secrets(text) == text
