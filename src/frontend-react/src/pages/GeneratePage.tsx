@@ -133,7 +133,7 @@ function LogsSection({ title, desc, logs, running, collapseOnDone }: Readonly<{
               <div
                 key={i}
                 className={cn(
-                  'flex gap-3 border-b px-4 py-1.5 last:border-0 border-l-2',
+                  'flex gap-3 border-b px-4 py-1.5 last:border-b-0 border-l-2',
                   LOG_BORDER_CLASS[log.kind],
                 )}
               >

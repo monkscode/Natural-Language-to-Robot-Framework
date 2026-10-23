@@ -285,6 +285,23 @@ describe('GeneratePage — a completed generation', () => {
     expect(screen.getByText('Generated test.robot (6 lines)').parentElement).toHaveClass('border-l-green-500')
   })
 
+  it('keeps the colour bar on the last log row (only its bottom border is dropped)', async () => {
+    mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
+      onEvent({ status: 'running', message: 'Doing work…' })
+      onEvent({ status: 'complete', robot_code: CODE, workflow_id: 'wf-1' })
+    })
+    renderPage()
+    typeQuery()
+
+    fireEvent.click(screen.getByRole('button', { name: /Generate Test/ }))
+
+    await screen.findByRole('button', { name: /^Run Test/ })
+    const row = screen.getByText('Generated test.robot (6 lines)').parentElement
+    // last:border-0 would zero border-left too, hiding the colour bar.
+    expect(row).toHaveClass('last:border-b-0')
+    expect(row).not.toHaveClass('last:border-0')
+  })
+
   it('flags a delivered-but-unverified dryrun without inventing a cause', async () => {
     mockStreamSSE.mockImplementation(async (_path, _body, onEvent) => {
       onEvent({
