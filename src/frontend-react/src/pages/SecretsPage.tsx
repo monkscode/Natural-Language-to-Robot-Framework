@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '@/lib/api'
+import { formatDate } from '@/lib/time'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -14,6 +15,7 @@ const message = (e: unknown, fallback: string) => (e instanceof ApiError ? e.mes
 
 export default function SecretsPage() {
   const [secrets, setSecrets] = useState<Secret[]>([])
+  const [loaded, setLoaded] = useState(false) // true after a successful GET: "none yet" is then true
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -22,6 +24,7 @@ export default function SecretsPage() {
   async function load() {
     try {
       setSecrets(await api<Secret[]>('/api/secrets'))
+      setLoaded(true)
     } catch (e) {
       setError(message(e, 'Failed to load secrets'))
     }
@@ -65,7 +68,7 @@ export default function SecretsPage() {
       setNotice([
         r.added.length ? `Added: ${r.added.join(', ')}.` : '',
         r.replaced.length ? `Replaced: ${r.replaced.join(', ')}.` : '',
-      ].filter(Boolean).join(' '))
+      ].filter(Boolean).join(' ') || 'The file held no secrets.')
       await load()
     } catch (e) {
       setError(message(e, 'Failed to upload the file'))
@@ -75,12 +78,14 @@ export default function SecretsPage() {
   }
 
   async function remove(secretName: string) {
+    if (!window.confirm(`Delete ${secretName}?`)) return
     start()
     try {
       await api(`/api/secrets/${encodeURIComponent(secretName)}`, { method: 'DELETE' })
       await load()
     } catch (e) {
       setError(message(e, 'Failed to delete the secret'))
+      void load() // a 404 means another member deleted it: show the list as it is now
     }
   }
 
@@ -104,7 +109,7 @@ export default function SecretsPage() {
           {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
           {notice && <p role="status" className="text-xs">{notice}</p>}
           {secrets.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No secrets yet.</p>
+            loaded && <p className="text-sm text-muted-foreground">No secrets yet.</p>
           ) : (
             <ul className="flex flex-col gap-1">
               {secrets.map(s => (
@@ -112,7 +117,7 @@ export default function SecretsPage() {
                   <span className="font-mono">{s.name}</span>
                   <span className="flex items-center gap-3">
                     <span className="text-xs text-muted-foreground">
-                      {new Date(s.updated_at).toLocaleString()}
+                      {formatDate(s.updated_at)}
                     </span>
                     <Button variant="ghost" size="sm" aria-label={`Delete ${s.name}`}
                       onClick={() => void remove(s.name)}>
