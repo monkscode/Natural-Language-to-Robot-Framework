@@ -135,6 +135,18 @@ def test_bad_value_is_400(world):
     assert r.status_code == 400
 
 
+@pytest.mark.parametrize("method,path,raw", [
+    ("put", "/api/secrets/ok", b'{"value": "a\\ud800b"}'),            # a lone surrogate cannot be UTF-8
+    ("post", "/api/secrets/upload", b'{"content": "A=a\\ud800b\\n"}'),
+])
+def test_a_lone_surrogate_is_400_with_a_fixed_sentence(world, method, path, raw):
+    headers = {**world["a"], "Content-Type": "application/json"}
+    r = getattr(client, method)(path, content=raw, headers=headers)
+    assert r.status_code == 400
+    assert "cannot be stored" in r.json()["detail"]
+    assert client.get("/api/secrets", headers=world["a"]).json() == []
+
+
 @pytest.mark.parametrize("method,path,body", [
     ("put", "/api/secrets/x", {"secret": MARKER}),                        # misnamed field
     ("put", "/api/secrets/x", {"value": 123, "other": MARKER}),           # wrong type + extra

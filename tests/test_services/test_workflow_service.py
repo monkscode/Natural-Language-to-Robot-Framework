@@ -1360,7 +1360,7 @@ class TestRunSecrets:
 
     @pytest.fixture(autouse=True)
     def _capture_error_logs(self, caplog):
-        caplog.set_level(logging.ERROR)
+        caplog.set_level(logging.DEBUG)
 
     def test_no_names_keeps_todays_path(self, tmp_path):
         events, calls, rc, org_mock, gv_mock = _drive_secret_run(

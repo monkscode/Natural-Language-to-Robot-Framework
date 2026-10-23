@@ -289,7 +289,43 @@ def test_an_unexpected_scrub_failure_does_not_report_files_that_never_existed(tm
         tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(side_effect=OSError(_MARK)),
     )
     assert "Could not mask output.xml" in caplog.text
-    assert "report.html" not in caplog.text
+    assert "Could not mask report.html" not in caplog.text  # (the normal INFO line may name report.html)
+
+
+def test_fallback_deletes_a_symlink_itself_and_never_its_target(tmp_path):
+    outside = tmp_path / "outside.log"
+    outside.write_text(_MARK)
+    run_dir = tmp_path / "r1"
+    run_dir.mkdir()
+    try:
+        (run_dir / "x.log").symlink_to(outside)
+    except OSError:
+        pytest.skip("this host cannot create symlinks without a privilege")
+    _secret_run(tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(side_effect=OSError("boom")))
+    assert not (run_dir / "x.log").is_symlink()
+    assert outside.read_text() == _MARK
+
+
+def test_fallback_never_deletes_inside_a_folder_that_resolves_outside(tmp_path):
+    """Simulated, for hosts that cannot create symlinks: treat folder 'sub' as resolving outside."""
+    run_dir = tmp_path / "r1"
+    (run_dir / "sub").mkdir(parents=True)
+    (run_dir / "sub" / "x.log").write_text(_MARK)
+    (run_dir / "y.log").write_text(_MARK)
+    real_is_inside = docker_service.is_inside
+    with patch.object(docker_service, "is_inside", lambda p, r: p.name != "sub" and real_is_inside(p, r)):
+        _secret_run(tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(side_effect=OSError("boom")))
+    assert (run_dir / "sub" / "x.log").exists()
+    assert not (run_dir / "y.log").exists()
+
+
+def test_fallback_log_names_are_masked(tmp_path, caplog):
+    run_dir = tmp_path / "r1"
+    run_dir.mkdir()
+    (run_dir / f"{_MARK}.log").write_text("x")
+    _secret_run(tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(side_effect=OSError("boom")))
+    assert _MARK not in caplog.text
+    assert "Could not mask ***.log" in caplog.text
 
 
 def test_timeout_path_scrubs_and_masks(tmp_path, caplog):

@@ -79,6 +79,8 @@ services:
       - HOST_WORKSPACE_DIR=${PWD}
       - TEST_RUNNER_IMAGE_TAG=${TEST_RUNNER_IMAGE_TAG:-monkscode/nlrf:test-runner-latest}
       - ANONYMIZED_TELEMETRY=False
+      # Never decrypts org secrets: blank here beats the env_file's key (environment wins)
+      - SECRETS_ENCRYPTION_KEY=
     env_file:
       - ./src/backend/.env
     restart: unless-stopped
@@ -124,6 +126,8 @@ services:
       - BROWSER_USE_SERVICE_URL=http://browser-service:4999
       # Disable ChromaDB telemetry (posthog API version mismatch causes noisy errors)
       - ANONYMIZED_TELEMETRY=False
+      # Never decrypts org secrets: blank here beats the env_file's key (environment wins)
+      - SECRETS_ENCRYPTION_KEY=
       # Load additional env vars from .env file
     env_file:
       - ./src/backend/.env

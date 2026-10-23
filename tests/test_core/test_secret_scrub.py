@@ -2,10 +2,13 @@
 
 import base64
 import json
+import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -216,3 +219,76 @@ def test_xml_name_attribute_is_still_masked(tmp_path):
     scrub_run_dir(tmp_path, [MARK])
     root = ET.parse(tmp_path / "output.xml").getroot()
     assert root.find(".//test").get("name") == "Login ***"
+
+
+@pytest.mark.parametrize("value,attr", [
+    ("AR", "type"), ("Browser", "owner"), ("1", "pass"), ("1", "fail"), ("0", "skip"),
+    ("true", "html"), ("TEST", "flavor"),
+])
+def test_xml_robot_attributes_the_parsers_read_are_never_masked(tmp_path, value, attr):
+    (tmp_path / "output.xml").write_text(
+        '<robot><kw name="K" owner="Browser" type="TEARDOWN"><msg html="true" level="INFO">'
+        f'{value}</msg></kw><stat pass="1" fail="1" skip="0" flavor="TEST">{value}</stat></robot>',
+        encoding="utf-8",
+    )
+    scrub_run_dir(tmp_path, [value])
+    root = ET.parse(tmp_path / "output.xml").getroot()
+    kw, msg, stat = root.find("kw"), root.find(".//msg"), root.find("stat")
+    assert (kw.get("type"), kw.get("owner")) == ("TEARDOWN", "Browser")
+    assert (msg.get("html"), stat.get("pass"), stat.get("fail"), stat.get("skip"), stat.get("flavor")) == (
+        "true", "1", "1", "0", "TEST")
+    assert msg.text == "***" and stat.text == "***"  # text is still masked (positive control)
+
+
+def _link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this host cannot create symlinks without a privilege")
+
+
+def test_scrub_never_follows_a_symlink_out_of_the_run_folder(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    outside = tmp_path / "outside.log"
+    outside.write_text(f"keep {MARK}\n", encoding="utf-8")
+    before = outside.read_bytes()
+    _link(run / "x.log", outside)
+    (run / "real.log").write_text(f"fill {MARK}\n", encoding="utf-8")
+    changed = scrub_run_dir(run, [MARK])
+    assert changed == ["real.log"]  # the link is neither changed nor failed
+    assert outside.read_bytes() == before
+    assert (run / "real.log").read_text(encoding="utf-8") == "fill ***\n"
+
+
+def test_scrub_skips_a_path_that_resolves_outside_even_without_a_symlink_flag(tmp_path):
+    """The branch the privilege-less hosts cannot reach through os.symlink: simulate it."""
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "a.log").write_text(MARK, encoding="utf-8")
+    (run / "b.log").write_text(MARK, encoding="utf-8")
+    outside = str(tmp_path / "elsewhere" / "b.log")
+    real = os.path.realpath
+
+    def fake_realpath(p, *a, **k):
+        return outside if str(p).endswith("b.log") else real(p, *a, **k)
+
+    with patch("src.backend.core.secret_scrub.os.path.realpath", fake_realpath):
+        changed = scrub_run_dir(run, [MARK])
+    assert changed == ["a.log"]
+    assert (run / "b.log").read_text(encoding="utf-8") == MARK
+
+
+def test_scrub_skips_a_path_reported_as_a_symlink(tmp_path):
+    (tmp_path / "a.log").write_text(MARK, encoding="utf-8")
+    with patch.object(Path, "is_symlink", lambda self: self.name == "a.log"):
+        assert scrub_run_dir(tmp_path, [MARK]) == []
+    assert (tmp_path / "a.log").read_text(encoding="utf-8") == MARK
+
+
+def test_logged_file_names_are_masked(tmp_path, caplog):
+    (tmp_path / f"{MARK}.log").write_text(MARK, encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="src.backend.core.secret_scrub"):
+        scrub_run_dir(tmp_path, [MARK])
+    assert MARK not in caplog.text
+    assert "***.log" in caplog.text

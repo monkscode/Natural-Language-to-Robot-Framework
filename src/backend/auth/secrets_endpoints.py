@@ -61,6 +61,8 @@ def _guarded(fn, *args):
         raise HTTPException(503, str(exc)) from None
     except store.SecretRuleError as exc:
         raise HTTPException(400, str(exc)) from None
+    except UnicodeEncodeError:  # a lone surrogate in the JSON text; its message would quote the value
+        raise HTTPException(400, "A secret value holds a character that cannot be stored") from None
 
 
 @secrets_router.get("")

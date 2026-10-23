@@ -7,8 +7,11 @@ user's own credential into application.log, stdout and Loki via
 it covers structlog-native calls AND stdlib records routed through
 ProcessorFormatter's foreign_pre_chain — one place, no call-site discipline needed.
 
-Patterns are deliberately narrow: they mask the secret and keep the surrounding
-diagnostic text, because an error that redacts its own context is unusable.
+What it masks: Google API keys by shape; `key=` / `token=` / `password=` style
+assignments, JSON fields and Bearer tokens; private-key blocks; and, since #131, typed
+values (`fill("<value>")` calls and a password field's `value="<value>"`) cut per line.
+Each mask hides the secret and keeps the surrounding diagnostic text, because an error
+that redacts its own context is unusable.
 
 Third-party libraries that install their own handlers bypass the structlog chain
 entirely — litellm attaches a StreamHandler to stderr on its 'LiteLLM' loggers, and

@@ -685,7 +685,7 @@ def _hand_secret_values(elements: list[dict[str, Any]]) -> tuple[list[dict[str, 
     """Copy of `elements` where a value that is exactly `{{NAME}}` is the org's stored value,
     plus {stored value: "{{NAME}}"} for the swap back. Nothing to hand over (no such value, no
     user, no org, name no longer stored) returns the same list and {}. A lost or unset key
-    raises (SecretsUnavailable / InvalidToken) and fails the generation."""
+    raises (SecretsUnavailable; an unreadable stored value as a RuntimeError sentence) and fails the generation."""
     wanted = {}
     for index, element in enumerate(elements):
         value = element.get("value")
@@ -694,12 +694,19 @@ def _hand_secret_values(elements: list[dict[str, Any]]) -> tuple[list[dict[str, 
             wanted[index] = match.group(1).upper()
     if not wanted:
         return elements, {}
+    from cryptography.fernet import InvalidToken
     from src.backend.auth import secrets  # lazy: the auth stack stays out of plain element tests
 
     org_id = secrets.org_of(structlog.contextvars.get_contextvars().get("user_id"))
     if not org_id:
         return elements, {}
-    stored = secrets.get_values(org_id, set(wanted.values()))
+    try:
+        stored = secrets.get_values(org_id, set(wanted.values()))
+    except InvalidToken:  # carries no text: the user would see a blank "An error occurred: "
+        raise RuntimeError(
+            "This request's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
+            "Add them again on the Secrets page, then try again."
+        ) from None
     if not stored:
         return elements, {}
     handed = [

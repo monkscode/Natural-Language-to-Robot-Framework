@@ -7,7 +7,8 @@
  * server's 64 KB cap must be refused here with no request sent.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import { formatDate } from '@/lib/time'
 import SecretsPage from './SecretsPage'
 
 const MARKER = 'pw_marker_131'
@@ -208,7 +209,11 @@ describe('SecretsPage — upload a .env file', () => {
 })
 
 describe('SecretsPage — delete', () => {
-  it('DELETEs the name and it disappears from the list', async () => {
+  let confirmSpy: MockInstance<(message?: string) => boolean>
+  beforeEach(() => { confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true) })
+  afterEach(() => confirmSpy.mockRestore())
+
+  it('DELETEs the name after the user confirms and it disappears from the list', async () => {
     setup([
       { name: 'KEEP', updated_at: '2026-10-22T09:00:00Z' },
       { name: 'GONE', updated_at: '2026-10-22T09:00:00Z' },
@@ -217,17 +222,72 @@ describe('SecretsPage — delete', () => {
     await screen.findByText('GONE')
     fireEvent.click(screen.getByRole('button', { name: 'Delete GONE' }))
 
+    expect(confirmSpy).toHaveBeenCalledWith('Delete GONE?')
     await waitFor(() => expect(screen.queryByText('GONE')).not.toBeInTheDocument())
     expect(calls('DELETE')[0][0]).toBe('/api/secrets/GONE')
     expect(screen.getByText('KEEP')).toBeInTheDocument()
   })
 
-  it('shows the server sentence when delete fails', async () => {
+  it('sends nothing when the user cancels the confirmation', async () => {
+    confirmSpy.mockReturnValue(false)
+    setup([{ name: 'STAY', updated_at: '2026-10-22T09:00:00Z' }])
+    render(<SecretsPage />)
+    await screen.findByText('STAY')
+    fireEvent.click(screen.getByRole('button', { name: 'Delete STAY' }))
+
+    expect(confirmSpy).toHaveBeenCalledWith('Delete STAY?')
+    expect(calls('DELETE')).toHaveLength(0)
+    expect(screen.getByText('STAY')).toBeInTheDocument()
+  })
+
+  it('shows the server sentence when delete fails, and reloads the list', async () => {
     setup([{ name: 'X', updated_at: '2026-10-22T09:00:00Z' }],
       (m) => (m === 'DELETE' ? json(404, { detail: 'No such secret.' }) : undefined))
     render(<SecretsPage />)
     await screen.findByText('X')
+    expect(calls('GET')).toHaveLength(1)
+    // another member deleted it meanwhile: the reload shows the truth
+    rows = []
     fireEvent.click(screen.getByRole('button', { name: 'Delete X' }))
     expect(await screen.findByText('No such secret.')).toBeInTheDocument()
+    await waitFor(() => expect(calls('GET')).toHaveLength(2))
+    await waitFor(() => expect(screen.queryByText('X')).not.toBeInTheDocument())
+  })
+})
+
+describe('SecretsPage — empty states and dates', () => {
+  it('never says "No secrets yet." before the first answer arrives', async () => {
+    let release: (r: Response) => void = () => {}
+    setup()
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(res => { release = res }))
+    render(<SecretsPage />)
+    expect(screen.queryByText('No secrets yet.')).not.toBeInTheDocument()
+    release(json(200, []))
+    expect(await screen.findByText('No secrets yet.')).toBeInTheDocument()
+  })
+
+  it('does not say "No secrets yet." when the list failed to load', async () => {
+    setup([], (m) => (m === 'GET' ? json(503, { detail: 'Secrets are not set up' }) : undefined))
+    render(<SecretsPage />)
+    expect(await screen.findByText('Secrets are not set up')).toBeInTheDocument()
+    expect(screen.queryByText('No secrets yet.')).not.toBeInTheDocument()
+  })
+
+  it('writes the updated time with the house date helper', async () => {
+    const iso = '2026-10-22T09:00:00Z'
+    setup([{ name: 'DATED', updated_at: iso }])
+    render(<SecretsPage />)
+    expect(await screen.findByText(formatDate(iso))).toBeInTheDocument()
+  })
+
+  it('says so when an uploaded file held no secrets', async () => {
+    setup([], (m, p) => (m === 'POST' && p === '/api/secrets/upload'
+      ? json(200, { added: [], replaced: [] })
+      : undefined))
+    render(<SecretsPage />)
+    await screen.findByText('No secrets yet.')
+    fireEvent.change(screen.getByLabelText('Upload a .env file') as HTMLInputElement,
+      { target: { files: [new File(['# only a comment\n'], '.env')] } })
+    expect(await screen.findByText('The file held no secrets.')).toBeInTheDocument()
   })
 })
