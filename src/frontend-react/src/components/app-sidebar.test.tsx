@@ -112,6 +112,7 @@ const NAV_CASES: Array<{ title: string; gate: Gate }> = [
   { title: 'Learning', gate: { viewLearning: true } },
   { title: 'Access', gate: { admin: true } },
   { title: 'Team', gate: { orgAdmin: true } },
+  { title: 'Secrets', gate: {} },
   { title: 'Settings', gate: { admin: true } },
 ]
 

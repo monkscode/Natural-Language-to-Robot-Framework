@@ -21,6 +21,7 @@ import OAuthCallback from '@/auth/OAuthCallback'
 import AccessGatePage from '@/pages/AccessGatePage'
 import AccessConsolePage from '@/pages/AccessConsolePage'
 import TeamPage from '@/pages/TeamPage'
+import SecretsPage from '@/pages/SecretsPage'
 
 /**
  * Keep-alive page cache.
@@ -54,6 +55,7 @@ export const PAGES: Array<Gate & { path: string; node: JSX.Element }> = [
   { path: '/access', admin: true, node: <AccessConsolePage /> },
   { path: '/settings', admin: true, node: <SettingsPage /> },
   { path: '/team', orgAdmin: true, node: <TeamPage /> },
+  { path: '/secrets', node: <SecretsPage /> },
 ]
 
 function KeepAlivePages() {
@@ -148,6 +150,8 @@ export default function App() {
               <Route path="/settings"  element={null} />
               <Route path="/access" element={null} />
               <Route path="/team"   element={null} />
+              {/* Every org member (no gate) */}
+              <Route path="/secrets" element={null} />
               {/* catch-all — an unknown address, not a landing choice, so it
                   stays on Generate rather than following home */}
               <Route path="*"          element={<Navigate to="/generate" replace />} />
