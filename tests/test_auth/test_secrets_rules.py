@@ -61,10 +61,21 @@ def test_parse_env_file_good_lines_in_order():
 
 
 def test_parse_env_file_bad_line_names_line_only():
+    lines = list(_PROBE_LINES)
+    lines[4] = f"BAD LINE {MARKER}"  # the marker is ON the bad line (line 5)
     with pytest.raises(SecretRuleError) as exc:
-        parse_env_file("\n".join(_PROBE_LINES))
+        parse_env_file("\n".join(lines))
     assert str(exc.value).startswith("Line 5:")
     assert MARKER not in str(exc.value)
+
+
+def test_placeholder_regexes_are_one_pattern():
+    """secrets.py (query), element_identification.py (hand-off) and the normalizer (code) match the same text."""
+    from src.backend.auth.secrets import _QUERY_RE
+    from src.backend.crew_ai.element_identification import _SECRET_VALUE_RE
+    from src.backend.crew_ai.robot_code_normalizer import _SECRET_PLACEHOLDER_RE
+
+    assert _QUERY_RE.pattern == _SECRET_VALUE_RE.pattern == _SECRET_PLACEHOLDER_RE.pattern
 
 
 def test_parse_env_file_windows_bom_and_crlf():
@@ -88,6 +99,16 @@ def test_parse_env_file_size_cap():
     assert len(big.encode()) > 65536
     with pytest.raises(SecretRuleError):
         parse_env_file(big)
+
+
+def test_parse_env_file_size_cap_edge_is_in_utf8_bytes():
+    head = "A=1\n#" + "é" * 100  # 2-byte characters: the cap counts bytes, not characters
+    pad = 65536 - len((head + "\n").encode("utf-8"))
+    at_cap = head + "x" * pad + "\n"
+    assert len(at_cap.encode("utf-8")) == 65536
+    assert parse_env_file(at_cap) == [("A", "1")]
+    with pytest.raises(SecretRuleError):
+        parse_env_file(head + "x" * (pad + 1) + "\n")
 
 
 def test_parse_env_file_duplicate_last_wins():

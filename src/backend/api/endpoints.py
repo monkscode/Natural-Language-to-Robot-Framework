@@ -58,7 +58,7 @@ async def generate_test_only(query: Query, user: dict | None = Depends(require_u
     if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
 
-    logging.info(f"[GENERATE ONLY]Using {model_provider} model provider: {model_name}")
+    logging.info(f"[GENERATE ONLY] Using {model_provider} model provider: {model_name}")
 
     return StreamingResponse(stream_generate_only(user_query, model_provider, model_name, user=user), media_type=SSE_MEDIA_TYPE)
 
@@ -313,7 +313,7 @@ async def generate_and_run_streaming(query: Query, user: dict | None = Depends(r
     if model_provider == "gemini" and not settings.GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set.")
 
-    logging.info(f"[GENERATE AND RUN]Using {model_provider} model provider: {model_name}")
+    logging.info(f"[GENERATE AND RUN] Using {model_provider} model provider: {model_name}")
 
     return StreamingResponse(stream_generate_and_run(user_query, model_provider, model_name, user=user), media_type=SSE_MEDIA_TYPE)
 

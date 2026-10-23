@@ -23,9 +23,14 @@ The module has three jobs, all pure Python:
 No LLM, no network — the tool is injected as a plain callable.
 """
 
+import logging
+from unittest.mock import patch
+
 import pytest
+import structlog
 
 from src.backend.crew_ai.element_identification import (
+    _fetch_locator_mapping,
     action_for_keyword,
     build_elements,
     change_waits_from,
@@ -1790,13 +1795,6 @@ def test_both_refusal_reasons_at_once_log_one_warning(caplog):
 
 # ─── org secrets: the interim hand-off to browser-service (#131 T4b) ─────────
 
-import logging  # noqa: E402
-from unittest.mock import patch  # noqa: E402
-
-import structlog  # noqa: E402
-
-from src.backend.crew_ai.element_identification import _fetch_locator_mapping  # noqa: E402
-
 _MARKER = "pw_marker_131"
 _SECRETS = "src.backend.auth.secrets"
 
@@ -1899,6 +1897,19 @@ def test_get_values_errors_propagate(signed_in):
         with pytest.raises(SecretsUnavailable):
             _fetch_locator_mapping(
                 _pw_elements(), "u", "q", lambda e, u, q: runner_calls.append(e) or {})
+    assert runner_calls == []
+
+
+def test_an_unreadable_stored_value_stops_with_a_sentence_not_a_blank_error(signed_in):
+    from cryptography.fernet import InvalidToken
+    with patch(f"{_SECRETS}.org_of", return_value="org-1"), \
+            patch(f"{_SECRETS}.get_values", side_effect=InvalidToken()):
+        runner_calls = []
+        with pytest.raises(RuntimeError, match="Add them again on the Secrets page") as err:
+            _fetch_locator_mapping(
+                _pw_elements(), "u", "q", lambda e, u, q: runner_calls.append(e) or {})
+    assert "SECRETS_ENCRYPTION_KEY" in str(err.value)
+    assert err.value.__cause__ is None and err.value.__suppress_context__ is True
     assert runner_calls == []
 
 
