@@ -62,6 +62,8 @@ from src.backend.auth.db import init_auth_db, close_pool
 from src.backend.core import audit_log
 from src.backend.auth.org_db import init_org_db
 from src.backend.auth.invitations_db import init_invitations_db
+from src.backend.auth.secrets import init_secrets_db
+from src.backend.auth.secrets_endpoints import secrets_router
 
 # --- FastAPI App ---
 app = FastAPI(title="Mark 1 - AI Test Automation Platform")
@@ -135,6 +137,7 @@ register_error_handlers(app)
 app.include_router(auth_router)
 app.include_router(admin_access_router)
 app.include_router(org_router)
+app.include_router(secrets_router)
 
 # Generate/execute/feedback routes carry their own per-route guards (require_user).
 app.include_router(api_router)
@@ -215,11 +218,13 @@ async def startup_event():
         # (org_members references users). Same best-effort guard.
         init_org_db()
         init_invitations_db()
+        init_secrets_db()
     except Exception as e:
         logging.warning(
             f"[AUTH] auth store init (users/orgs/invitations) failed — auth unavailable until "
             f"Postgres is reachable: {e}"
         )
+    _warn_if_secrets_key_unusable()
 
     # Create the audit_log table (shared auth/users pool). Best-effort: a DB
     # outage must not block startup — the floor fails open until the table exists.
@@ -309,6 +314,21 @@ async def startup_event():
         get_temp_metrics_storage().cleanup_old_files(max_age_hours=24)
     except Exception as e:
         logging.warning(f"Startup temp metrics cleanup failed (non-fatal): {e}")
+
+
+def _warn_if_secrets_key_unusable():
+    """One WARNING when SECRETS_ENCRYPTION_KEY is unset or not a Fernet key.
+
+    The app still starts; the /api/secrets routes answer 503 until it is set.
+    The key itself is never logged."""
+    from cryptography.fernet import Fernet
+    try:
+        Fernet(settings.SECRETS_ENCRYPTION_KEY.encode())
+    except Exception:  # noqa: BLE001 — unset or malformed; the reason adds nothing
+        logging.warning(
+            "[AUTH] SECRETS_ENCRYPTION_KEY is unset or not a valid Fernet key; "
+            "org secrets are unavailable (set it in src/backend/.env)"
+        )
 
 
 def _check_learning_health():
