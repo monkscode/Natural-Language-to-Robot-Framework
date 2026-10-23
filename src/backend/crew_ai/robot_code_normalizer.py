@@ -60,6 +60,7 @@ Depends on:
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from src.backend.core.pass_quality import check_pass_quality, norm_locator
@@ -2223,12 +2224,15 @@ _SECRET_ENV_ARG_RE = re.compile(r"%NLRF_SECRET_([A-Z][A-Z0-9_]{0,63})")
 _SECRET_ENV_MARK = "%NLRF_SECRET_"
 _SECRET_FROM_TEXT = {"fill text": "Fill Secret", "type text": "Type Secret"}
 _TEXT_FROM_SECRET = {"fill secret": "Fill Text", "type secret": "Type Text"}
-_SECRET_PREFIXES = ("", "browser")
 
 
 def _secret_step_edits(robot_code: str, keywords: dict[str, str], resolved: bool,
-                       value_of) -> str:
-    """Rewrite each typing step whose second argument `value_of` accepts (returns the new cell for)."""
+                       value_of: Callable[[str], str | None]) -> str:
+    """Rewrite each typing step whose second argument `value_of` accepts (returns the new cell for).
+
+    `resolved`: a followable test resolves a whole-cell `${var}` first; a test the reader cannot follow
+    (a control structure) uses the RAW argument, so only a literal placeholder is seen there; a test with a
+    `[Template]` is skipped (its rows are data, not calls)."""
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code
@@ -2236,9 +2240,13 @@ def _secret_step_edits(robot_code: str, keywords: dict[str, str], resolved: bool
     changed = False
     for test in suite.tests:
         if resolved and not test.followable:
-            continue
-        for step, args in zip(test.steps, _follow(test, suite.variables) if resolved else (s.args for s in test.steps)):
-            if step.keyword not in keywords or step.prefix not in _SECRET_PREFIXES or len(args) < 2 or args[1] is None:
+            if any(s.setting and re.sub(_SPACE_UNDERSCORE, "", s.keyword) == "[template]" for s in test.steps):
+                continue
+            all_args = [s.args for s in test.steps]
+        else:
+            all_args = _follow(test, suite.variables) if resolved else [s.args for s in test.steps]
+        for step, args in zip(test.steps, all_args):
+            if step.keyword not in keywords or step.prefix not in _BROWSER_PREFIXES or len(args) < 2 or args[1] is None:
                 continue
             cell = value_of(args[1])
             if cell is not None:
@@ -2263,8 +2271,9 @@ def rewrite_secret_fills(robot_code: str) -> str:
     The second argument must be, after resolving a whole-cell `${var}` that a *** Variables *** row or a
     `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces); the name
     goes upper-case. The library prefix (`Browser.`) is kept; a Variables row is left as it is. Left alone: a
-    placeholder inside longer text, a check line holding one, a test the shared reader cannot follow, and
-    the whole file when the reader refuses it. Idempotent.
+    placeholder inside longer text, a check line holding one, a `${var}` argument in a test the shared reader
+    cannot follow (a control structure: only a literal placeholder is rewritten there), a `[Template]` test,
+    and the whole file when the reader refuses it. Idempotent.
     """
     if not robot_code or "{{" not in robot_code:
         return robot_code

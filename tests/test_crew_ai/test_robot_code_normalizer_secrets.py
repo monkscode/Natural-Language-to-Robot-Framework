@@ -96,9 +96,38 @@ class TestRewrite:
         code = "*** Test Cases ***\n| T |\n| | Fill Text | id=password | {{X}} |\n"
         assert rewrite_secret_fills(code) == code
 
-    def test_a_test_the_reader_cannot_follow_is_left_alone(self):
-        code = _suite("FOR    ${i}    IN RANGE    2", "    Fill Text    id=password    {{X}}", "END")
+    def test_a_test_with_an_unrelated_if_block_is_still_rewritten(self):
+        code = _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    {{PW}}")
+        out = rewrite_secret_fills(code)
+        assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
+        assert out.count("{{") == 0
+
+    def test_a_fill_inside_a_for_body_with_a_literal_placeholder_is_rewritten(self):
+        code = _suite("FOR    ${i}    IN RANGE    2", "    Fill Text    id=password    {{PW}}", "END")
+        out = rewrite_secret_fills(code)
+        assert "        Fill Secret    id=password    %NLRF_SECRET_PW\n" in out or \
+            "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
+        assert "{{" not in out
+
+    def test_an_unfollowable_test_with_a_variable_argument_is_left_alone(self):
+        code = _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    ${PW}",
+                      variables="${PW}    {{PW}}")
         assert rewrite_secret_fills(code) == code
+
+    def test_a_template_test_data_row_is_left_alone(self):
+        code = _suite("[Template]    Fill Text", "id=password    {{PW}}", "Fill Text    id=password    {{PW}}")
+        assert rewrite_secret_fills(code) == code
+
+    @pytest.mark.parametrize("code", [
+        _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    {{PW}}"),
+        _suite("FOR    ${i}    IN RANGE    2", "    Fill Text    id=password    {{PW}}", "END"),
+    ], ids=["if block", "for body"])
+    def test_unfollowable_rewrites_restore_and_stay_stable(self, code):
+        rewritten = rewrite_secret_fills(code)
+        assert rewritten != code
+        restored = restore_secret_placeholders(rewritten)
+        assert "{{PW}}" in restored and "%NLRF_SECRET_" not in restored
+        assert rewrite_secret_fills(restored) == rewritten
 
     def test_line_endings_survive(self):
         crlf = Q07.replace("\n", "\r\n")
