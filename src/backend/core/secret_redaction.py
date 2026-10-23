@@ -58,12 +58,33 @@ _PRIVATE_KEY_BLOCK = re.compile(
     re.DOTALL,
 )
 
+# Typed values (issue #131): Playwright quotes the call it failed on, `fill("<value>")`,
+# and an element preview echoes a password field's `value="<value>"`. Neither carries
+# a credential NAME the tiers above could key on, so they are matched by shape.
+# Quote style is kept; escaped quotes inside the value are consumed.
+_FILL_CALL = re.compile(r"""(\bfill\()("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
+
+# One `<input …>` tag (a quoted attribute may hold `>`); masked only when it is a
+# password field. HTML attribute names are case-insensitive.
+_INPUT_TAG = re.compile(r"""<input\b(?:"[^"]*"|'[^']*'|[^>"'])*>?""", re.IGNORECASE)
+_TYPE_PASSWORD = re.compile(r"""\btype\s*=\s*["']?password\b""", re.IGNORECASE)
+_VALUE_ATTR = re.compile(r"""(\bvalue\s*=\s*)("[^"]*"|'[^']*')""", re.IGNORECASE)
+
+
+def _mask_password_input(match: re.Match) -> str:
+    tag = match.group(0)
+    if not _TYPE_PASSWORD.search(tag):
+        return tag
+    return _VALUE_ATTR.sub(lambda m: f"{m.group(1)}{m.group(2)[0]}***{m.group(2)[0]}", tag)
+
 
 def redact_secrets(value):
     """Mask credentials in `value`. Non-strings are returned unchanged."""
     if not isinstance(value, str):
         return value
     out = _PRIVATE_KEY_BLOCK.sub(_PLACEHOLDER, value)
+    out = _FILL_CALL.sub(lambda m: f"{m.group(1)}{m.group(2)[0]}***{m.group(2)[0]}", out)
+    out = _INPUT_TAG.sub(_mask_password_input, out)
     out = _GOOGLE_API_KEY.sub(_PLACEHOLDER, out)
     out = _QUERY_SECRET.sub(lambda m: f"{m.group(1)}{_PLACEHOLDER}", out)
     out = _BEARER.sub(lambda m: f"{m.group(1)}{_PLACEHOLDER}", out)

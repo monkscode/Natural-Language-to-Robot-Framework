@@ -246,3 +246,43 @@ class TestWiredIntoTheRealFormatter:
         rendered = formatter.format(record)
         assert _FAKE_KEY not in rendered
         assert "CrewAI workflow failed" in rendered
+
+
+class TestTypedValueMasks:
+    """A typed value must not survive in a failure reason (issue #131)."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ('Error: fill("pw_marker_131") failed', 'Error: fill("***") failed'),
+        ("locator.fill('pw_marker_131', timeout=1000)", "locator.fill('***', timeout=1000)"),
+        ('fill("pw \\"quoted\\" 131")', 'fill("***")'),
+    ])
+    def test_masks_the_value_of_a_fill_call(self, text, expected):
+        out = redact_secrets(text)
+        assert "pw_marker_131" not in out
+        assert out == expected
+
+    @pytest.mark.parametrize("tag", [
+        '<input id="p" type="password" value="pw_marker_131">',
+        '<input value="pw_marker_131" id="p" type="password" />',
+        "<input id='p' type='password' value='pw_marker_131'>",
+        '<input id="p" TYPE="PASSWORD" VALUE="pw_marker_131">',
+        '<input id="p" type=password value="pw_marker_131">',
+        '<input title="a>b" type="password" value="pw_marker_131">',
+    ])
+    def test_masks_the_value_of_a_password_input(self, tag):
+        out = redact_secrets(f"element is not enabled: {tag} ...")
+        assert "pw_marker_131" not in out
+        assert 'value="***"' in out.lower() or "value='***'" in out.lower()
+        assert "element is not enabled" in out
+
+    def test_keeps_the_rest_of_the_password_tag(self):
+        out = redact_secrets('<input id="p" type="password" value="pw_marker_131" name="pw">')
+        assert out == '<input id="p" type="password" value="***" name="pw">'
+
+    def test_a_text_input_is_left_alone(self):
+        text = '<input type="text" value="Cierra">'
+        assert redact_secrets(text) == text
+
+    def test_a_password_tag_without_a_value_is_left_alone(self):
+        text = '<input id="p" type="password">'
+        assert redact_secrets(text) == text
