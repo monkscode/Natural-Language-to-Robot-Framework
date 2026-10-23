@@ -85,6 +85,8 @@ def normalize_name(raw: str) -> str:
 def check_value(value: str) -> None:
     if not 1 <= len(value) <= MAX_VALUE_CHARS:
         raise SecretRuleError(f"A secret value is 1 to {MAX_VALUE_CHARS:,} characters")
+    if "\r" in value or "\n" in value:
+        raise SecretRuleError("A secret value cannot hold a line break")
 
 
 def parse_env_file(text: str) -> list[tuple[str, str]]:
