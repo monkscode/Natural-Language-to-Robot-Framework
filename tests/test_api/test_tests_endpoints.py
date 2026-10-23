@@ -1470,6 +1470,41 @@ def test_new_test_mode_does_not_require_a_token(client):
     assert calls[0]["regenerate_test_id"] is None
 
 
+@pytest.mark.parametrize("mode", ["update", "new_test"])
+def test_versions_refuse_an_unknown_secret_before_generating(client, mode):
+    from unittest.mock import patch
+    from cryptography.fernet import Fernet
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls, \
+         patch("src.backend.auth.secrets.list_names", return_value=[]), \
+         patch("src.backend.auth.secrets.settings.SECRETS_ENCRYPTION_KEY",
+               Fernet.generate_key().decode()):
+        r = _regenerate(client, tok, test_id, "type {{NOPE}} in the box", mode=mode)
+    assert r.status_code == 400, r.text
+    assert "{{NOPE}}" in r.json()["detail"]
+    assert calls == []
+
+
+def test_versions_refuse_a_secret_when_the_key_is_unset(client):
+    from unittest.mock import patch
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls, \
+         patch("src.backend.auth.secrets.settings.SECRETS_ENCRYPTION_KEY", ""):
+        r = _regenerate(client, tok, test_id, "type {{PW}}")
+    assert r.status_code == 400, r.text
+    assert "not set up" in r.json()["detail"]
+    assert calls == []
+
+
+def test_new_test_mode_refuses_a_secret_without_a_signed_in_user(client):
+    _tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        r = _regenerate(client, None, test_id, "type {{PW}}", mode="new_test")
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Secrets in a request need a signed-in user."
+    assert calls == []
+
+
 def test_versions_audit_the_mode_that_was_asked_for(client, monkeypatch):
     """The path already names the test and the method already says it is a
     write; `mode` is the one thing in the request that changes what the
