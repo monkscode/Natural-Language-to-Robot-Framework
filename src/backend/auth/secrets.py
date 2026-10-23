@@ -16,6 +16,7 @@ from collections.abc import Iterable
 
 from cryptography.fernet import Fernet
 from dotenv.parser import parse_stream
+from fastapi import HTTPException
 
 from src.backend.auth.db import get_pool
 from src.backend.auth.org_repository import OrgRepository
@@ -85,6 +86,8 @@ def normalize_name(raw: str) -> str:
 def check_value(value: str) -> None:
     if not 1 <= len(value) <= MAX_VALUE_CHARS:
         raise SecretRuleError(f"A secret value is 1 to {MAX_VALUE_CHARS:,} characters")
+    if "\r" in value or "\n" in value:
+        raise SecretRuleError("A secret value cannot hold a line break")
 
 
 def parse_env_file(text: str) -> list[tuple[str, str]]:
@@ -125,6 +128,28 @@ def org_of(user_id: str | None) -> str | None:
         return None
     orgs = OrgRepository().get_orgs_for_user(user_id)
     return orgs[0]["org_id"] if orgs else None
+
+
+def require_query_secrets(user_query: str, user: dict | None) -> None:
+    """Raise a 400 before any generation when the query names a {{NAME}} the
+    caller's org does not hold. No braces: returns at once, no key or DB work."""
+    names = secret_names_in_query(user_query)
+    if not names:
+        return
+    if user is None:
+        raise HTTPException(400, "Secrets in a request need a signed-in user.")
+    try:
+        _fernet()  # key problems come first, whatever the org holds
+        org_id = org_of(user.get("user_id"))
+        held = {r["name"] for r in list_names(org_id)} if org_id else set()
+    except SecretsUnavailable as exc:
+        raise HTTPException(400, str(exc)) from None
+    missing = [f"{{{{{n}}}}}" for n in names if n not in held]
+    if len(missing) == 1:
+        raise HTTPException(400, f"Unknown secret {missing[0]}: add it on the Secrets page first.")
+    if missing:
+        raise HTTPException(
+            400, f"Unknown secrets {', '.join(missing)}: add them on the Secrets page first.")
 
 
 def list_names(org_id: str) -> list[dict]:

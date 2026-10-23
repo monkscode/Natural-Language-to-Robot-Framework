@@ -82,6 +82,67 @@ class TestGenerateEndpoint:
         assert resp.status_code == 400
 
 
+_SECRET_ROUTES = [
+    ("/generate-test", "stream_generate_only"),
+    ("/generate-and-run", "stream_generate_and_run"),
+]
+
+
+class TestSecretsInQuery:
+    """A {{NAME}} the org does not hold is refused with a 400 before any generation."""
+
+    @staticmethod
+    def _signed_in(client):
+        from src.backend.auth.jwt_utils import require_user
+        client.app.dependency_overrides[require_user] = lambda: {"user_id": "u-1"}
+
+    @pytest.mark.parametrize("path, stream", _SECRET_ROUTES)
+    def test_unknown_secret_is_refused_and_nothing_generates(self, api_client, path, stream):
+        from cryptography.fernet import Fernet
+        client, _, _ = api_client
+        self._signed_in(client)
+        with patch(f"src.backend.api.endpoints.{stream}") as gen, \
+             patch("src.backend.auth.secrets.org_of", return_value="org-1"), \
+             patch("src.backend.auth.secrets.list_names", return_value=[]), \
+             patch("src.backend.auth.secrets.settings.SECRETS_ENCRYPTION_KEY",
+                   Fernet.generate_key().decode()):
+            resp = client.post(path, json={"query": "type {{NOPE}} into the box"})
+        assert resp.status_code == 400
+        assert "{{NOPE}}" in resp.json()["detail"]
+        gen.assert_not_called()
+
+    @pytest.mark.parametrize("path, stream", _SECRET_ROUTES)
+    def test_signed_out_secret_is_refused_and_nothing_generates(self, api_client, path, stream):
+        client, _, _ = api_client  # require_user yields None with AUTH off
+        with patch(f"src.backend.api.endpoints.{stream}") as gen:
+            resp = client.post(path, json={"query": "type {{NOPE}}"})
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Secrets in a request need a signed-in user."
+        gen.assert_not_called()
+
+    @pytest.mark.parametrize("path, stream", _SECRET_ROUTES)
+    def test_unset_key_is_refused_and_nothing_generates(self, api_client, path, stream):
+        client, _, _ = api_client
+        self._signed_in(client)
+        with patch(f"src.backend.api.endpoints.{stream}") as gen, \
+             patch("src.backend.auth.secrets.org_of", return_value="org-1"), \
+             patch("src.backend.auth.secrets.settings.SECRETS_ENCRYPTION_KEY", ""):
+            resp = client.post(path, json={"query": "type {{PW}}"})
+        assert resp.status_code == 400
+        assert "not set up" in resp.json()["detail"]
+        gen.assert_not_called()
+
+    @pytest.mark.parametrize("path, stream", _SECRET_ROUTES)
+    def test_query_without_braces_makes_no_store_call(self, api_client, path, stream):
+        client, _, _ = api_client
+        with patch("src.backend.auth.secrets.org_of") as org, \
+             patch("src.backend.auth.secrets.list_names") as names:
+            resp = client.post(path, json={"query": "login to website"})
+        assert resp.status_code == 200
+        org.assert_not_called()
+        names.assert_not_called()
+
+
 class TestExecuteEndpoint:
     """Tests for POST /execute-test."""
 

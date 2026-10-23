@@ -103,3 +103,20 @@ def test_secret_names_in_query():
 def test_secret_names_in_code():
     code = "Fill Secret  id=pw  %NLRF_SECRET_A\nLog  %{NLRF_SECRET_B}"
     assert secret_names_in_code(code) == ["A", "B"]
+
+
+@pytest.mark.parametrize("bad", [f"a\nb{MARKER}", f"a\r{MARKER}", f"{MARKER}\r\n"])
+def test_check_value_refuses_a_line_break(bad):
+    with pytest.raises(SecretRuleError) as exc:
+        check_value(bad)
+    assert "line break" in str(exc.value)
+    assert MARKER not in str(exc.value)
+
+
+def test_parse_env_file_refuses_a_quoted_value_spanning_lines():
+    text = f'OK=1\nTWO_LINES="first\n{MARKER}"\nLAST=2\n'
+    with pytest.raises(SecretRuleError) as exc:
+        parse_env_file(text)
+    assert str(exc.value).startswith("Line 2:")
+    assert "line break" in str(exc.value)
+    assert MARKER not in str(exc.value)
