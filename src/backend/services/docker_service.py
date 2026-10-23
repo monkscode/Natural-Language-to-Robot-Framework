@@ -7,6 +7,7 @@ import traceback
 import requests as _requests
 import xml.etree.ElementTree as ET
 from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 
 # Load src/backend/.env BEFORE the getenv reads below. config's import runs
@@ -44,6 +45,7 @@ DOCKERFILE_PATH = os.path.join(os.path.dirname(
 # resolution below stays here — that is an execution concern, not storage.
 from src.backend.core.artifact_store import STAGING_ROOT
 from src.backend.core.config import settings
+from src.backend.core.secret_scrub import ScrubError, is_inside, mask_values, scrub_run_dir
 ROBOT_TESTS_DIR = str(STAGING_ROOT)
 
 # Docker-in-Docker Support: When running inside a Docker container, we need to use
@@ -308,8 +310,55 @@ def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, 
             raise
 
 
-def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str) -> dict[str, Any]:
+def _scrub_secret_values(run_id: str, values: list[str]) -> None:
+    """Mask org-secret values in the run folder; anything that cannot be masked is deleted.
+
+    Fails closed: a file the scrub names (or, on an unexpected scrub failure, every .xml/.html/.txt/.log
+    file) keeps every secret in it, so it is removed. A symlink is unlinked itself, never its target,
+    and nothing whose folder resolves outside the run folder is deleted. Logs file names only.
+    """
+    if not values:
+        return
+    run_dir = Path(ROBOT_TESTS_DIR) / run_id
+    root_real = os.path.realpath(run_dir)
+    try:
+        scrub_run_dir(run_dir, values)
+        return
+    except ScrubError as e:
+        names = list(e.files)
+    except Exception as e:  # noqa: BLE001 — the type only: its text may quote file content
+        logging.error(f"❌ DOCKER SERVICE: Secret scrub failed ({type(e).__name__}); deleting the report files")
+        # Every file the scrub would have read (it treats .txt / .log as value-bearing too).
+        try:
+            names = [p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")
+                     if (p.is_symlink() or p.is_file()) and p.suffix.lower() in (".xml", ".html", ".txt", ".log")]
+        except Exception:  # noqa: BLE001 — the walk itself failed: fall back to the fixed names
+            names = ["output.xml", "log.html", "report.html"]
+    for name in names:
+        target = run_dir / name
+        # unlink() removes a symlink itself, never its target; a folder that resolves outside is left alone
+        if not is_inside(target.parent, root_real):
+            continue
+        shown = mask_values(name, values)
+        try:
+            target.unlink()
+            logging.error(f"❌ DOCKER SERVICE: Could not mask {shown}; deleted it")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logging.error(f"❌ DOCKER SERVICE: Could not mask {shown} and could not delete it")
+
+
+def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str,
+                          env: dict[str, str] | None = None) -> dict[str, Any]:
     container = None
+    # Org-secret values (#131): masked out of every text this function builds, and out of the
+    # run folder after the container is gone. No env -> today's path, byte for byte.
+    secret_values = list(env.values()) if env else []
+
+    def _m(text: str) -> str:
+        return mask_values(text, secret_values) if secret_values else text
+
     logging.info(
         f"🚀 DOCKER SERVICE: Starting test execution for run_id={run_id}, test_filename={test_filename}")
 
@@ -383,6 +432,8 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges:true"],
         }
+        if env:
+            container_config["environment"] = dict(env)
         if settings.RUNNER_READ_ONLY_ROOTFS:
             # Validated in Task 10. Chrome/Playwright need writable scratch even
             # with --disable-dev-shm-usage, so a read-only rootfs gets tmpfs for
@@ -411,7 +462,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 f"✅ DOCKER SERVICE: No existing container {container_name} found, proceeding")
         except Exception as e:
             logging.error(
-                f"❌ DOCKER SERVICE: Failed to remove existing container {container_name}: {e}")
+                f"❌ DOCKER SERVICE: Failed to remove existing container {container_name}: {_m(str(e))}")
             # Try to clean up all test containers
             cleanup_test_containers(client)
 
@@ -442,7 +493,9 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 container._container.stop(timeout=10)
                 container._container.remove(force=True)
             except Exception as cleanup_err:
-                logging.warning(f"Cleanup after timeout failed: {cleanup_err}")
+                logging.warning(f"Cleanup after timeout failed: {_m(str(cleanup_err))}")
+            # RF streams output.xml during the run, so a killed run leaves a partial file.
+            _scrub_secret_values(run_id, secret_values)
             raise RuntimeError(
                 f"Test execution timed out after {TEST_EXECUTION_TIMEOUT // 60} minutes. "
                 "The test may have an infinite loop or unresponsive browser. Container has been stopped."
@@ -456,9 +509,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 container_startup_logs = raw_logs.decode('utf-8', errors='replace').strip()
             else:
                 container_startup_logs = str(raw_logs).strip()
+            container_startup_logs = _m(container_startup_logs)
         except Exception as e:
             logging.warning(
-                f"⚠️  DOCKER SERVICE: Could not capture container startup logs: {e}")
+                f"⚠️  DOCKER SERVICE: Could not capture container startup logs: {_m(str(e))}")
 
         # Clean up container immediately after execution to prevent conflicts
         logging.info(
@@ -472,7 +526,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 f"ℹ️  DOCKER SERVICE: Container {container_name} was already removed")
         except Exception as e:
             logging.error(
-                f"❌ DOCKER SERVICE: Failed to remove container {container_name}: {e}")
+                f"❌ DOCKER SERVICE: Failed to remove container {container_name}: {_m(str(e))}")
+
+        # Mask org-secret values in the run folder BEFORE anything reads output.xml.
+        _scrub_secret_values(run_id, secret_values)
 
         # Use Robot Framework output files instead of Docker container logs
         output_xml_path = os.path.join(ROBOT_TESTS_DIR, run_id, "output.xml")
@@ -488,8 +545,8 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         # Generate logs from Robot Framework files (much more reliable than Docker logs)
         logging.info(
             f"📋 DOCKER SERVICE: Extracting logs from Robot Framework files (NOT from Docker container logs)")
-        robot_logs = _extract_robot_framework_logs(
-            output_xml_path, log_html_path, exit_code)
+        robot_logs = _m(_extract_robot_framework_logs(
+            output_xml_path, log_html_path, exit_code))
         logging.info(
             f"✅ DOCKER SERVICE: Successfully extracted {len(robot_logs)} characters of Robot Framework logs")
 
@@ -546,7 +603,7 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
 
             except Exception as e:
                 logging.error(
-                    f"❌ DOCKER SERVICE: Failed to parse output.xml: {e}")
+                    f"❌ DOCKER SERVICE: Failed to parse output.xml: {_m(str(e))}")
                 # Fall back to exit code analysis
 
         else:
@@ -586,13 +643,15 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                     error_logs += "Container stdout/stderr (tail):\n"
                     error_logs += f"{container_startup_logs}\n\n"
                 error_logs += f"Available Logs:\n{robot_logs}"
+                error_logs = _m(error_logs)
                 logging.error(f"❌ DOCKER SERVICE: System error - {error_logs}")
                 raise RuntimeError(error_logs)
 
     except Exception as e:
+        err = _m(str(e))
         # Log detailed error information
         log_docker_operation(
-            "EXCEPTION_OCCURRED", f"Exception in run_test_in_container: {str(e)}", "error")
+            "EXCEPTION_OCCURRED", f"Exception in run_test_in_container: {err}", "error")
         log_docker_operation(
             "EXCEPTION_TYPE", f"Exception type: {type(e).__name__}", "error")
 
@@ -601,9 +660,9 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             log_docker_operation("409_ERROR_DETECTED",
                                  "🚨 FOUND THE 409 LOGS ERROR!", "error")
             log_docker_operation("409_ERROR_DETAILS",
-                                 f"Full error: {str(e)}", "error")
+                                 f"Full error: {err}", "error")
             log_docker_operation(
-                "409_ERROR_STACK", f"Stack trace: {''.join(traceback.format_exc())}", "error")
+                "409_ERROR_STACK", f"Stack trace: {_m(''.join(traceback.format_exc()))}", "error")
 
         # Clean up container if it exists
         if container:
@@ -622,11 +681,16 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
                 logging.info(f"✅ DOCKER SERVICE: Emergency cleanup successful")
             except Exception as cleanup_error:
                 logging.error(
-                    f"❌ DOCKER SERVICE: Emergency cleanup failed: {cleanup_error}")
+                    f"❌ DOCKER SERVICE: Emergency cleanup failed: {_m(str(cleanup_error))}")
+            # A container ran, so the run folder may hold typed values.
+            _scrub_secret_values(run_id, secret_values)
 
         logging.error(
-            f"❌ DOCKER SERVICE: Docker container execution failed: {e}")
-        raise RuntimeError(f"Docker container execution failed: {e}")
+            f"❌ DOCKER SERVICE: Docker container execution failed: {err}")
+        masked = RuntimeError(f"Docker container execution failed: {err}")
+        if secret_values:
+            raise masked from None  # do not chain the unmasked original
+        raise masked
 
 
 def _join_failure_header(message: str) -> str:

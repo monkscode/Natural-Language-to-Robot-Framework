@@ -92,6 +92,7 @@ from src.backend.api.groups_endpoints import (
 from src.backend.api.history_endpoints import _REPORT_STATUSES
 from src.backend.api.history_scope import history_scope, may_move_test
 from src.backend.auth.jwt_utils import require_user
+from src.backend.auth.secrets import require_query_secrets
 from src.backend.core.config import settings
 from src.backend.core.failure_sentences import failure_category, failure_sentence
 from src.backend.core.run_registry import get_run_registry
@@ -530,6 +531,8 @@ def create_test_version(
         reason = ("regenerated"
                   if current is not None and user_query == current.strip()
                   else "edited")
+
+    require_query_secrets(user_query, user)  # a sync route: already off the event loop
 
     # The same provider/key checks POST /generate-test makes, and for the
     # same reason: a missing key must fail here rather than inside the

@@ -43,6 +43,10 @@ import logging
 import re
 from typing import Any, Callable
 
+import structlog
+
+from src.backend.core.secret_scrub import mask_values
+
 from .tasks import IdentifiedElement, PlannedStep
 
 logger = logging.getLogger(__name__)
@@ -674,6 +678,63 @@ def _default_run_tool(elements: list[dict[str, Any]], url: str, user_query: str)
     return _batch_tool._run(elements=elements, url=url, user_query=user_query)
 
 
+_SECRET_VALUE_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
+
+
+def _hand_secret_values(elements: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Copy of `elements` where a value that is exactly `{{NAME}}` is the org's stored value,
+    plus {stored value: "{{NAME}}"} for the swap back. Nothing to hand over (no such value, no
+    user, no org, name no longer stored) returns the same list and {}. A lost or unset key
+    raises (SecretsUnavailable; an unreadable stored value as a RuntimeError sentence) and fails the generation."""
+    wanted = {}
+    for index, element in enumerate(elements):
+        value = element.get("value")
+        match = _SECRET_VALUE_RE.fullmatch(value) if isinstance(value, str) else None
+        if match:
+            wanted[index] = match.group(1).upper()
+    if not wanted:
+        return elements, {}
+    from cryptography.fernet import InvalidToken
+    from src.backend.auth import secrets  # lazy: the auth stack stays out of plain element tests
+
+    org_id = secrets.org_of(structlog.contextvars.get_contextvars().get("user_id"))
+    if not org_id:
+        return elements, {}
+    try:
+        stored = secrets.get_values(org_id, set(wanted.values()))
+    except InvalidToken:  # carries no text: the user would see a blank "An error occurred: "
+        raise RuntimeError(
+            "This request's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
+            "Add them again on the Secrets page, then try again."
+        ) from None
+    if not stored:
+        return elements, {}
+    handed = [
+        dict(element, value=stored[wanted[i]]) if wanted.get(i) in stored else element
+        for i, element in enumerate(elements)
+    ]
+    return handed, {stored[name]: "{{" + name + "}}" for name in sorted(stored, reverse=True)}
+
+
+def _swap_values_back(node: Any, name_of_value: dict[str, str]) -> Any:
+    """`node` with every stored value, in every string at any depth (dict keys too), replaced by
+    its `{{NAME}}`; longest value first, in ONE pass, so nothing is half-swapped or swapped twice."""
+    if not name_of_value:
+        return node
+    pattern = re.compile("|".join(re.escape(v) for v in sorted(name_of_value, key=len, reverse=True)))
+
+    def swap(item: Any) -> Any:
+        if isinstance(item, str):
+            return pattern.sub(lambda m: name_of_value[m.group(0)], item)
+        if isinstance(item, dict):
+            return {swap(k): swap(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return type(item)(swap(v) for v in item)
+        return item
+
+    return swap(node)
+
+
 def _fetch_locator_mapping(
     elements: list[dict[str, Any]],
     url: str,
@@ -682,15 +743,26 @@ def _fetch_locator_mapping(
 ) -> dict[str, dict[str, Any]]:
     """ONE batch tool call; every failure mode returns {} (placeholder path)."""
     runner = run_tool or _default_run_tool
+    # shortcut: bs still types what it is handed; the bs pin PR sends the name + a "secrets" map instead
+    elements, name_of_value = _hand_secret_values(elements)
     try:
         response = runner(elements, url, user_query) or {}
-    except Exception:
+    except Exception as exc:
         # CONTRACT: no retry, no reformulation — degrade to placeholders.
-        logger.exception(
-            "batch_browser_automation raised — steps fall back to the "
-            "found:false placeholder path (no retry by design)"
-        )
+        if name_of_value:
+            # No traceback, and the text masked: an error that echoes the request could hold a value.
+            logger.error(
+                "batch_browser_automation raised %s: %s — steps fall back to the "
+                "found:false placeholder path (no retry by design)",
+                type(exc).__name__, mask_values(str(exc), name_of_value),
+            )
+        else:
+            logger.exception(
+                "batch_browser_automation raised — steps fall back to the "
+                "found:false placeholder path (no retry by design)"
+            )
         response = {}
+    response = _swap_values_back(response, name_of_value)
     if response.get("status") != "success":
         logger.warning(
             "batch_browser_automation returned status=%r — steps fall back "

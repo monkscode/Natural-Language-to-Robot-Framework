@@ -107,3 +107,18 @@ def test_malformed_timeout_env_falls_back_without_raising(monkeypatch):
         # Restore the module to its default-env state for the rest of the suite.
         monkeypatch.delenv("TEST_EXECUTION_TIMEOUT", raising=False)
         importlib.reload(rc)
+
+
+def test_execute_without_env_sends_todays_body():
+    with patch.object(rc.requests, "post", return_value=_resp({"test_status": "passed"})) as p:
+        rc.execute("abc123", "test.robot")
+    assert p.call_args.kwargs["json"] == {"run_id": "abc123", "test_filename": "test.robot"}
+
+
+def test_execute_with_env_carries_it_in_the_body():
+    with patch.object(rc.requests, "post", return_value=_resp({"test_status": "passed"})) as p:
+        rc.execute("abc123", "test.robot", env={"NLRF_SECRET_PW": "pw_marker_131"})
+    assert p.call_args.kwargs["json"] == {
+        "run_id": "abc123", "test_filename": "test.robot",
+        "env": {"NLRF_SECRET_PW": "pw_marker_131"},
+    }

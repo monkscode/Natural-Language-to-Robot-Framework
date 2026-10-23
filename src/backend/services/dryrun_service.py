@@ -50,7 +50,9 @@ from src.backend.crew_ai.robot_code_normalizer import (
     insert_change_waits,
     normalize_robot_code,
     remove_change_waits,
+    restore_secret_placeholders,
     rewrite_empty_loop_checks,
+    rewrite_secret_fills,
     rewrite_select_text_reads,
     rewrite_text_checks_whole_word,
     rewrite_typed_value_reads,
@@ -94,7 +96,7 @@ def extract_and_normalize_robot_code(task_output) -> str:
       then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
             rewrite_visibility_checks_to_wait → rewrite_select_text_reads →
-            rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → ensure_browser_timeout.
+            rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → rewrite_secret_fills → ensure_browser_timeout.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -201,12 +203,15 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # list gets one Should Not Be Empty line. It runs last so that, on generation,
     # the rewrites above see the code exactly as they did before it existed.
     # Same place as the visibility rewrite, for the same reason: every repair
-    # round passes through here too. All four are optional and skip-only, so one
+    # round passes through here too. All five are optional and skip-only, so one
     # that raises costs only its own rewrite, never the generation.
+    # The very last: a typed `{{NAME}}` org secret becomes `Fill Secret … %NLRF_SECRET_NAME`
+    # (#131), after every rewrite above has seen the placeholder form it reads.
     for name, rewrite in (("rewrite_select_text_reads", rewrite_select_text_reads),
                           ("rewrite_typed_value_reads", rewrite_typed_value_reads),
                           ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word),
-                          ("rewrite_empty_loop_checks", rewrite_empty_loop_checks)):
+                          ("rewrite_empty_loop_checks", rewrite_empty_loop_checks),
+                          ("rewrite_secret_fills", rewrite_secret_fills)):
         try:
             robot_code = rewrite(robot_code)
         except Exception:
@@ -669,8 +674,11 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     # The repair LLM is handed the test WITHOUT the two change-wait
                     # lines (it would edit, copy or "fix" them); the pair goes back
                     # below. Only when marks exist: no marks, no pair of ours.
+                    # It also sees `{{NAME}}`, never the `%NLRF_SECRET_NAME` env name (#131);
+                    # the rewrite in extract_and_normalize_robot_code puts it back.
                     task_output, attempt_usage, attempt_guardrails = repair_robot_code(
-                        run_id, remove_change_waits(code) if change_waits else code,
+                        run_id,
+                        restore_secret_placeholders(remove_change_waits(code) if change_waits else code),
                         last_result["errors"], model_provider, model_name,
                     )
                     # Count the repair cost as soon as it is known, before

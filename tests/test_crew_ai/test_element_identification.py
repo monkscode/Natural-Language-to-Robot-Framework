@@ -23,9 +23,14 @@ The module has three jobs, all pure Python:
 No LLM, no network — the tool is injected as a plain callable.
 """
 
+import logging
+from unittest.mock import patch
+
 import pytest
+import structlog
 
 from src.backend.crew_ai.element_identification import (
+    _fetch_locator_mapping,
     action_for_keyword,
     build_elements,
     change_waits_from,
@@ -1786,3 +1791,170 @@ def test_both_refusal_reasons_at_once_log_one_warning(caplog):
     with caplog.at_level("WARNING", logger=_EI_LOGGER):
         assert change_waits_from(steps, ids, mapping) == []
     assert _refusals(caplog) == [_CAME_BACK_MESSAGE.format(id="elem_2")]
+
+
+# ─── org secrets: the interim hand-off to browser-service (#131 T4b) ─────────
+
+_MARKER = "pw_marker_131"
+_SECRETS = "src.backend.auth.secrets"
+
+
+@pytest.fixture
+def signed_in():
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(user_id="user-1")
+    yield
+    structlog.contextvars.clear_contextvars()
+
+
+def _run(elements, response, store=None, org="org-1"):
+    """Call _fetch_locator_mapping with a recording runner and a patched store."""
+    sent = []
+
+    def runner(els, url, query):
+        sent.append(els)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    with patch(f"{_SECRETS}.org_of", return_value=org) as org_of, \
+            patch(f"{_SECRETS}.get_values", return_value=store or {}) as get_values:
+        out = _fetch_locator_mapping(elements, "https://x.test", "q", runner)
+    return out, sent, org_of, get_values
+
+
+def _pw_elements():
+    return [{"id": "elem_1", "description": "password", "action": "input", "value": "{{PW}}"}]
+
+
+def test_secret_value_is_handed_to_bs_and_swapped_back(signed_in):
+    elements = _pw_elements()
+    response = {"status": "success", "locator_mapping": {"elem_1": {
+        "found": True, "best_locator": f"css=input[value='{_MARKER}']",
+        "all_locators": [{"locator": f"text={_MARKER}"}]}}}
+    out, sent, _, get_values = _run(elements, response, {"PW": _MARKER})
+    assert sent[0][0]["value"] == _MARKER
+    assert elements[0]["value"] == "{{PW}}"  # the caller's list is not mutated
+    get_values.assert_called_once_with("org-1", {"PW"})
+    assert out["elem_1"]["best_locator"] == "css=input[value='{{PW}}']"
+    assert out["elem_1"]["all_locators"] == [{"locator": "text={{PW}}"}]
+    assert _MARKER not in repr(out)
+
+
+def test_name_in_braces_with_spaces_and_lower_case_is_a_secret(signed_in):
+    elements = [{"id": "e", "value": "{{ pw }}"}]
+    _, sent, _, get_values = _run(elements, {"status": "success"}, {"PW": _MARKER})
+    assert sent[0][0]["value"] == _MARKER
+    get_values.assert_called_once_with("org-1", {"PW"})
+
+
+def test_value_that_only_contains_braces_is_left_alone(signed_in):
+    elements = [{"id": "e", "value": "x{{PW}}"}, {"id": "f", "value": "{{PW}}{{PW}}"}]
+    _, sent, org_of, get_values = _run(elements, {"status": "success"}, {"PW": _MARKER})
+    assert sent[0] == elements
+    org_of.assert_not_called()
+    get_values.assert_not_called()
+
+
+def test_no_user_means_no_lookup_and_elements_unchanged():
+    structlog.contextvars.clear_contextvars()
+    elements = _pw_elements()
+    with patch(f"{_SECRETS}.org_of", return_value=None) as org_of, \
+            patch(f"{_SECRETS}.get_values") as get_values:
+        sent = []
+        _fetch_locator_mapping(elements, "u", "q", lambda e, u, q: sent.append(e) or {})
+    org_of.assert_called_once_with(None)
+    get_values.assert_not_called()
+    assert sent[0] == elements
+
+
+def test_user_without_org_means_no_lookup(signed_in):
+    elements = _pw_elements()
+    _, sent, _, get_values = _run(elements, {}, org=None)
+    get_values.assert_not_called()
+    assert sent[0] == elements
+
+
+def test_a_plain_query_never_touches_the_store(signed_in):
+    elements = [{"id": "e", "description": "search", "value": "shoes"}]
+    _, sent, org_of, get_values = _run(elements, {"status": "success"})
+    org_of.assert_not_called()
+    get_values.assert_not_called()
+    assert sent[0] is elements
+
+
+def test_name_the_store_no_longer_holds_keeps_the_placeholder(signed_in):
+    elements = _pw_elements() + [{"id": "elem_2", "value": "{{OTHER}}"}]
+    _, sent, _, _ = _run(elements, {"status": "success"}, {"OTHER": _MARKER})
+    assert [e["value"] for e in sent[0]] == ["{{PW}}", _MARKER]
+
+
+def test_get_values_errors_propagate(signed_in):
+    from src.backend.auth.secrets import SecretsUnavailable
+    with patch(f"{_SECRETS}.org_of", return_value="org-1"), \
+            patch(f"{_SECRETS}.get_values", side_effect=SecretsUnavailable("not set up")):
+        runner_calls = []
+        with pytest.raises(SecretsUnavailable):
+            _fetch_locator_mapping(
+                _pw_elements(), "u", "q", lambda e, u, q: runner_calls.append(e) or {})
+    assert runner_calls == []
+
+
+def test_an_unreadable_stored_value_stops_with_a_sentence_not_a_blank_error(signed_in):
+    from cryptography.fernet import InvalidToken
+    with patch(f"{_SECRETS}.org_of", return_value="org-1"), \
+            patch(f"{_SECRETS}.get_values", side_effect=InvalidToken()):
+        runner_calls = []
+        with pytest.raises(RuntimeError, match="Add them again on the Secrets page") as err:
+            _fetch_locator_mapping(
+                _pw_elements(), "u", "q", lambda e, u, q: runner_calls.append(e) or {})
+    assert "SECRETS_ENCRYPTION_KEY" in str(err.value)
+    assert err.value.__cause__ is None and err.value.__suppress_context__ is True
+    assert runner_calls == []
+
+
+def test_swap_back_reaches_dict_keys_nested_values_and_a_non_success_response(signed_in):
+    response = {
+        "status": "error", "message": f"typed {_MARKER}",
+        "locator_mapping": {f"k_{_MARKER}": {"nested": [{"s": f"a {_MARKER} b"}, (f"{_MARKER}",)],
+                                              "n": 3, "none": None}},
+    }
+    out, _, _, _ = _run(_pw_elements(), response, {"PW": _MARKER})
+    assert out == {"k_{{PW}}": {"nested": [{"s": "a {{PW}} b"}, ("{{PW}}",)], "n": 3, "none": None}}
+
+
+def test_the_whole_response_is_swapped_before_the_status_warning(signed_in, caplog):
+    response = {"status": f"bad {_MARKER}", "locator_mapping": {}}
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _run(_pw_elements(), response, {"PW": _MARKER})
+    assert _MARKER not in caplog.text
+    assert "bad {{PW}}" in caplog.text
+
+
+def test_longest_value_first_nothing_half_swapped(signed_in):
+    elements = [{"id": "a", "value": "{{SHORT}}"}, {"id": "b", "value": "{{LONG}}"}]
+    response = {"status": "success", "locator_mapping": {"x": {"s": "abcd1234 and abcd"}}}
+    out, _, _, _ = _run(elements, response, {"SHORT": "abcd", "LONG": "abcd1234"})
+    assert out == {"x": {"s": "{{LONG}} and {{SHORT}}"}}
+
+
+def test_runner_exception_with_a_value_logs_type_and_masked_text_without_traceback(signed_in, caplog):
+    with caplog.at_level(logging.ERROR, logger="src.backend.crew_ai.element_identification"):
+        out, _, _, _ = _run(_pw_elements(), RuntimeError(f"bad request value={_MARKER}"), {"PW": _MARKER})
+    assert out == {}
+    assert _MARKER not in caplog.text
+    assert "RuntimeError" in caplog.text and "***" in caplog.text
+    assert all(r.exc_info is None for r in caplog.records)
+    assert "Traceback" not in caplog.text
+
+
+def test_runner_exception_without_secrets_keeps_the_traceback_log(caplog):
+    structlog.contextvars.clear_contextvars()
+    with caplog.at_level(logging.ERROR, logger="src.backend.crew_ai.element_identification"):
+        out = _fetch_locator_mapping(
+            [{"id": "e", "value": "shoes"}], "u", "q",
+            lambda e, u, q: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert out == {}
+    records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(records) == 1 and records[0].exc_info is not None
+    assert records[0].getMessage().startswith("batch_browser_automation raised — steps fall back")

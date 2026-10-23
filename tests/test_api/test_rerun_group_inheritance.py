@@ -247,7 +247,7 @@ class TestRerunServiceWritesTheFolder:
 
         seen = {}
 
-        async def fake_docker(run_id, robot_code, user_query, release_slot):
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
             seen["run_id"] = run_id
             release_slot()
             yield "data: ok\n\n"
