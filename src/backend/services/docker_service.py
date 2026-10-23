@@ -45,7 +45,7 @@ DOCKERFILE_PATH = os.path.join(os.path.dirname(
 # resolution below stays here — that is an execution concern, not storage.
 from src.backend.core.artifact_store import STAGING_ROOT
 from src.backend.core.config import settings
-from src.backend.core.secret_scrub import ScrubError, mask_values, scrub_run_dir
+from src.backend.core.secret_scrub import ScrubError, is_inside, mask_values, scrub_run_dir
 ROBOT_TESTS_DIR = str(STAGING_ROOT)
 
 # Docker-in-Docker Support: When running inside a Docker container, we need to use
@@ -313,12 +313,14 @@ def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, 
 def _scrub_secret_values(run_id: str, values: list[str]) -> None:
     """Mask org-secret values in the run folder; anything that cannot be masked is deleted.
 
-    Fails closed: a file the scrub names (or, on an unexpected scrub failure, the standard
-    report files) keeps every secret in it, so it is removed. Logs file names only.
+    Fails closed: a file the scrub names (or, on an unexpected scrub failure, every .xml/.html/.txt/.log
+    file) keeps every secret in it, so it is removed. A symlink is unlinked itself, never its target,
+    and nothing whose folder resolves outside the run folder is deleted. Logs file names only.
     """
     if not values:
         return
     run_dir = Path(ROBOT_TESTS_DIR) / run_id
+    root_real = os.path.realpath(run_dir)
     try:
         scrub_run_dir(run_dir, values)
         return
@@ -329,17 +331,22 @@ def _scrub_secret_values(run_id: str, values: list[str]) -> None:
         # Every file the scrub would have read (it treats .txt / .log as value-bearing too).
         try:
             names = [p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")
-                     if p.is_file() and p.suffix.lower() in (".xml", ".html", ".txt", ".log")]
+                     if (p.is_symlink() or p.is_file()) and p.suffix.lower() in (".xml", ".html", ".txt", ".log")]
         except Exception:  # noqa: BLE001 — the walk itself failed: fall back to the fixed names
             names = ["output.xml", "log.html", "report.html"]
     for name in names:
+        target = run_dir / name
+        # unlink() removes a symlink itself, never its target; a folder that resolves outside is left alone
+        if not is_inside(target.parent, root_real):
+            continue
+        shown = mask_values(name, values)
         try:
-            (run_dir / name).unlink()
-            logging.error(f"❌ DOCKER SERVICE: Could not mask {name}; deleted it")
+            target.unlink()
+            logging.error(f"❌ DOCKER SERVICE: Could not mask {shown}; deleted it")
         except FileNotFoundError:
             continue
         except OSError:
-            logging.error(f"❌ DOCKER SERVICE: Could not mask {name} and could not delete it")
+            logging.error(f"❌ DOCKER SERVICE: Could not mask {shown} and could not delete it")
 
 
 def run_test_in_container(client: docker.DockerClient, run_id: str, test_filename: str,

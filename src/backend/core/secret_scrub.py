@@ -19,6 +19,7 @@ import base64
 import html
 import json
 import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 import zlib
@@ -52,7 +53,15 @@ _TEXT_SUFFIXES = {".txt", ".log"}
 _XML_BOOKKEEPING = frozenset({
     "status", "start", "elapsed", "time", "level", "id", "line",
     "generated", "generator", "schemaversion", "rpa", "starttime", "endtime",
+    # read by the failure analysers: keyword type / owner library, <stat> counts, <msg html>, flavor
+    "type", "owner", "pass", "fail", "skip", "html", "flavor",
 })
+
+
+def is_inside(path: Path, root_real: str) -> bool:
+    """True when ``path`` resolves under ``root_real`` (same test as artifact_store._safe_subpath)."""
+    real = os.path.realpath(path)
+    return real == root_real or real.startswith(root_real + os.sep)
 
 
 def _forms(value: str) -> set[str]:
@@ -138,14 +147,17 @@ def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
 
     Images and other binary files are left alone. Nothing is logged but file names. A file that
     cannot be scrubbed does not stop the others: after all are done, ``ScrubError`` names it.
+    A symlink, or a path that resolves outside ``run_dir`` (a test container can plant one), is
+    skipped: never read, never written, neither changed nor failed.
     """
     values = [v for v in values if v]
     if not values:
         return []
     root = Path(run_dir)
+    root_real = os.path.realpath(root)
     changed, failed = [], []
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        if path.is_symlink() or not is_inside(path, root_real) or not path.is_file():
             continue
         suffix = path.suffix.lower()
         name = path.relative_to(root).as_posix()
@@ -163,7 +175,7 @@ def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
             continue
         if did:
             changed.append(name)
-    logger.info("secret scrub changed %d file(s): %s", len(changed), ", ".join(changed))
+    logger.info("secret scrub changed %d file(s): %s", len(changed), mask_values(", ".join(changed), values))
     if failed:
         raise ScrubError(failed)
     return changed
