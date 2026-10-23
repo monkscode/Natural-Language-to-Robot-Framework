@@ -78,7 +78,9 @@ describe('SecretsPage — list and copy', () => {
       'Passwords and keys your tests type. Values are encrypted and never shown again.',
     )).toBeInTheDocument()
     expect(screen.getByText(/Write \{\{NAME\}\} in a test request/)).toBeInTheDocument()
-    expect(screen.getByText(/The AI never sees the value; the test reads it when it runs\./)).toBeInTheDocument()
+    expect(screen.getByText(/The AI that writes your test sees only the name; the test reads the value when it runs\./)).toBeInTheDocument()
+    expect(screen.getByText(/For now, the browser AI that finds the field is given the value so it can type it\./)).toBeInTheDocument()
+    expect(screen.queryByText(/never sees the value/)).not.toBeInTheDocument()
     expect(screen.getByText('Every member of your organization can use, replace and delete these.'))
       .toBeInTheDocument()
     expect(screen.getByText(

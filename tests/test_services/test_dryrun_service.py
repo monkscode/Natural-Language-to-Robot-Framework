@@ -587,6 +587,24 @@ class TestExtractAndNormalize:
         assert "css=input[id=foo]" in out
         assert "css=[data-x=y]" in out
 
+    _TYPED_READ = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+                   "    Fill Text    id=pw    {value}\n"
+                   "    ${{typed}}=    Get Attribute    id=pw    value\n"
+                   "    Should Be Equal    ${{typed}}    x")
+
+    def test_secret_placeholder_is_not_read_back_through_get_property(self):
+        """#131: the typed-value rewrite runs before the secret rewrite, so it must refuse a `{{NAME}}` file."""
+        raw = self._TYPED_READ.format(value="{{PW}}")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Fill Secret    id=pw    %NLRF_SECRET_PW" in out
+        assert "Get Property" not in out
+
+    def test_literal_typed_value_is_still_read_through_get_property(self):
+        raw = self._TYPED_READ.format(value="hunter2")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Get Property" in out
+        assert "Fill Secret" not in out
+
     def test_multiple_settings_blocks_uses_last(self):
         raw = ("*** Settings ***\nLibrary    OldLib\n\n"
                "*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n    Log    hi\n")

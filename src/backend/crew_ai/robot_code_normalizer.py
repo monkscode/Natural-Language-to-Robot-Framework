@@ -1375,6 +1375,8 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     environment) in the same call (`Run Keyword    Fill ${EMPTY}Secret    <L>
     ${{chr(36)+'pw'}}`), and a `Secret` passed in from outside the file (a
     `--variable`, a variable file, a library; the runner passes none).
+    A `{{NAME}}` org-secret placeholder anywhere in the file counts too: it
+    becomes Fill Secret after this rewrite runs.
     Idempotent.
     """
     if not robot_code:
@@ -1383,8 +1385,10 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
         return robot_code
     if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code) or "%" in robot_code or "\\" in robot_code:
         return robot_code  # a secret form ($name, %NAME) or a Robot escape that builds one: the read would log it
-    if _names_secret_keyword(robot_code):
-        return robot_code  # Fill Secret / Type Secret, whatever its arguments: the read would log the secret
+    if _names_secret_keyword(robot_code) or _SECRET_PLACEHOLDER_RE.search(robot_code):
+        # Fill Secret / Type Secret, whatever its arguments — or a `{{NAME}}` placeholder that the secret rewrite
+        # (last in the chain) turns into Fill Secret: the read would log the secret
+        return robot_code
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code

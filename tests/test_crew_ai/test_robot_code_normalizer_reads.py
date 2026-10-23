@@ -1180,3 +1180,12 @@ class TestReaderBranches:
         assert _read_variable("", variables, "customercitylocator") == "customercitylocator"
         assert _read_variable("    # a comment", variables, "customercitylocator") == "customercitylocator"
         assert variables == {"customercitylocator": "id=customer.address.city"}
+
+    def test_a_secret_placeholder_leaves_the_file_alone(self):
+        # `{{PW}}` becomes `Fill Secret … %NLRF_SECRET_PW` later in the chain, so the read would log the secret (#131).
+        source = _n1("Fill Text    ${customer_city_locator}    {{PW}}", _ATTR, _USE)
+        assert rewrite_typed_value_reads(source) == source
+
+    def test_a_literal_value_is_still_rewritten_beside_a_placeholder_control(self):
+        source = _n1("Fill Text    ${customer_city_locator}    hunter2", _ATTR, _USE)
+        assert rewrite_typed_value_reads(source) == source.replace(_ATTR, _PROP)
