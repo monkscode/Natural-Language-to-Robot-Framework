@@ -46,3 +46,49 @@ def test_health_reports_socket_reachable():
     with patch("src.backend.runner_exec.app.get_docker_client", return_value=fake_client):
         r = client.get("/health")
     assert r.status_code == 200 and r.json()["status"] == "ok"
+
+
+_MARK = "pw_marker_131"
+
+
+def _post_execute(env):
+    return client.post("/execute", json={"run_id": "abc123", "test_filename": "test.robot", "env": env})
+
+
+def test_execute_passes_a_valid_secret_env_through():
+    with patch("src.backend.runner_exec.app.get_docker_client", return_value=MagicMock()), \
+         patch("src.backend.runner_exec.app.run_test_in_container",
+               return_value={"status": "complete"}) as run_mock:
+        r = _post_execute({"NLRF_SECRET_PW": _MARK})
+    assert r.status_code == 200
+    assert run_mock.call_args.kwargs["env"] == {"NLRF_SECRET_PW": _MARK}
+
+
+def test_execute_refuses_a_key_outside_the_secret_prefix_and_never_echoes_a_value():
+    with patch("src.backend.runner_exec.app.run_test_in_container") as run_mock:
+        r = _post_execute({"LD_PRELOAD": _MARK})
+    assert r.status_code == 400
+    assert "LD_PRELOAD" in r.text and _MARK not in r.text
+    run_mock.assert_not_called()
+
+
+def test_execute_refuses_a_non_string_value_and_never_echoes_it():
+    with patch("src.backend.runner_exec.app.run_test_in_container") as run_mock:
+        r = _post_execute({"NLRF_SECRET_PW": {"x": _MARK}})
+    assert r.status_code == 400
+    assert "NLRF_SECRET_PW" in r.text and _MARK not in r.text
+    run_mock.assert_not_called()
+
+
+def test_execute_refuses_a_non_object_env_without_echoing_it():
+    r = _post_execute(_MARK)
+    assert r.status_code == 400 and _MARK not in r.text
+
+
+def test_execute_masks_a_value_in_the_500_detail():
+    with patch("src.backend.runner_exec.app.get_docker_client", return_value=MagicMock()), \
+         patch("src.backend.runner_exec.app.run_test_in_container",
+               side_effect=RuntimeError(f"boom {_MARK}")):
+        r = _post_execute({"NLRF_SECRET_PW": _MARK})
+    assert r.status_code == 500
+    assert _MARK not in r.text and "boom ***" in r.text

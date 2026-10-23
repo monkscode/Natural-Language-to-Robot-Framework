@@ -139,9 +139,11 @@ def ensure_image() -> dict:
     return _call("POST", "/ensure-image", read_timeout=_IMAGE_PROVISION_READ_TIMEOUT_S)
 
 
-def execute(run_id: str, test_filename: str) -> dict:
-    return _call("POST", "/execute", read_timeout=_EXECUTE_READ_TIMEOUT_S,
-                 json_body={"run_id": run_id, "test_filename": test_filename})
+def execute(run_id: str, test_filename: str, env: dict[str, str] | None = None) -> dict:
+    body = {"run_id": run_id, "test_filename": test_filename}
+    if env:
+        body["env"] = env
+    return _call("POST", "/execute", read_timeout=_EXECUTE_READ_TIMEOUT_S, json_body=body)
 
 
 def dryrun(run_id: str, code: str) -> dict:

@@ -10,12 +10,14 @@ Run as: uvicorn src.backend.runner_exec.app:app --host 0.0.0.0 --port 4998
 
 Referenced by: docker-compose.yml (runner-exec), run.sh, RunnerExecClient.
 Depends on: services/docker_service.py, services/dryrun_service.py,
-runner_exec/validation.py, core/build_info.py.
+runner_exec/validation.py, core/build_info.py, core/secret_scrub.py.
 """
 import logging
 import os
+import re
 import threading
 from contextlib import asynccontextmanager, contextmanager
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -26,6 +28,7 @@ from src.backend.config.logging_config import (
     setup_logging,
 )
 from src.backend.core.build_info import build_info
+from src.backend.core.secret_scrub import mask_values
 from src.backend.runner_exec.validation import safe_run_id, safe_test_filename
 from src.backend.services.docker_service import (
     IMAGE_PROVISION_LOCK,
@@ -116,6 +119,9 @@ app = FastAPI(title="nlrf-runner-exec", lifespan=lifespan)
 class ExecuteRequest(BaseModel):
     run_id: str
     test_filename: str
+    # Typed loosely on purpose: a pydantic type error would answer 422 with the
+    # offending input (a secret) in the body. _validated_env checks it by hand.
+    env: Any = None
 
 
 class DryrunRequest(BaseModel):
@@ -128,6 +134,31 @@ def _validated(value: str, validator) -> str:
         return validator(value)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+_SECRET_ENV_KEY = re.compile(r"NLRF_SECRET_[A-Z][A-Z0-9_]{0,63}")
+
+
+def _validated_env(env: Any) -> dict[str, str]:
+    """The secret env of one run: only NLRF_SECRET_* names with string values.
+
+    A 400 names the offending KEYS only — never a value, never the env object.
+    """
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise HTTPException(status_code=400, detail="env must be an object of name/value strings")
+    bad = sorted(
+        str(k)[:80] for k, v in env.items()
+        if not (isinstance(k, str) and _SECRET_ENV_KEY.fullmatch(k) and isinstance(v, str))
+    )
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail="env refused (only NLRF_SECRET_<NAME> keys with string values are allowed): "
+                   + ", ".join(bad),
+        )
+    return env
 
 
 @app.get("/health")
@@ -163,15 +194,18 @@ def ensure_image() -> dict:
 def execute(req: ExecuteRequest) -> dict:
     run_id = _validated(req.run_id, safe_run_id)
     test_filename = _validated(req.test_filename, safe_test_filename)
+    env = _validated_env(req.env)
     with _run_context(run_id):
         client = get_docker_client()
         try:
             # run_test_in_container raises RuntimeError only on infra/system failure;
             # surface its detailed message (which carries the container's stderr) so
             # the FastAPI side can show it instead of a generic 500.
+            if env:
+                return run_test_in_container(client, run_id, test_filename, env=env)
             return run_test_in_container(client, run_id, test_filename)
         except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=mask_values(str(e), env.values()))
 
 
 @app.post("/dryrun")
