@@ -2211,6 +2211,82 @@ def remove_change_waits(robot_code: str) -> str:
         return robot_code
 
 
+# ---------------------------------------------------------------------------
+# Org secrets (#131): the query names `{{NAME}}`, the LLMs only ever see that
+# placeholder, and the generated `Fill Text … {{NAME}}` becomes
+# `Fill Secret … %NLRF_SECRET_NAME` (the runner injects that env variable).
+# restore_secret_placeholders is the inverse, for the dryrun repair LLM.
+# ---------------------------------------------------------------------------
+
+_SECRET_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
+_SECRET_ENV_ARG_RE = re.compile(r"%NLRF_SECRET_([A-Z][A-Z0-9_]{0,63})")
+_SECRET_ENV_MARK = "%NLRF_SECRET_"
+_SECRET_FROM_TEXT = {"fill text": "Fill Secret", "type text": "Type Secret"}
+_TEXT_FROM_SECRET = {"fill secret": "Fill Text", "type secret": "Type Text"}
+_SECRET_PREFIXES = ("", "browser")
+
+
+def _secret_step_edits(robot_code: str, keywords: dict[str, str], resolved: bool,
+                       value_of) -> str:
+    """Rewrite each typing step whose second argument `value_of` accepts (returns the new cell for)."""
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    lines = list(suite.lines)
+    changed = False
+    for test in suite.tests:
+        if resolved and not test.followable:
+            continue
+        for step, args in zip(test.steps, _follow(test, suite.variables) if resolved else (s.args for s in test.steps)):
+            if step.keyword not in keywords or step.prefix not in _SECRET_PREFIXES or len(args) < 2 or args[1] is None:
+                continue
+            cell = value_of(args[1])
+            if cell is not None:
+                lines[step.line_no] = _rebuild(step, keywords[step.keyword], replace_second_arg=cell)
+                changed = True
+    return "\n".join(lines) if changed else robot_code
+
+
+def _secret_env_cell(value: str) -> str | None:
+    match = _SECRET_PLACEHOLDER_RE.fullmatch(value)
+    return f"{_SECRET_ENV_MARK}{match.group(1).upper()}" if match else None
+
+
+def _secret_placeholder_cell(value: str) -> str | None:
+    match = _SECRET_ENV_ARG_RE.fullmatch(value)
+    return "{{" + match.group(1) + "}}" if match else None
+
+
+def rewrite_secret_fills(robot_code: str) -> str:
+    """`Fill Text    LOC    {{NAME}}` -> `Fill Secret    LOC    %NLRF_SECRET_NAME` (`Type Text` -> `Type Secret`).
+
+    The second argument must be, after resolving a whole-cell `${var}` that a *** Variables *** row or a
+    `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces); the name
+    goes upper-case. The library prefix (`Browser.`) is kept; a Variables row is left as it is. Left alone: a
+    placeholder inside longer text, a check line holding one, a test the shared reader cannot follow, and
+    the whole file when the reader refuses it. Idempotent.
+    """
+    if not robot_code or "{{" not in robot_code:
+        return robot_code
+    out = _secret_step_edits(robot_code, _SECRET_FROM_TEXT, True, _secret_env_cell)
+    if out != robot_code:
+        logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
+    return out
+
+
+def restore_secret_placeholders(robot_code: str) -> str:
+    """The inverse of `rewrite_secret_fills` for our prefix only: `Fill Secret    LOC    %NLRF_SECRET_NAME`
+    -> `Fill Text    LOC    {{NAME}}` (`Type Secret` -> `Type Text`), so the repair LLM never sees the env name.
+
+    Touches only a `Fill Secret` / `Type Secret` line (with or without `Browser.`) whose second argument is
+    exactly `%NLRF_SECRET_<UPPER-CASE NAME>`; a hand-written `Fill Secret … $x` or `%OTHER_ENV` stays. Returns the
+    input object when there is nothing to restore or the reader refuses the file.
+    """
+    if not robot_code or _SECRET_ENV_MARK not in robot_code:
+        return robot_code
+    return _secret_step_edits(robot_code, _TEXT_FROM_SECRET, False, _secret_placeholder_cell)
+
+
 def normalize_robot_code(robot_code: str) -> str:
     """
     Prefix bare CSS selectors in Robot Framework code with `css=`.
