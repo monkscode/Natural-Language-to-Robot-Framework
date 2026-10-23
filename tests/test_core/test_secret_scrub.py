@@ -3,10 +3,13 @@
 import base64
 import json
 import re
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 
-from src.backend.core.secret_scrub import mask_values, scrub_run_dir
+import pytest
+
+from src.backend.core.secret_scrub import ScrubError, mask_values, scrub_run_dir
 from src.backend.crew_ai.optimization.failure_analyzer import OutputXmlParser
 
 MARK = "pw_marker_131"
@@ -24,7 +27,7 @@ def _xml(value: str, tag_text: str = "") -> str:
         f'<kw name="Fill Secret" owner="Browser" note="{value}">\n'
         f'<arg>{value}</arg>\n'
         f'<msg time="2026-10-23T10:00:01.000000" level="INFO">Typing {value} {tag_text}</msg>\n'
-        '<status status="FAIL" start="2026-10-23T10:00:01.000000" elapsed="0.5">boom</status>\n'
+        '<status status="FAIL" start="2026-10-23T10:00:01.123400" elapsed="0.5">boom</status>\n'
         '</kw>\n'
         '<status status="FAIL" start="2026-10-23T10:00:00.000000" elapsed="1.0">boom</status>\n'
         '</test>\n'
@@ -39,7 +42,8 @@ def _z(text: str) -> str:
 
 
 def _html(entries: list[str]) -> str:
-    arr = json.dumps(entries).replace("<", "\\x3c").replace(">", "\\x3e")
+    # RF 7.4.2's own shape: only "</" is escaped, so "<p>" stays raw and "</p>" is "\x3c/p>".
+    arr = json.dumps(entries).replace("</", "\\x3c/")
     return (
         "<html><body><script>\nwindow.output = {};\n"
         'window.output["strings"] = [];\n'
@@ -76,7 +80,14 @@ def _all_text(run_dir: Path) -> str:
 def _make_run(tmp_path: Path, value: str = MARK) -> Path:
     (tmp_path / "output.xml").write_text(_xml(value), encoding="utf-8")
     (tmp_path / "log.html").write_text(
-        _html(["*", f"*Typed {value} here", _z(f"<b>{value}</b> compressed"), "*plain", "*a\\x41b"]),
+        _html([
+            "*",
+            f"*Typed {value} here",
+            _z(f"<b>{value}</b> compressed"),
+            "*plain",
+            "*a\\x41b",
+            f"*<b>{value}</b>",  # lands in the file as "*<b>VALUE\x3c/b>", RF's mixed form
+        ]),
         encoding="utf-8",
     )
     (tmp_path / "playwright-log.txt").write_text(f'fill("{value}")\n', encoding="utf-8")
@@ -109,11 +120,13 @@ def test_log_html_array_keeps_length_and_script_safe(tmp_path):
     text = (run / "log.html").read_text(encoding="utf-8")
     arr = _ARRAY.search(text).group(1)
     assert "<" not in arr and ">" not in arr
+    assert "\\x3c/b\\x3e" in arr  # the closing tag is written back in the escaped form
     decoded = _decoded_strings(text)
-    assert len(decoded) == 5
+    assert len(decoded) == 6
     assert decoded[1] == "Typed *** here"
     assert decoded[2] == "<b>***</b> compressed"
     assert decoded[4] == "a\\x41b"  # an escaped backslash before x41 is not a \x escape
+    assert decoded[5] == "<b>***</b>"  # a raw entry read through the \x3c escape
 
 
 def test_unchanged_array_left_byte_for_byte(tmp_path):
@@ -156,3 +169,50 @@ def test_empty_values_change_nothing(tmp_path):
     assert scrub_run_dir(run, [""]) == []
     assert {p.name: p.read_bytes() for p in run.iterdir()} == snap
     assert mask_values("abc", [""]) == "abc"
+
+
+def test_one_unscrubbable_file_does_not_stop_the_others(tmp_path):
+    (tmp_path / "output.xml").write_text(_xml(MARK), encoding="utf-8")
+    (tmp_path / "log.html").write_text(_html(["*", "*x", "AAAA"]), encoding="utf-8")  # not zlib
+    (tmp_path / "playwright-log.txt").write_text(f'fill("{MARK}")\n', encoding="utf-8")
+    with pytest.raises(ScrubError) as err:
+        scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == ["log.html"]
+    assert "log.html" in str(err.value) and MARK not in str(err.value)
+    assert MARK not in (tmp_path / "output.xml").read_text(encoding="utf-8")
+    assert MARK not in (tmp_path / "playwright-log.txt").read_text(encoding="utf-8")
+
+
+def test_returned_names_are_relative_paths(tmp_path):
+    (tmp_path / "dryrun").mkdir()
+    (tmp_path / "dryrun" / "playwright-log.txt").write_text(MARK, encoding="utf-8")
+    (tmp_path / "playwright-log.txt").write_text(MARK, encoding="utf-8")
+    assert sorted(scrub_run_dir(tmp_path, [MARK])) == ["dryrun/playwright-log.txt", "playwright-log.txt"]
+
+
+def test_xml_bookkeeping_attributes_are_never_masked(tmp_path):
+    (tmp_path / "output.xml").write_text(_xml("FAIL"), encoding="utf-8")
+    scrub_run_dir(tmp_path, ["FAIL"])
+    root = ET.parse(tmp_path / "output.xml").getroot()
+    assert {s.get("status") for s in root.iter("status")} == {"FAIL"}
+    parsed = OutputXmlParser().parse(str(tmp_path / "output.xml"))
+    assert parsed["test_status"] == "failed"
+    assert parsed["keyword_chain"][0].status == "FAIL"
+    assert root.find(".//arg").text == "***"  # text is still masked
+
+
+def test_xml_timestamp_survives_a_numeric_value(tmp_path):
+    (tmp_path / "output.xml").write_text(_xml("1234"), encoding="utf-8")
+    scrub_run_dir(tmp_path, ["1234"])
+    root = ET.parse(tmp_path / "output.xml").getroot()
+    assert root.find(".//kw/status").get("start") == "2026-10-23T10:00:01.123400"
+    assert root.find(".//kw").get("note") == "***"  # a non-bookkeeping attribute is masked
+
+
+def test_xml_name_attribute_is_still_masked(tmp_path):
+    (tmp_path / "output.xml").write_text(
+        _xml(MARK).replace('name="Login"', f'name="Login {MARK}"'), encoding="utf-8"
+    )
+    scrub_run_dir(tmp_path, [MARK])
+    root = ET.parse(tmp_path / "output.xml").getroot()
+    assert root.find(".//test").get("name") == "Login ***"

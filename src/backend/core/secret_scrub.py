@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 MASK = "***"
 
+
+class ScrubError(Exception):
+    """Some files of a run folder could not be scrubbed; ``files`` names them (never content)."""
+
+    def __init__(self, files: list[str]):
+        self.files = files
+        super().__init__("could not scrub: " + ", ".join(files))
+
+
 # One concat(...) array of JS string literals; string-literal aware so a "]);" inside a
 # message cannot end the match early.
 _STRINGS = re.compile(
@@ -39,6 +48,11 @@ _STRINGS = re.compile(
 # A JS \xNN escape (JSON has none); the pair form skips an escaped backslash before an x.
 _JS_HEX = re.compile(r"\\(\\|x([0-9a-fA-F]{2}))")
 _TEXT_SUFFIXES = {".txt", ".log"}
+# RF-generated output.xml attributes: masking them (e.g. a value "FAIL" or "1234") breaks result parsing.
+_XML_BOOKKEEPING = frozenset({
+    "status", "start", "elapsed", "time", "level", "id", "line",
+    "generated", "generator", "schemaversion", "rpa", "starttime", "endtime",
+})
 
 
 def _forms(value: str) -> set[str]:
@@ -100,6 +114,8 @@ def _scrub_xml(path: Path, values: list[str]) -> bool:
                 setattr(el, attr, new)
                 dirty = True
         for key, old in el.attrib.items():
+            if key in _XML_BOOKKEEPING:
+                continue
             if (new := mask_values(old, values)) != old:
                 el.attrib[key] = new
                 dirty = True
@@ -118,27 +134,36 @@ def _scrub_text(path: Path, values: list[str], fn=mask_values) -> bool:
 
 
 def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
-    """Mask the values in every report file under ``run_dir``; return the changed file names.
+    """Mask the values in every report file under ``run_dir``; return the changed relative paths.
 
-    Images and other binary files are left alone. Nothing is logged but file names.
+    Images and other binary files are left alone. Nothing is logged but file names. A file that
+    cannot be scrubbed does not stop the others: after all are done, ``ScrubError`` names it.
     """
     values = [v for v in values if v]
     if not values:
         return []
-    changed = []
-    for path in sorted(Path(run_dir).rglob("*")):
+    root = Path(run_dir)
+    changed, failed = [], []
+    for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
-        if suffix == ".xml":
-            did = _scrub_xml(path, values)
-        elif suffix == ".html":
-            did = _scrub_text(path, values, _scrub_html)
-        elif suffix in _TEXT_SUFFIXES:
-            did = _scrub_text(path, values)
-        else:
+        name = path.relative_to(root).as_posix()
+        try:
+            if suffix == ".xml":
+                did = _scrub_xml(path, values)
+            elif suffix == ".html":
+                did = _scrub_text(path, values, _scrub_html)
+            elif suffix in _TEXT_SUFFIXES:
+                did = _scrub_text(path, values)
+            else:
+                continue
+        except Exception:  # noqa: BLE001 — never keep the error: its text may quote file content
+            failed.append(name)
             continue
         if did:
-            changed.append(path.name)
+            changed.append(name)
     logger.info("secret scrub changed %d file(s): %s", len(changed), ", ".join(changed))
+    if failed:
+        raise ScrubError(failed)
     return changed
