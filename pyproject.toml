@@ -22,6 +22,8 @@ dependencies = [
     "requests",
     # Configuration
     "python-dotenv",
+    # Fernet encryption for the org secret store (auth/secrets.py)
+    "cryptography>=44",
     "PyYAML",
     # Docker SDK (robot test execution)
     "docker",
