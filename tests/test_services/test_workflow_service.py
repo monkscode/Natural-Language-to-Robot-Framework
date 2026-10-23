@@ -21,6 +21,7 @@ import tempfile
 import threading
 import asyncio
 import json
+import logging
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -997,19 +998,23 @@ def _sse(chunks: list[str]) -> list[dict]:
 
 
 def _drive_execution(tmp_path, *, body=None, execute_error=None, registry=None,
-                     extra=()):
-    """Run the real _stream_docker_execution; return (events, set_status calls)."""
+                     extra=(), code="*** Test Cases ***\nT\n    Log    x\n", user_id=None,
+                     rc=None):
+    """Run the real _stream_docker_execution; return (events, set_status calls).
+
+    rc: pass a MagicMock to inspect the runner client afterwards."""
     registry = registry or MagicMock()
+    rc = rc or MagicMock()
 
     async def _drive():
         chunks = []
         async for chunk in workflow_service._stream_docker_execution(
-                _RUN_ID, "*** Test Cases ***\nT\n    Log    x\n", "q", lambda: None):
+                _RUN_ID, code, "q", lambda: None, user_id=user_id):
             chunks.append(chunk)
         return chunks
 
     with contextlib.ExitStack() as stack:
-        rc = stack.enter_context(patch.object(workflow_service, "runner_exec_client"))
+        stack.enter_context(patch.object(workflow_service, "runner_exec_client", rc))
         gas = stack.enter_context(patch.object(workflow_service, "get_artifact_store"))
         stack.enter_context(patch.object(workflow_service, "get_run_registry",
                                          return_value=registry))
@@ -1305,6 +1310,7 @@ class TestRecordingAReasonNeverBreaksARun:
 from cryptography.fernet import InvalidToken
 
 from src.backend.auth.secrets import SecretsUnavailable
+from src.backend.runner_exec.client import RunnerExecUnavailable
 
 _MARKER = "pw_marker_131"
 _SECRET_CODE = (
@@ -1321,55 +1327,40 @@ _BOTH = {"PASSWORD": f"{_MARKER}_a", "API_TOKEN": f"{_MARKER}_b"}
 def _drive_secret_run(tmp_path, *, code=_SECRET_CODE, user_id="u-1", org="org-1",
                       org_error=None, values=None, values_error=None, body=None,
                       execute_error=None, evict=None):
-    """Run the real _stream_docker_execution with the secret lookups patched.
+    """_drive_execution with the secret lookups patched.
 
     Returns (events, set_status calls, rc mock, org_of mock, get_values mock)."""
-    registry = MagicMock()
-
-    async def _drive():
-        chunks = []
-        async for chunk in workflow_service._stream_docker_execution(
-                _RUN_ID, code, "q", lambda: None, user_id=user_id):
-            chunks.append(chunk)
-        return chunks
-
-    with contextlib.ExitStack() as stack:
-        rc = stack.enter_context(patch.object(workflow_service, "runner_exec_client"))
-        gas = stack.enter_context(patch.object(workflow_service, "get_artifact_store"))
-        stack.enter_context(patch.object(workflow_service, "get_run_registry",
-                                         return_value=registry))
-        stack.enter_context(patch.object(workflow_service, "_process_learning_record",
-                                         return_value=None))
-        stack.enter_context(patch.object(workflow_service, "inline_report_screenshots",
-                                         return_value=0))
-        stack.enter_context(patch.object(workflow_service, "_safe_evict_hint_metadata",
-                                         evict or MagicMock()))
-        org_mock = stack.enter_context(patch.object(
-            workflow_service, "org_of", side_effect=org_error, return_value=org))
-        gv_mock = stack.enter_context(patch.object(
-            workflow_service, "get_values", side_effect=values_error,
-            return_value=values if values is not None else {}))
-        gas.return_value.run_dir.return_value = tmp_path
-        gas.return_value.persist_run.return_value = None
-        rc.ensure_image.return_value = {"status": "ready"}
-        if execute_error is not None:
-            rc.execute.side_effect = execute_error
-        else:
-            rc.execute.return_value = body or _runner_body("passed", None)
-        chunks = asyncio.run(_drive())
-    return _sse(chunks), registry.set_status.call_args_list, rc, org_mock, gv_mock
+    rc = MagicMock()
+    org_mock = MagicMock(side_effect=org_error, return_value=org)
+    gv_mock = MagicMock(side_effect=values_error, return_value=values or {})
+    events, calls = _drive_execution(
+        tmp_path, body=body or _runner_body("passed", None), execute_error=execute_error,
+        code=code, user_id=user_id, rc=rc,
+        extra=[patch.object(workflow_service, "org_of", org_mock),
+               patch.object(workflow_service, "get_values", gv_mock),
+               patch.object(workflow_service, "_safe_evict_hint_metadata",
+                            evict or MagicMock())])
+    return events, calls, rc, org_mock, gv_mock
 
 
-def _assert_refused(events, calls, rc, sentence, caplog):
+def _assert_refused(tmp_path, events, calls, rc, sentence, caplog, log_line=None):
     assert calls == [call(_RUN_ID, "error", sentence)]
     assert [e["message"] for e in events] == [sentence]
     assert events[0]["status"] == "error" and events[0]["run_id"] == _RUN_ID
     rc.ensure_image.assert_not_called()
     rc.execute.assert_not_called()
+    # the save happens before the refusal
+    assert (tmp_path / "test.robot").exists()
+    if log_line:  # positive control: the log WAS captured, so the absence check bites
+        assert log_line in caplog.text
     assert _MARKER not in json.dumps(events) + str(calls) + caplog.text
 
 
 class TestRunSecrets:
+
+    @pytest.fixture(autouse=True)
+    def _capture_error_logs(self, caplog):
+        caplog.set_level(logging.ERROR)
 
     def test_no_names_keeps_todays_path(self, tmp_path):
         events, calls, rc, org_mock, gv_mock = _drive_secret_run(
@@ -1394,19 +1385,19 @@ class TestRunSecrets:
         events, calls, rc, _, _ = _drive_secret_run(
             tmp_path, values={"PASSWORD": f"{_MARKER}_a"})
 
-        _assert_refused(events, calls, rc,
+        _assert_refused(tmp_path, events, calls, rc,
                         _MISSING_SENTENCE.replace("PASSWORD, API_TOKEN", "API_TOKEN"), caplog)
 
     def test_no_user_means_every_name_is_missing(self, tmp_path, caplog):
         events, calls, rc, _, gv_mock = _drive_secret_run(tmp_path, user_id=None, org=None)
 
-        _assert_refused(events, calls, rc, _MISSING_SENTENCE, caplog)
+        _assert_refused(tmp_path, events, calls, rc, _MISSING_SENTENCE, caplog)
         gv_mock.assert_not_called()
 
     def test_a_user_without_an_org_means_every_name_is_missing(self, tmp_path, caplog):
         events, calls, rc, _, gv_mock = _drive_secret_run(tmp_path, org=None)
 
-        _assert_refused(events, calls, rc, _MISSING_SENTENCE, caplog)
+        _assert_refused(tmp_path, events, calls, rc, _MISSING_SENTENCE, caplog)
         gv_mock.assert_not_called()
 
     def test_the_refusal_evicts_the_hint_cache(self, tmp_path):
@@ -1414,27 +1405,29 @@ class TestRunSecrets:
         _drive_secret_run(tmp_path, org=None, evict=evict)
         evict.assert_called_once_with(_RUN_ID)
 
-    @pytest.mark.parametrize("error,sentence", [
+    @pytest.mark.parametrize("error,sentence,log_line", [
         (SecretsUnavailable("Secrets are not set up on this server (SECRETS_ENCRYPTION_KEY)"),
-         "Secrets are not set up on this server (SECRETS_ENCRYPTION_KEY)"),
+         "Secrets are not set up on this server (SECRETS_ENCRYPTION_KEY)", None),
         (InvalidToken(),
          "This test's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
-         "Add them again on the Secrets page, then run it again."),
+         "Add them again on the Secrets page, then run it again.", None),
         (RuntimeError(f"connection to host failed {_MARKER}"),
-         "Could not read this test's secrets (RuntimeError)."),
+         "Could not read this test's secrets (RuntimeError).",
+         "Could not read the secrets of run"),
     ])
     def test_a_failing_lookup_is_refused_like_a_missing_secret(
-            self, tmp_path, caplog, error, sentence):
+            self, tmp_path, caplog, error, sentence, log_line):
         events, calls, rc, _, _ = _drive_secret_run(tmp_path, values_error=error)
 
-        _assert_refused(events, calls, rc, sentence, caplog)
+        _assert_refused(tmp_path, events, calls, rc, sentence, caplog, log_line)
 
     def test_a_failing_org_lookup_is_refused_too(self, tmp_path, caplog):
         events, calls, rc, _, gv_mock = _drive_secret_run(
             tmp_path, org_error=ValueError(_MARKER))
 
-        _assert_refused(events, calls, rc, "Could not read this test's secrets (ValueError).",
-                        caplog)
+        _assert_refused(tmp_path, events, calls, rc,
+                        "Could not read this test's secrets (ValueError).", caplog,
+                        "Could not read the secrets of run")
         gv_mock.assert_not_called()
 
     def test_runner_output_is_masked_in_the_result_and_the_row(self, tmp_path):
@@ -1454,22 +1447,44 @@ class TestRunSecrets:
         assert calls == [call(_RUN_ID, "error", "bad ***")]
         assert _MARKER not in json.dumps(events)
 
-    def test_a_failure_reason_and_sentence_are_masked(self, tmp_path):
-        leaked = (f"Error: expected {_MARKER}_a to be visible", f"sentence {_MARKER}_a")
-        with patch.object(workflow_service, "_failure_reason", return_value=leaked):
-            events, calls, _, _, _ = _drive_secret_run(
-                tmp_path, values=_BOTH, body=_runner_body("failed", None))
+    @staticmethod
+    def _failing_xml(tmp_path, payload):
+        """A real output.xml whose failure text carries `payload`."""
+        src = (_RF_FIXTURES / "single_failure.xml").read_text(encoding="utf-8")
+        path = tmp_path / "failing.xml"
+        path.write_text(src.replace('waiting for locator("#submit")', payload),
+                        encoding="utf-8")
+        return str(path)
 
-        assert calls == [call(_RUN_ID, "failed", "Error: expected *** to be visible")]
-        assert _result_event(events)["failure_sentence"] == "sentence ***"
+    # A value with spaces: redaction after `password=` would eat only its first
+    # word and leave "two words"; a cap at 2,000 characters would cut it mid-way.
+    @pytest.mark.parametrize("fill", [0, "cap"])
+    def test_a_failure_reason_holds_no_fragment_of_a_value(self, tmp_path, fill):
+        value = f"{_MARKER} two words"
+        prefix = "TimeoutError: locator.click: Timeout 10000ms exceeded.\nCall log:\n  - "
+        pad = ("y" * (workflow_service._ERROR_MESSAGE_MAX_CHARS - 5 - len(prefix))
+               if fill == "cap" else "")
+        payload = f"{pad}password={value} rejected" if not pad else f"{pad}{value}"
+        xml = self._failing_xml(tmp_path, payload)
+        body = _runner_body("failed", xml)
+        events, calls, _, _, _ = _drive_secret_run(
+            tmp_path, values={"PASSWORD": value, "API_TOKEN": "other_value_131"}, body=body)
+
+        stored = calls[0].args[2]
+        assert calls[0].args[:2] == (_RUN_ID, "failed")
+        for text in (stored, _result_event(events)["failure_sentence"] or ""):
+            assert "pw_m" not in text and "two words" not in text
+        assert stored.startswith("TimeoutError: locator.click")  # the real text was read
 
     def test_an_unavailable_runner_text_is_masked_in_row_event_and_log(self, tmp_path, caplog):
-        error = RuntimeError(f"executor said {_MARKER}_b")
+        error = RunnerExecUnavailable(f"executor said {_MARKER}_b")
         events, calls, _, _, _ = _drive_secret_run(
             tmp_path, values=_BOTH, execute_error=error)
 
         assert calls == [call(_RUN_ID, "error", "executor said ***")]
         assert events[-1]["message"] == "executor said ***"
+        # positive control: the ERROR line was captured, and it is masked
+        assert "during Docker execution: executor said ***" in caplog.text
         assert _MARKER not in caplog.text
 
     def test_both_callers_pass_the_users_id(self):
