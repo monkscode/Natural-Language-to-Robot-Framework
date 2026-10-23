@@ -173,6 +173,9 @@ class Settings(BaseSettings):
         default="change-me-in-production",
         description="HMAC secret for signing JWT access tokens — MUST be overridden via env in production",
     )
+    # Fernet key for the org secret store (auth/secrets.py). Unset or malformed:
+    # the secrets routes answer 503. A lost key loses every stored value.
+    SECRETS_ENCRYPTION_KEY: str = ""
     # Shorter lifetime bounds how long a stolen token is usable when the user
     # never explicitly revokes. Explicit revocation is via token_version
     # (logout-all), enforced against current DB state on every authenticated

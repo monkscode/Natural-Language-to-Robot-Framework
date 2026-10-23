@@ -82,6 +82,7 @@ crewai==1.8.1
     # via natural-language-to-robot-framework (pyproject.toml)
 cryptography==49.0.0
     # via
+    #   natural-language-to-robot-framework (pyproject.toml)
     #   authlib
     #   google-auth
     #   joserfc
