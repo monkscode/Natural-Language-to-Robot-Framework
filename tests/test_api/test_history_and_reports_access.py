@@ -612,7 +612,7 @@ class TestExecuteRunIdFork:
 
         seen = {}
 
-        async def fake_docker(run_id, robot_code, user_query, release_slot):
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
             seen["run_id"] = run_id
             release_slot()
             yield "data: ok\n\n"
@@ -1214,7 +1214,7 @@ class TestRerunServicePlumbing:
 
         seen = {}
 
-        async def fake_docker(run_id, robot_code, user_query, release_slot):
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
             seen["run_id"] = run_id
             seen["learning_query"] = user_query
             release_slot()
@@ -1263,7 +1263,7 @@ class TestRerunServicePlumbing:
             admin_calls["n"] += 1
             return u is not None and u.get("role") == "admin"
 
-        async def fake_docker(run_id, robot_code, user_query, release_slot):
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
             release_slot()
             yield "data: {\"stage\": \"execution\", \"status\": \"complete\"}\n\n"
 

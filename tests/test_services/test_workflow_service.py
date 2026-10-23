@@ -617,7 +617,7 @@ class TestStreamExecuteOnlyPlatformAdminFlag:
                 raise admin_side_effect
             return u is not None and u.get("role") == "admin"
 
-        async def fake_docker(run_id, robot_code, user_query, release_slot):
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
             release_slot()
             yield "data: ok\n\n"
 
@@ -692,7 +692,7 @@ class TestGenerateAndRunFlagWiring:
             admin_calls["n"] += 1
             return u is not None and u.get("role") == "admin"
 
-        async def fake_docker(run_id, robot_code, user_query, release_slot):
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
             release_slot()
             yield "data: ok\n\n"
 
@@ -1294,3 +1294,211 @@ class TestRecordingAReasonNeverBreaksARun:
         with patch.object(workflow_service, "get_run_registry",
                           side_effect=RuntimeError("no pool")):
             workflow_service._set_run_status("rid", "failed", "why")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# #131 T7b: a run hands its test the org's secrets and refuses one whose secret
+# is missing. Made-up values only; the marker must be absent from every stored
+# text, SSE event and log line.
+# ---------------------------------------------------------------------------
+
+from cryptography.fernet import InvalidToken
+
+from src.backend.auth.secrets import SecretsUnavailable
+
+_MARKER = "pw_marker_131"
+_SECRET_CODE = (
+    "*** Test Cases ***\nT\n"
+    "    Fill Secret    id=pw    %NLRF_SECRET_PASSWORD\n"
+    "    Fill Secret    id=tok    %NLRF_SECRET_API_TOKEN\n")
+_NO_SECRET_CODE = "*** Test Cases ***\nT\n    Log    x\n"
+_MISSING_SENTENCE = (
+    "This test needs the secret(s) PASSWORD, API_TOKEN, which your organization "
+    "does not hold. Add them on the Secrets page, then run it again.")
+_BOTH = {"PASSWORD": f"{_MARKER}_a", "API_TOKEN": f"{_MARKER}_b"}
+
+
+def _drive_secret_run(tmp_path, *, code=_SECRET_CODE, user_id="u-1", org="org-1",
+                      org_error=None, values=None, values_error=None, body=None,
+                      execute_error=None, evict=None):
+    """Run the real _stream_docker_execution with the secret lookups patched.
+
+    Returns (events, set_status calls, rc mock, org_of mock, get_values mock)."""
+    registry = MagicMock()
+
+    async def _drive():
+        chunks = []
+        async for chunk in workflow_service._stream_docker_execution(
+                _RUN_ID, code, "q", lambda: None, user_id=user_id):
+            chunks.append(chunk)
+        return chunks
+
+    with contextlib.ExitStack() as stack:
+        rc = stack.enter_context(patch.object(workflow_service, "runner_exec_client"))
+        gas = stack.enter_context(patch.object(workflow_service, "get_artifact_store"))
+        stack.enter_context(patch.object(workflow_service, "get_run_registry",
+                                         return_value=registry))
+        stack.enter_context(patch.object(workflow_service, "_process_learning_record",
+                                         return_value=None))
+        stack.enter_context(patch.object(workflow_service, "inline_report_screenshots",
+                                         return_value=0))
+        stack.enter_context(patch.object(workflow_service, "_safe_evict_hint_metadata",
+                                         evict or MagicMock()))
+        org_mock = stack.enter_context(patch.object(
+            workflow_service, "org_of", side_effect=org_error, return_value=org))
+        gv_mock = stack.enter_context(patch.object(
+            workflow_service, "get_values", side_effect=values_error,
+            return_value=values if values is not None else {}))
+        gas.return_value.run_dir.return_value = tmp_path
+        gas.return_value.persist_run.return_value = None
+        rc.ensure_image.return_value = {"status": "ready"}
+        if execute_error is not None:
+            rc.execute.side_effect = execute_error
+        else:
+            rc.execute.return_value = body or _runner_body("passed", None)
+        chunks = asyncio.run(_drive())
+    return _sse(chunks), registry.set_status.call_args_list, rc, org_mock, gv_mock
+
+
+def _assert_refused(events, calls, rc, sentence, caplog):
+    assert calls == [call(_RUN_ID, "error", sentence)]
+    assert [e["message"] for e in events] == [sentence]
+    assert events[0]["status"] == "error" and events[0]["run_id"] == _RUN_ID
+    rc.ensure_image.assert_not_called()
+    rc.execute.assert_not_called()
+    assert _MARKER not in json.dumps(events) + str(calls) + caplog.text
+
+
+class TestRunSecrets:
+
+    def test_no_names_keeps_todays_path(self, tmp_path):
+        events, calls, rc, org_mock, gv_mock = _drive_secret_run(
+            tmp_path, code=_NO_SECRET_CODE)
+
+        org_mock.assert_not_called()
+        gv_mock.assert_not_called()
+        rc.execute.assert_called_once_with(_RUN_ID, "test.robot")
+        assert _result_event(events)["test_status"] == "passed"
+
+    def test_present_secrets_become_env(self, tmp_path):
+        _, _, rc, org_mock, gv_mock = _drive_secret_run(tmp_path, values=_BOTH)
+
+        org_mock.assert_called_once_with("u-1")
+        gv_mock.assert_called_once_with("org-1", ["PASSWORD", "API_TOKEN"])
+        rc.execute.assert_called_once_with(
+            _RUN_ID, "test.robot",
+            env={"NLRF_SECRET_PASSWORD": f"{_MARKER}_a",
+                 "NLRF_SECRET_API_TOKEN": f"{_MARKER}_b"})
+
+    def test_a_missing_name_refuses_before_docker(self, tmp_path, caplog):
+        events, calls, rc, _, _ = _drive_secret_run(
+            tmp_path, values={"PASSWORD": f"{_MARKER}_a"})
+
+        _assert_refused(events, calls, rc,
+                        _MISSING_SENTENCE.replace("PASSWORD, API_TOKEN", "API_TOKEN"), caplog)
+
+    def test_no_user_means_every_name_is_missing(self, tmp_path, caplog):
+        events, calls, rc, _, gv_mock = _drive_secret_run(tmp_path, user_id=None, org=None)
+
+        _assert_refused(events, calls, rc, _MISSING_SENTENCE, caplog)
+        gv_mock.assert_not_called()
+
+    def test_a_user_without_an_org_means_every_name_is_missing(self, tmp_path, caplog):
+        events, calls, rc, _, gv_mock = _drive_secret_run(tmp_path, org=None)
+
+        _assert_refused(events, calls, rc, _MISSING_SENTENCE, caplog)
+        gv_mock.assert_not_called()
+
+    def test_the_refusal_evicts_the_hint_cache(self, tmp_path):
+        evict = MagicMock()
+        _drive_secret_run(tmp_path, org=None, evict=evict)
+        evict.assert_called_once_with(_RUN_ID)
+
+    @pytest.mark.parametrize("error,sentence", [
+        (SecretsUnavailable("Secrets are not set up on this server (SECRETS_ENCRYPTION_KEY)"),
+         "Secrets are not set up on this server (SECRETS_ENCRYPTION_KEY)"),
+        (InvalidToken(),
+         "This test's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
+         "Add them again on the Secrets page, then run it again."),
+        (RuntimeError(f"connection to host failed {_MARKER}"),
+         "Could not read this test's secrets (RuntimeError)."),
+    ])
+    def test_a_failing_lookup_is_refused_like_a_missing_secret(
+            self, tmp_path, caplog, error, sentence):
+        events, calls, rc, _, _ = _drive_secret_run(tmp_path, values_error=error)
+
+        _assert_refused(events, calls, rc, sentence, caplog)
+
+    def test_a_failing_org_lookup_is_refused_too(self, tmp_path, caplog):
+        events, calls, rc, _, gv_mock = _drive_secret_run(
+            tmp_path, org_error=ValueError(_MARKER))
+
+        _assert_refused(events, calls, rc, "Could not read this test's secrets (ValueError).",
+                        caplog)
+        gv_mock.assert_not_called()
+
+    def test_runner_output_is_masked_in_the_result_and_the_row(self, tmp_path):
+        body = _runner_body("failed", None)
+        body["message"] = f"boom {_MARKER}_a"
+        body["result"]["logs"] = f"typed {_MARKER}_b"
+        events, calls, _, _, _ = _drive_secret_run(tmp_path, values=_BOTH, body=body)
+
+        assert _MARKER not in json.dumps(events) + str(calls)
+        assert _result_event(events)["message"] == "boom ***"
+        assert _result_event(events)["result"]["logs"] == "typed ***"
+
+    def test_an_error_verdict_message_is_masked_in_the_row(self, tmp_path):
+        body = {"status": "error", "message": f"bad {_MARKER}_a"}
+        events, calls, _, _, _ = _drive_secret_run(tmp_path, values=_BOTH, body=body)
+
+        assert calls == [call(_RUN_ID, "error", "bad ***")]
+        assert _MARKER not in json.dumps(events)
+
+    def test_a_failure_reason_and_sentence_are_masked(self, tmp_path):
+        leaked = (f"Error: expected {_MARKER}_a to be visible", f"sentence {_MARKER}_a")
+        with patch.object(workflow_service, "_failure_reason", return_value=leaked):
+            events, calls, _, _, _ = _drive_secret_run(
+                tmp_path, values=_BOTH, body=_runner_body("failed", None))
+
+        assert calls == [call(_RUN_ID, "failed", "Error: expected *** to be visible")]
+        assert _result_event(events)["failure_sentence"] == "sentence ***"
+
+    def test_an_unavailable_runner_text_is_masked_in_row_event_and_log(self, tmp_path, caplog):
+        error = RuntimeError(f"executor said {_MARKER}_b")
+        events, calls, _, _, _ = _drive_secret_run(
+            tmp_path, values=_BOTH, execute_error=error)
+
+        assert calls == [call(_RUN_ID, "error", "executor said ***")]
+        assert events[-1]["message"] == "executor said ***"
+        assert _MARKER not in caplog.text
+
+    def test_both_callers_pass_the_users_id(self):
+        from src.backend.services import workflow_service as ws
+        seen = []
+
+        async def fake_docker(run_id, robot_code, user_query, release_slot, user_id=None):
+            seen.append(user_id)
+            release_slot()
+            yield "data: ok\n\n"
+
+        user = {"user_id": "u-9", "email": "u@x.com", "role": "user"}
+
+        async def consume(gen):
+            async for _ in gen:
+                pass
+
+        def generation():
+            return iter([{"status": "complete", "robot_code": _NO_SECRET_CODE,
+                          "workflow_id": _RUN_ID}])
+
+        with patch.object(ws, "_stream_docker_execution", fake_docker), \
+             patch.object(ws, "_record_run"), \
+             patch.object(ws, "run_agentic_workflow", side_effect=lambda *a, **k: generation()), \
+             patch.object(ws, "is_validated_admin", return_value=False):
+            asyncio.run(consume(ws.stream_execute_only(_NO_SECRET_CODE, user=user)))
+            asyncio.run(consume(ws.stream_execute_only(_NO_SECRET_CODE, user=None)))
+            asyncio.run(consume(ws.stream_generate_and_run(
+                "q", "gemini", "gemini-2.5-flash", user=user)))
+            asyncio.run(consume(ws.stream_generate_and_run(
+                "q", "gemini", "gemini-2.5-flash", user=None)))
+        assert seen == ["u-9", None, "u-9", None]

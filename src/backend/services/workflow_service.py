@@ -31,6 +31,9 @@ from src.backend.core.artifact_store import get_artifact_store
 from src.backend.core.provider_errors import friendly_provider_error, friendly_setup_error
 from src.backend.core.failure_sentences import failure_sentence, first_failure_message
 from src.backend.core.secret_redaction import redact_secrets
+from src.backend.core.secret_scrub import mask_values
+from src.backend.auth.secrets import SecretsUnavailable, get_values, org_of, secret_names_in_code
+from cryptography.fernet import InvalidToken
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
 
@@ -1530,8 +1533,14 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
         raise _GenerationError()
 
 
-async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str | None, release_slot):
+async def _stream_docker_execution(
+        run_id: str, robot_code: str, user_query: str | None, release_slot,
+        user_id: str | None = None):
     """Save robot_code to disk, run in Docker, and trigger learning.
+
+    A test that names org secrets (%NLRF_SECRET_X) gets them as container env,
+    looked up for user_id's org; one whose secret is missing or unreadable is
+    refused before Docker. Every runner-derived text on this path is masked.
 
     Yields SSE data strings for all execution events (build progress, result, errors).
     Handles all error paths internally — the caller's finally block remains
@@ -1571,6 +1580,36 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': save_error})}\n\n"
         return
 
+    # Org secrets the test names. No names: today's path, no lookup, no masking.
+    # The refusal texts hold names and exception TYPES only, never a value.
+    secret_values: dict[str, str] = {}
+    secret_names = secret_names_in_code(robot_code)
+    if secret_names:
+        refusal = None
+        try:
+            org_id = await asyncio.to_thread(org_of, user_id)
+            if org_id:
+                secret_values = await asyncio.to_thread(get_values, org_id, secret_names)
+        except SecretsUnavailable as e:
+            refusal = str(e)
+        except InvalidToken:
+            refusal = ("This test's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
+                       "Add them again on the Secrets page, then run it again.")
+        except Exception as e:
+            logging.error("Could not read the secrets of run %s (%s)", run_id, type(e).__name__)
+            refusal = f"Could not read this test's secrets ({type(e).__name__})."
+        else:
+            missing = [n for n in secret_names if n not in secret_values]
+            if missing:
+                refusal = (f"This test needs the secret(s) {', '.join(missing)}, which your "
+                           "organization does not hold. Add them on the Secrets page, then run it again.")
+        if refusal:
+            _safe_evict_hint_metadata(run_id)
+            await asyncio.to_thread(_set_run_status, run_id, "error", refusal)
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': refusal})}\n\n"
+            return
+    secret_list = list(secret_values.values())
+
     try:
         # Phase 4: execution goes through the socket-holding executor; FastAPI
         # no longer touches Docker. ensure_image is required — if it raises
@@ -1596,7 +1635,20 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         await asyncio.to_thread(runner_exec_client.ensure_image)
 
         logging.info(f"🚀 Executing test: {test_filename}")
-        result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
+        if secret_values:
+            result = await asyncio.to_thread(
+                functools.partial(
+                    runner_exec_client.execute, run_id, test_filename,
+                    env={f"NLRF_SECRET_{n}": v for n, v in secret_values.items()}))
+        else:
+            result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
+        if secret_list:
+            # The runner's folder is scrubbed already; this is the second lock.
+            for key in ("message", "failure_sentence"):
+                if isinstance(result.get(key), str):
+                    result[key] = mask_values(result[key], secret_list)
+            if isinstance(result.get("result"), dict) and isinstance(result["result"].get("logs"), str):
+                result["result"]["logs"] = mask_values(result["result"]["logs"], secret_list)
 
         # History row: only passed/failed are real verdicts (from output.xml);
         # anything else means the run errored before producing one.
@@ -1621,6 +1673,11 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
                 result["message"] = redact_secrets(str(result["message"]))
         else:
             _reason = None
+        if secret_list:
+            if _reason:
+                _reason = mask_values(_reason, secret_list)
+            if isinstance(result.get("failure_sentence"), str):
+                result["failure_sentence"] = mask_values(result["failure_sentence"], secret_list)
         await asyncio.to_thread(_set_run_status, run_id, _verdict, _reason)
 
         yield f"data: {json.dumps({'stage': 'execution', **result})}\n\n"
@@ -1670,7 +1727,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
                 result, *learning_ctx)
 
     except Exception as e:
-        logging.error(f"An error occurred during Docker execution: {e}")
+        logging.error(f"An error occurred during Docker execution: {mask_values(str(e), secret_list)}")
         _safe_evict_hint_metadata(run_id)
         # Unlike its siblings above, this message has no prefix — so an exception
         # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
@@ -1679,7 +1736,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # Built before the write: the row stores it capped (a runner system
         # error carries up to 400 lines of container stderr), the event keeps
         # it whole.
-        detail = redact_secrets(str(e)) or type(e).__name__
+        detail = mask_values(redact_secrets(str(e)), secret_list) or type(e).__name__
         await asyncio.to_thread(
             _set_run_status, run_id, "error", detail[:_ERROR_MESSAGE_MAX_CHARS])
         # Persist whatever artifacts the run produced before erroring (a partial
@@ -1943,7 +2000,9 @@ async def stream_execute_only(
             is_platform_admin=is_platform_admin, test_id=test_id,
             test_version_id=test_version_id)
 
-        async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
+        async for sse in _stream_docker_execution(
+                run_id, robot_code, user_query, releaser.done,
+                user_id=user["user_id"] if user else None):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
@@ -2016,7 +2075,9 @@ async def stream_generate_and_run(
             _record_run, run_id, user, user_query, status="running", robot_code=robot_code,
             is_platform_admin=is_platform_admin)
 
-        async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
+        async for sse in _stream_docker_execution(
+                run_id, robot_code, user_query, releaser.done,
+                user_id=user["user_id"] if user else None):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
