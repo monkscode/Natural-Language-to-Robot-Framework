@@ -326,11 +326,18 @@ def _scrub_secret_values(run_id: str, values: list[str]) -> None:
         names = list(e.files)
     except Exception as e:  # noqa: BLE001 — the type only: its text may quote file content
         logging.error(f"❌ DOCKER SERVICE: Secret scrub failed ({type(e).__name__}); deleting the report files")
-        names = ["output.xml", "log.html", "report.html"]
+        # Every file the scrub would have read (it treats .txt / .log as value-bearing too).
+        try:
+            names = [p.relative_to(run_dir).as_posix() for p in run_dir.rglob("*")
+                     if p.is_file() and p.suffix.lower() in (".xml", ".html", ".txt", ".log")]
+        except Exception:  # noqa: BLE001 — the walk itself failed: fall back to the fixed names
+            names = ["output.xml", "log.html", "report.html"]
     for name in names:
         try:
-            (run_dir / name).unlink(missing_ok=True)
+            (run_dir / name).unlink()
             logging.error(f"❌ DOCKER SERVICE: Could not mask {name}; deleted it")
+        except FileNotFoundError:
+            continue
         except OSError:
             logging.error(f"❌ DOCKER SERVICE: Could not mask {name} and could not delete it")
 
@@ -673,7 +680,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
 
         logging.error(
             f"❌ DOCKER SERVICE: Docker container execution failed: {err}")
-        raise RuntimeError(f"Docker container execution failed: {err}")
+        masked = RuntimeError(f"Docker container execution failed: {err}")
+        if secret_values:
+            raise masked from None  # do not chain the unmasked original
+        raise masked
 
 
 def _join_failure_header(message: str) -> str:

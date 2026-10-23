@@ -85,6 +85,19 @@ def test_execute_refuses_a_non_object_env_without_echoing_it():
     assert r.status_code == 400 and _MARK not in r.text
 
 
+def test_a_missing_field_gets_a_422_that_does_not_echo_the_body():
+    r = client.post("/execute", json={"test_filename": "test.robot", "env": {"NLRF_SECRET_PW": _MARK}})
+    assert r.status_code == 422
+    assert _MARK not in r.text
+    assert r.json()["detail"][0]["loc"] == ["body", "run_id"]
+
+
+def test_a_non_object_body_gets_a_422_that_does_not_echo_it():
+    r = client.post("/execute", json=[{"env": {"NLRF_SECRET_PW": _MARK}}])
+    assert r.status_code == 422
+    assert _MARK not in r.text
+
+
 def test_execute_masks_a_value_in_the_500_detail():
     with patch("src.backend.runner_exec.app.get_docker_client", return_value=MagicMock()), \
          patch("src.backend.runner_exec.app.run_test_in_container",

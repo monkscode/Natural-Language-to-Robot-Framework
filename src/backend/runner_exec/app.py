@@ -20,6 +20,8 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from src.backend.config.logging_config import (
@@ -114,6 +116,16 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="nlrf-runner-exec", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_request, exc: RequestValidationError) -> JSONResponse:
+    # FastAPI's default 422 echoes the whole body as `input` — and /execute's body holds
+    # secret values. Answer with where and why only.
+    return JSONResponse(
+        status_code=422,
+        content={"detail": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()]},
+    )
 
 
 class ExecuteRequest(BaseModel):

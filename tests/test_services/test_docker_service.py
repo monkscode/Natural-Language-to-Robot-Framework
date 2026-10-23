@@ -201,7 +201,7 @@ _OUTPUT_XML = (
 )
 
 
-def _secret_run(tmp_path, *, env, scrub, wait=None, logs=b"", write_xml=True):
+def _secret_run(tmp_path, *, env, scrub, wait=None, logs=b"", write_xml=True, stop_error=None):
     """Run run_test_in_container against a mocked Docker; return (result_or_error, client)."""
     run_dir = tmp_path / "r1"
     run_dir.mkdir(exist_ok=True)
@@ -215,6 +215,8 @@ def _secret_run(tmp_path, *, env, scrub, wait=None, logs=b"", write_xml=True):
     else:
         client.containers.run.return_value.wait.side_effect = wait
     client.api.logs.return_value = logs
+    if stop_error is not None:
+        client.containers.run.return_value.stop.side_effect = stop_error
     with patch.object(docker_service, "ROBOT_TESTS_DIR", str(tmp_path)), \
          patch.object(docker_service, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
          patch.object(docker_service, "normalize_docker_mount_source", side_effect=lambda p: p), \
@@ -263,28 +265,54 @@ def test_a_file_the_scrub_could_not_clean_is_deleted_and_the_run_goes_on(tmp_pat
     assert _MARK not in caplog.text
 
 
-def test_an_unexpected_scrub_failure_deletes_the_standard_report_files(tmp_path):
-    (tmp_path / "r1").mkdir()
-    (tmp_path / "r1" / "log.html").write_text(_MARK)
+def test_an_unexpected_scrub_failure_deletes_every_text_report_file(tmp_path, caplog):
+    run_dir = tmp_path / "r1"
+    (run_dir / "dryrun").mkdir(parents=True)
+    for name in ("log.html", "report.html", "playwright-log.txt", "dryrun/x.log"):
+        (run_dir / name).write_text(_MARK)
+    (run_dir / "shot.png").write_bytes(b"png")
     out, _ = _secret_run(
         tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(side_effect=OSError(_MARK)),
     )
-    assert not (tmp_path / "r1" / "output.xml").exists()
-    assert not (tmp_path / "r1" / "log.html").exists()
+    for name in ("output.xml", "log.html", "report.html", "playwright-log.txt", "dryrun/x.log"):
+        assert not (run_dir / name).exists(), name
+    assert (run_dir / "shot.png").exists() and (run_dir / "test.robot").exists()
     assert _MARK not in str(out)
+    assert _MARK not in caplog.text
+    assert "OSError" in caplog.text
+    # only files that really existed are reported as deleted
+    assert "Could not mask report.html" in caplog.text
+
+
+def test_an_unexpected_scrub_failure_does_not_report_files_that_never_existed(tmp_path, caplog):
+    _secret_run(
+        tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(side_effect=OSError(_MARK)),
+    )
+    assert "Could not mask output.xml" in caplog.text
+    assert "report.html" not in caplog.text
 
 
 def test_timeout_path_scrubs_and_masks(tmp_path, caplog):
     scrub = MagicMock(return_value=[])
-    out, _ = _secret_run(
+    out, client = _secret_run(
         tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=scrub,
         wait=docker_service._requests.exceptions.ReadTimeout(_MARK),
+        stop_error=Exception(f"stop said {_MARK}"),
     )
     assert isinstance(out, RuntimeError)
     assert scrub.call_count >= 1
     assert scrub.call_args.args[1] == [_MARK]
     assert _MARK not in str(out)
     assert _MARK not in caplog.text
+    assert "Cleanup after timeout failed: stop said ***" in caplog.text
+
+
+def test_the_masked_error_does_not_chain_the_unmasked_original(tmp_path):
+    out, _ = _secret_run(
+        tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(return_value=[]),
+        wait=RuntimeError(f"docker said {_MARK}"),
+    )
+    assert out.__suppress_context__ is True and out.__cause__ is None
 
 
 def test_outer_error_scrubs_once_a_container_started_and_masks_the_text(tmp_path, caplog):
