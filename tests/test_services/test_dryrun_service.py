@@ -1062,7 +1062,8 @@ class TestSecretFieldsReachEveryExtraction:
 
     def test_without_fields_the_extraction_is_today(self):
         out = ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE))
-        assert "    Fill Text    id=password    ${pw}\n" in out and "guess" in out
+        assert "    Fill Text    id=password    ${pw}\n" in out
+        assert "guess" in out
         assert ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE), ()) == out
 
     def _gate(self, repaired_raw, **kwargs):
@@ -1079,7 +1080,8 @@ class TestSecretFieldsReachEveryExtraction:
     def test_a_repair_that_guesses_the_value_again_is_linked_again(self):
         out = self._gate(_SF_CODE, secret_fields=_SF_FIELDS)
         assert out["dryrun_status"] == "passed"
-        assert _SF_LINE in out["code"] and "guess" not in out["code"]
+        assert _SF_LINE in out["code"]
+        assert "guess" not in out["code"]
 
     def test_a_repair_without_fields_is_extracted_as_today(self):
         for kwargs in ({}, {"secret_fields": ()}):

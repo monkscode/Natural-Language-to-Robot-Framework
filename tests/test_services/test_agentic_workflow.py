@@ -1169,13 +1169,14 @@ class TestSecretFieldsReachTheGate:
 
     @staticmethod
     def _signals(caplog):
-        return [r.getMessage() for r in caplog.records if "secret-not-typed" in r.getMessage()]
+        return [r.getMessage() for r in caplog.records if "signal: secret-not-typed" in r.getMessage()]
 
     def test_the_fields_type_the_secret_and_reach_the_gate(self, caplog):
         crew_result = _make_run_crew_result(raw_code=self.CODE)._replace(secret_fields=self.FIELDS)
         with caplog.at_level(logging.WARNING):
             seen, events = self._run(crew_result)
-        assert self.LINE in seen["code"] and "guess" not in seen["code"]
+        assert self.LINE in seen["code"]
+        assert "guess" not in seen["code"]
         assert seen["kwargs"]["secret_fields"] == self.FIELDS
         assert self._signals(caplog) == []
         complete = next(e for e in events if e.get("status") == "complete")
@@ -1186,8 +1187,19 @@ class TestSecretFieldsReachTheGate:
             seen, events = self._run(_make_run_crew_result(raw_code=self.CODE))
         assert "guess" in seen["code"]  # control: no field, nothing linked
         signals = self._signals(caplog)
-        assert len(signals) == 1 and "PW" in signals[0] and "guess" not in signals[0]
+        assert len(signals) == 1
+        assert "PW" in signals[0]
+        assert "guess" not in signals[0]
         assert "error" not in _event_statuses(events)
+
+    def test_a_failing_check_never_costs_the_generation(self, caplog):
+        with patch("src.backend.services.workflow_service.typed_secret_names", side_effect=RuntimeError("boom")), \
+             caplog.at_level(logging.WARNING):
+            seen, events = self._run(_make_run_crew_result(raw_code=self.CODE))
+        assert "secret-not-typed check failed (non-blocking)" in caplog.text
+        assert self._signals(caplog) == []
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["robot_code"] == seen["code"]
 
     def test_a_request_without_a_secret_logs_nothing(self, caplog):
         with caplog.at_level(logging.WARNING):

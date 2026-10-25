@@ -245,6 +245,9 @@ LINKED = [
     ("a row and a Set Variable: both definitions left", "${pw}    a",
      ["${pw}=    Set Variable    guess", "Fill Text    id=p    ${pw}"], (("id=p", "PW"),),
      ["${pw}    a\n", "Set Variable    guess\n", "    Fill Secret    id=p    %NLRF_SECRET_PW\n"], []),
+    ("a variable another keyword assigns: its definitions are left", "${pw}    a",
+     ["${pw}=    Get Text    id=x", "Fill Text    id=p    ${pw}"], (("id=p", "PW"),),
+     ["${pw}    a\n", "    ${pw}=    Get Text    id=x\n", "    Fill Secret    id=p    %NLRF_SECRET_PW\n"], []),
     ("a lone unread Set Variable is deleted", "",
      ["${pw}=    Set Variable    guess", "Fill Text    id=p    ${pw}"], (("id=p", "PW"),),
      ["    Fill Secret    id=p    %NLRF_SECRET_PW\n"], ["guess", "Set Variable"]),
@@ -318,7 +321,8 @@ class TestLinkSecretFields:
     def test_the_repair_llm_sees_the_placeholder_and_a_repair_round_links_again(self, code, fields):
         linked = link_secret_fields(code, fields)
         restored = restore_secret_placeholders(linked)
-        assert "{{SAUCE_PASSWORD}}" in restored and _ENV not in restored
+        assert "{{SAUCE_PASSWORD}}" in restored
+        assert _ENV not in restored
         assert link_secret_fields(restored, fields) == linked
 
     @pytest.mark.parametrize("label, variables, steps, fields, present, absent", LINKED, ids=[c[0] for c in LINKED])
