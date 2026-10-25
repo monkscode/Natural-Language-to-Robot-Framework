@@ -302,7 +302,7 @@ class TestValidateAndRepair:
              patch.object(ds, "repair_robot_code",
                           side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+                          side_effect=lambda out, *_fields, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
@@ -455,7 +455,7 @@ class TestGateCounters:
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code", side_effect=self._repair()), \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+                          side_effect=lambda out, *_fields, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
@@ -492,7 +492,7 @@ class TestGateCounters:
              patch.object(ds, "repair_robot_code",
                           side_effect=self._repair(guardrails={"repair_output": 2})), \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+                          side_effect=lambda out, *_fields, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
@@ -1030,6 +1030,61 @@ class TestRepairLlmIsHandedTheTestWithoutThePair:
         assert [c.args[1] for c in mock_repair.call_args_list] == [_CW_BASE, first]
         assert all(c.args[1].count("Wait Until Keyword Succeeds") == 0 for c in mock_repair.call_args_list)
         assert out["code"].count(_CW_WAIT) == 1
+
+
+_SF_CODE = (
+    "*** Settings ***\nLibrary    Browser\n\n"
+    "*** Variables ***\n${pw}    guess\n\n"
+    "*** Test Cases ***\nLogin\n"
+    "    New Page    https://x.test\n"
+    "    Fill Text    id=password    ${pw}\n"
+    "    Close Browser\n"
+)
+_SF_FIELDS = (("id=password", "PW"),)
+_SF_LINE = "    Fill Secret    id=password    %NLRF_SECRET_PW\n"
+
+
+class TestSecretFieldsReachEveryExtraction:
+    """#166: the plan's secret fields rewrite the generated test and every repaired one."""
+
+    @staticmethod
+    def _task_output(raw):
+        out = MagicMock()
+        out.pydantic = None
+        out.json_dict = None
+        out.raw = raw
+        return out
+
+    def test_the_extraction_types_the_field_as_the_secret(self):
+        out = ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE), _SF_FIELDS)
+        assert _SF_LINE in out
+        assert "guess" not in out
+
+    def test_without_fields_the_extraction_is_today(self):
+        out = ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE))
+        assert "    Fill Text    id=password    ${pw}\n" in out and "guess" in out
+        assert ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE), ()) == out
+
+    def _gate(self, repaired_raw, **kwargs):
+        s = MagicMock(DRYRUN_ENABLED=True, MAX_DRYRUN_FIXES=2, DRYRUN_TIMEOUT=120)
+        with patch.object(ds, "settings", s), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(self._task_output(repaired_raw), {"llm_calls": 1, "cost": 0.001}, {})):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [{"passed": False, "errors": "bad kw", "exit_code": 1},
+                                          {"passed": True, "errors": "", "exit_code": 0}]
+            return ds.validate_and_repair("rid", "broken", "gemini", "m", None, **kwargs)
+
+    def test_a_repair_that_guesses_the_value_again_is_linked_again(self):
+        out = self._gate(_SF_CODE, secret_fields=_SF_FIELDS)
+        assert out["dryrun_status"] == "passed"
+        assert _SF_LINE in out["code"] and "guess" not in out["code"]
+
+    def test_a_repair_without_fields_is_extracted_as_today(self):
+        for kwargs in ({}, {"secret_fields": ()}):
+            out = self._gate(_SF_CODE, **kwargs)
+            assert "guess" in out["code"], kwargs
 
 
 class TestChangeWaitsSurviveTheCleanup:

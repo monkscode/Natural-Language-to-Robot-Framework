@@ -36,6 +36,9 @@ The same cleanup step also applies seven smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
 `rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads`,
 `rewrite_typed_value_reads`, `rewrite_text_checks_whole_word` and `rewrite_empty_loop_checks`.
+The org-secret rules have their own section: `link_secret_fields` (first in that step, #166),
+`rewrite_secret_fills` (last, #131), `restore_secret_placeholders` (for the repair LLM) and
+`typed_secret_names` (the workflow's secret-not-typed signal).
 
 Two further public functions are not part of that cleanup step:
 `insert_change_waits` puts a before-read and a never-failing wait around a read
@@ -49,7 +52,7 @@ Referenced by:
     src.backend.services.dryrun_service.validate_and_repair
         (insert_change_waits after every repair, remove_change_waits before it)
     src.backend.services.workflow_service.run_agentic_workflow
-        (insert_change_waits after generation)
+        (insert_change_waits after generation, typed_secret_names after the gate)
     src.backend.services.workflow_service._stream_docker_execution
         (remove_change_waits for the learning hand-off)
 
@@ -2285,6 +2288,134 @@ def rewrite_secret_fills(robot_code: str) -> str:
     if out != robot_code:
         logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
     return out
+
+
+# #166: when the LLM did not keep `{{NAME}}`, the field the plan typed it into decides.
+_SECRET_TYPING = {**_SECRET_FROM_TEXT, "fill secret": "Fill Secret", "type secret": "Type Secret"}
+
+
+def _field_key(locator: str) -> str:
+    """A locator in the spelling the pipeline writes, where `id=x`, `css=#x` and `#x` compare equal and a
+    leading `css=` is dropped."""
+    code = strip_redundant_css_prefix(normalize_robot_code("*** Variables ***\n${x}    " + locator.strip()))
+    canon = _canon_locator(code.split("\n")[1].split("    ", 1)[1])
+    return canon[4:] if canon.startswith("css=") else canon
+
+
+def _definition_lines(suite: _Suite, var: str) -> list[int] | None:
+    """The lines defining `${var}`: one-value *** Variables *** rows and `${var}=    Set Variable    x` test
+    steps. None when any definition has another shape (a `...` line, more values, a list, another keyword)."""
+    found: list[int] = []
+    section = None
+    for line_no, raw in enumerate(suite.lines):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        header = _section_header_name(line)
+        if header is not None:
+            section = header
+            continue
+        if section not in _VARIABLE_SECTIONS:
+            continue
+        parts = _CELL_SPLIT_RE.split(line)
+        cells = _content_cells(parts)
+        match = cells and _VARIABLE_ENTRY_RE.fullmatch(parts[cells[0]].strip())
+        if match and _canon_variable(match.group(2).split(":", 1)[0]) == var:
+            following = next((n.strip() for n in suite.lines[line_no + 1:]
+                              if n.strip() and not n.strip().startswith("#")), "")
+            if match.group(1) != "$" or len(cells) != 2 or following.startswith("..."):
+                return None
+            found.append(line_no)
+    for test in suite.tests:
+        for step in test.steps:
+            if var in step.assigns:
+                if (step.keyword != "set variable" or step.prefix not in _BUILTIN_PREFIXES
+                        or len(step.assigns) != 1 or len(step.args) != 1 or step.continued):
+                    return None
+                found.append(step.line_no)
+    return found
+
+
+def link_secret_fields(robot_code: str, fields) -> str:
+    """The field the plan typed a secret into decides how the test types it (#166).
+
+    `fields`: `(locator, NAME or None)` per plan typing step on a field browser-service found, in plan order
+    (`element_identification.secret_fields`; None = the step typed a literal). For each field holding a NAME,
+    the test's typing steps on it (`Fill Text` / `Type Text` / `Fill Secret` / `Type Secret`; locators resolved
+    by the shared reader, only literal ones in a test it cannot follow) pair with the plan's by order, and only
+    when the counts are equal; each secret step becomes `Fill Secret    LOC    %NLRF_SECRET_NAME` (`Type …` ->
+    `Type Secret`), whatever the LLM typed. Locators compare in the pipeline's spelling (`id=x` = `css=#x` =
+    `#x`, a leading `css=` dropped). The variable a rewritten step typed from: one single-line definition (a
+    *** Variables *** row or a `Set Variable` step) that nothing else reads is deleted; one another line reads
+    gets `{{NAME}}` as its value (rewrite_secret_fills then types that reader as the secret); several,
+    multi-line or other definitions stay. No stored value is read. Left alone: no field with a NAME, a count
+    that differs, a typing step inside a user keyword, a file the reader refuses. Idempotent; the input object
+    comes back when nothing changes.
+    """
+    wanted: dict[str, list[str | None]] = {}
+    for locator, name in fields or ():
+        wanted.setdefault(_field_key(locator), []).append(name)
+    wanted = {key: names for key, names in wanted.items() if any(names)}
+    suite = _parse_suite(robot_code) if wanted else None
+    if suite is None:
+        return robot_code
+    typed: dict[str, list[_Step]] = {}
+    for test in suite.tests:
+        all_args = _follow(test, suite.variables) if test.followable else [s.args for s in test.steps]
+        for step, args in zip(test.steps, all_args):
+            if step.keyword in _SECRET_TYPING and step.prefix in _BROWSER_PREFIXES and len(args) >= 2 and args[0]:
+                key = _field_key(args[0])
+                if key in wanted:
+                    typed.setdefault(key, []).append(step)
+    lines = list(suite.lines)
+    linked = 0
+    typed_from: dict[str, str] = {}
+    for key, names in wanted.items():
+        steps = typed.get(key, [])
+        if len(steps) != len(names):
+            continue  # the test types this field a different number of times than the plan: left as today
+        for step, name in zip(steps, names):
+            if name is None:
+                continue
+            env = _SECRET_ENV_MARK + name
+            if not (step.keyword in _TEXT_FROM_SECRET and step.args[1] == env):
+                lines[step.line_no] = _rebuild(step, _SECRET_TYPING[step.keyword], replace_second_arg=env)
+                linked += 1
+            ref = _SCALAR_CELL_RE.fullmatch(step.args[1]) or (
+                step.keyword in _TEXT_FROM_SECRET and _EXPRESSION_VAR_RE.fullmatch(step.args[1]))
+            if ref:
+                typed_from[_canon_variable(ref.group(1))] = name
+    removed: set[int] = set()
+    for var, name in typed_from.items():
+        defs = _definition_lines(suite, var)
+        if not defs or len(defs) != 1:
+            continue  # none, several, or a shape this reader cannot rewrite: left as written
+        if not any(_mentions_variable(line, var) for i, line in enumerate(lines) if i != defs[0]):
+            removed.add(defs[0])  # nothing reads it any more: the LLM's own value goes
+            continue
+        parts = _CELL_SPLIT_RE.split(lines[defs[0]])
+        value_idx = _content_cells(parts)[-1]
+        parts[value_idx] = parts[value_idx].replace(parts[value_idx].strip(), "{{" + name + "}}", 1)
+        lines[defs[0]] = "".join(parts)
+    out = "\n".join(line for i, line in enumerate(lines) if i not in removed)
+    if out == robot_code:
+        return robot_code
+    logger.info(f"Secret field link: {linked} typing step(s) became Fill/Type Secret, {len(removed)} variable "
+                "definition(s) removed (signal: secret-field-linked)")
+    return out
+
+
+def typed_secret_names(robot_code: str) -> set[str]:
+    """The NAMEs a test types with `Fill Secret` / `Type Secret` as `%NLRF_SECRET_NAME` (or a resolved `${var}`
+    holding it): the only forms Browser types the secret from. Empty when the reader refuses the file."""
+    names: set[str] = set()
+
+    def note(value: str) -> None:
+        match = _SECRET_ENV_ARG_RE.fullmatch(value)
+        if match:
+            names.add(match.group(1))
+
+    if robot_code and _SECRET_ENV_MARK in robot_code:
+        _secret_step_edits(robot_code, _TEXT_FROM_SECRET, True, note)
+    return names
 
 
 def restore_secret_placeholders(robot_code: str) -> str:

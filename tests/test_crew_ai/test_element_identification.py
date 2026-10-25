@@ -40,6 +40,7 @@ from src.backend.crew_ai.element_identification import (
     not_found_lines,
     not_found_notice,
     rewrite_form_description,
+    secret_fields,
     step_needs_locator,
 )
 
@@ -1958,3 +1959,47 @@ def test_runner_exception_without_secrets_keeps_the_traceback_log(caplog):
     records = [r for r in caplog.records if r.levelname == "ERROR"]
     assert len(records) == 1 and records[0].exc_info is not None
     assert records[0].getMessage().startswith("batch_browser_automation raised — steps fall back")
+
+
+# ─── #166: the plan's typing steps on found fields, kept beside the steps ────
+
+def _merged_input(keyword, value, locator="id=p", found=True):
+    step = {"step_description": "s", "keyword": keyword, "element_description": "field", "value": value,
+            "found": found}
+    if locator is not None:
+        step["locator"] = locator
+    return step
+
+
+def test_secret_fields_list_every_typing_step_on_a_found_field_in_plan_order():
+    merged = [OPEN, _merged_input("Fill Text", "standard_user", "id=user-name"),
+              _merged_input("Input Text", "{{ sauce_password }}", "input[placeholder='Password']"),
+              _merged_input("Click", None, "id=login-button"), CLOSE]
+    assert secret_fields(merged) == (
+        ("id=user-name", None), ("input[placeholder='Password']", "SAUCE_PASSWORD"))
+
+
+def test_secret_fields_are_empty_without_a_secret_typing_step():
+    assert secret_fields([OPEN, _merged_input("Fill Text", "standard_user")]) == ()
+    assert secret_fields([]) == ()
+
+
+@pytest.mark.parametrize("step", [
+    _merged_input("Fill Text", "{{PW}}", locator=None, found=False),
+    _merged_input("Fill Text", "pre-{{PW}}"),
+    _merged_input("Press Keys", "{{PW}}"),
+    _merged_input("Get Text", "{{PW}}"),
+], ids=["not found", "inside longer text", "press keys", "a read"])
+def test_a_step_that_is_not_an_exact_secret_typed_into_a_found_field_gives_no_field(step):
+    assert secret_fields([OPEN, step]) == ()
+
+
+def test_identify_elements_returns_the_fields_beside_the_steps():
+    structlog.contextvars.clear_contextvars()  # no user: the stored value is never looked up
+    steps = [OPEN, _step("Fill Text", description="password field", value="{{PW}}"), CLOSE]
+    result = identify_elements(
+        steps, "type {{PW}} on https://example.com",
+        run_tool=lambda e, u, q: {"status": "success",
+                                  "locator_mapping": {"elem_1": _mapping_entry(locator="id=password")}})
+    assert result["secret_fields"] == (("id=password", "PW"),)
+    assert result["steps"][1]["value"] == "{{PW}}"  # the steps themselves are unchanged

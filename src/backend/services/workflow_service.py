@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
 from src.backend.crew_ai.element_identification import not_found_lines, not_found_notice
 from src.backend.crew_ai.llm_provider_routing import resolve_model_string
-from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits
+from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits, typed_secret_names
 from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
@@ -32,7 +32,9 @@ from src.backend.core.provider_errors import friendly_provider_error, friendly_s
 from src.backend.core.failure_sentences import failure_sentence, first_failure_message
 from src.backend.core.secret_redaction import redact_secrets
 from src.backend.core.secret_scrub import mask_values
-from src.backend.auth.secrets import SecretsUnavailable, get_values, org_of, secret_names_in_code
+from src.backend.auth.secrets import (
+    SecretsUnavailable, get_values, org_of, secret_names_in_code, secret_names_in_query,
+)
 from cryptography.fernet import InvalidToken
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
@@ -773,6 +775,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             change_waits = getattr(run_result, "change_waits", ()) or ()
             # Elements delivered without a working locator; reported on the complete event.
             not_found = getattr(run_result, "not_found", ()) or ()
+            # #166: the fields the plan typed a secret into; they decide how the test types it.
+            secret_fields = getattr(run_result, "secret_fields", ()) or ()
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -782,7 +786,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # the assembler crew) and apply the shared normalization pipeline (also used
         # by the dryrun repair path) so both normalize identically.
         robot_code = insert_change_waits(
-            extract_and_normalize_robot_code(crew_with_results.tasks[-1].output), change_waits)
+            extract_and_normalize_robot_code(crew_with_results.tasks[-1].output, secret_fields), change_waits)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -791,9 +795,19 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # not the asyncio loop) and AFTER create_workflow_span has closed (R5).
         gate = validate_and_repair(
             workflow_id, robot_code, model_provider, model_name,
-            progress_queue=progress_queue, change_waits=change_waits,
+            progress_queue=progress_queue, change_waits=change_waits, secret_fields=secret_fields,
         )
         robot_code = gate["code"]
+        # Names only, never a value: a secret the request names that the final test does not type.
+        try:
+            untyped = [n for n in secret_names_in_query(natural_language_query)
+                       if n not in typed_secret_names(robot_code)]
+        except Exception:  # a log line only: it never costs the generation
+            logging.warning("secret-not-typed check failed (non-blocking)", exc_info=True)
+            untyped = []
+        if untyped:
+            logging.warning("Generated test does not type secret(s) %s as Fill/Type Secret %%NLRF_SECRET_<NAME> "
+                            "(signal: secret-not-typed)", ", ".join(untyped))
 
         logging.info(
             "Generated Robot Framework code is here:\n%s", robot_code)

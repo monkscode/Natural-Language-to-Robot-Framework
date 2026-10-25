@@ -25,7 +25,7 @@ class RunCrewResult(NamedTuple):
     A NamedTuple rather than a plain tuple so callers can read fields by name
     while every existing positional access keeps working. Members 0-4 are in
     their original order for exactly that reason; the additions are appended
-    rather than inserted (change_waits and not_found are more appended members).
+    rather than inserted (change_waits, not_found and secret_fields are more appended members).
 
     shared_llm sits last despite being the more useful handle: llm_monitor is
     index 4 in released code and in test assertions, and reordering to put the
@@ -42,6 +42,7 @@ class RunCrewResult(NamedTuple):
     guardrail_attempts: dict       # the main crew's RobotTasks counter (assembly_output)
     change_waits: tuple = ()       # F1: ({"read_locator", "action_locator"}, ...) — kept beside the steps
     not_found: tuple = ()          # elements without a working locator, with the cause — kept beside the steps
+    secret_fields: tuple = ()      # #166: ((locator, NAME or None), ...) per plan typing step — kept beside the steps
 
 # CrewAI log file path and rotation settings
 CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
@@ -583,6 +584,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 dict(tasks.guardrail_attempts),
                 tuple(identification.get("change_waits") or ()),
                 tuple(identification.get("not_found") or ()),
+                tuple(identification.get("secret_fields") or ()),
             )
 
         except Exception as e:

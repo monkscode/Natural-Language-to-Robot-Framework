@@ -145,11 +145,12 @@ class TestRunCrewReturnShape:
     assertion below still holds.
     """
 
-    def test_returns_ten_member_tuple(self):
-        """Success path: result is a 10-member tuple (not_found is the 10th)."""
+    def test_returns_eleven_member_tuple(self):
+        """Success path: result is an 11-member tuple (not_found is the 10th, secret_fields the 11th)."""
         result, _ = _run_crew_with_mocks()
         assert isinstance(result, tuple)
-        assert len(result) == 10
+        assert len(result) == 11
+        assert result.secret_fields is result[10]
 
     def test_named_access_matches_positional(self):
         """It is a NamedTuple: names and indices address the same members."""

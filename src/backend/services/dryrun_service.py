@@ -48,6 +48,7 @@ from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     insert_change_waits,
+    link_secret_fields,
     normalize_robot_code,
     remove_change_waits,
     restore_secret_placeholders,
@@ -83,7 +84,7 @@ _MAX_ERROR_TEXT_CHARS = 4000
 # Shared code extraction + normalization (main path AND repair path)
 # ---------------------------------------------------------------------------
 
-def extract_and_normalize_robot_code(task_output) -> str:
+def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
     """Extract robot code from a CrewAI task output and apply the full
     normalization pipeline.
 
@@ -95,8 +96,11 @@ def extract_and_normalize_robot_code(task_output) -> str:
       Strategy 3 — raw JSON {"code": "..."} → code, else raw output as-is
       then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
-            rewrite_visibility_checks_to_wait → rewrite_select_text_reads →
+            rewrite_visibility_checks_to_wait → link_secret_fields → rewrite_select_text_reads →
             rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → rewrite_secret_fills → ensure_browser_timeout.
+
+    `secret_fields` (`RunCrewResult.secret_fields`, #166): the plan's typing steps on found fields; () links
+    nothing, so the code comes out exactly as before.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -207,7 +211,10 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # that raises costs only its own rewrite, never the generation.
     # The very last: a typed `{{NAME}}` org secret becomes `Fill Secret … %NLRF_SECRET_NAME`
     # (#131), after every rewrite above has seen the placeholder form it reads.
-    for name, rewrite in (("rewrite_select_text_reads", rewrite_select_text_reads),
+    # The very first: the field the plan typed a secret into is typed as that secret,
+    # whatever the LLM wrote there (#166), so every later rewrite sees the secret form.
+    for name, rewrite in (("link_secret_fields", lambda code: link_secret_fields(code, secret_fields)),
+                          ("rewrite_select_text_reads", rewrite_select_text_reads),
                           ("rewrite_typed_value_reads", rewrite_typed_value_reads),
                           ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word),
                           ("rewrite_empty_loop_checks", rewrite_empty_loop_checks),
@@ -569,8 +576,11 @@ def _push_progress(progress_queue, message: str, progress: int | None = None) ->
 
 
 def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue,
-                        change_waits=None) -> dict:
+                        change_waits=None, secret_fields=()) -> dict:
     """Soft dryrun gate + bounded Assembler repair loop (generation path only).
+
+    `secret_fields` (`RunCrewResult.secret_fields`, #166) goes to every repair's extraction, so a repair
+    that guesses a secret's value again is typed as the secret again.
 
     `change_waits` (browser-service's marks, as `RunCrewResult.change_waits`) is applied to every
     repaired test before it is re-checked, so the repair cannot drop the two inserted lines;
@@ -686,7 +696,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     _accumulate_usage(repair_usage, attempt_usage)
                     for _name, _count in (attempt_guardrails or {}).items():
                         guardrail_attempts[_name] = guardrail_attempts.get(_name, 0) + _count
-                    new_code = extract_and_normalize_robot_code(task_output)
+                    new_code = extract_and_normalize_robot_code(task_output, secret_fields)
                     new_code = insert_change_waits(new_code, change_waits)
                 except Exception as e:
                     # §8.3 — repair fault isolation: degrade with current code,
