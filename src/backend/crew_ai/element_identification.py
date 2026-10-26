@@ -22,6 +22,9 @@ Every job the old agent did is a mechanical rule, ported here as code:
     deliberately NOT stapled onto the steps or IdentifiedElement (the
     Assembler must never see them); they travel BESIDE the steps as the
     `change_waits` list that identify_elements returns (change_waits_from)
+  - secret fields (#166): each plan typing step on a found field, with the
+    NAME of an exact `{{NAME}}` value, also travels BESIDE the steps as
+    `secret_fields` (secret_fields) for robot_code_normalizer.link_secret_fields
 
 Steps arriving from crew._extract_plan_steps are PlanOutput-validated
 (fail-fast, pre-browser); merge_locators additionally filters each step to
@@ -735,6 +738,19 @@ def _swap_values_back(node: Any, name_of_value: dict[str, str]) -> Any:
     return swap(node)
 
 
+def secret_fields(merged: list[dict[str, Any]]) -> tuple[tuple[str, str | None], ...]:
+    """The plan's typing steps on fields browser-service found, as `(locator, NAME or None)` in plan order:
+    NAME (upper-cased) when the step's value is exactly `{{NAME}}`, None for any other value; () when no
+    step types a secret. Kept beside the steps like not_found (#166: link_secret_fields reads it)."""
+    fields = []
+    for step in merged:
+        if step.get("found") and step.get("locator") and action_for_keyword(step.get("keyword") or "") == "input":
+            value = step.get("value")
+            match = _SECRET_VALUE_RE.fullmatch(value) if isinstance(value, str) else None
+            fields.append((step["locator"], match.group(1).upper() if match else None))
+    return tuple(fields) if any(name for _, name in fields) else ()
+
+
 def _fetch_locator_mapping(
     elements: list[dict[str, Any]],
     url: str,
@@ -1063,4 +1079,5 @@ def identify_elements(
         },
         "change_waits": change_waits,
         "not_found": not_found,
+        "secret_fields": secret_fields(merged),
     }

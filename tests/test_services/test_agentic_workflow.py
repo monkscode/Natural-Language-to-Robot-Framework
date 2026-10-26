@@ -1140,6 +1140,77 @@ class TestChangeWaitsReachTheGate:
         assert seen["kwargs"]["change_waits"] == ()
 
 
+class TestSecretFieldsReachTheGate:
+    """#166: the fields run_crew returns type the secret, reach the gate, and a secret of the request
+    that the final test does not type is logged by name."""
+
+    CODE = (
+        "*** Settings ***\nLibrary    Browser    timeout=30s\n\n"
+        "*** Variables ***\n${password}    guess\n\n"
+        "*** Test Cases ***\nLogin\n"
+        "    New Page    https://example.com\n"
+        "    Fill Text    id=password    ${password}\n"
+        "    Close Browser\n"
+    )
+    FIELDS = (("id=password", "PW"),)
+    QUERY = "type {{PW}} in the password field on example.com"
+    LINE = "    Fill Secret    id=password    %NLRF_SECRET_PW\n"
+
+    def _run(self, crew_result, query=QUERY):
+        seen = {}
+
+        def gate(workflow_id, code, *a, **k):
+            seen["code"] = code
+            seen["kwargs"] = k
+            return {"code": code, "dryrun_status": "passed", "repair_usage": {}}
+
+        events = _run_workflow(query=query, crew_result=crew_result, gate=gate)
+        return seen, events
+
+    @staticmethod
+    def _signals(caplog):
+        return [r.getMessage() for r in caplog.records if "signal: secret-not-typed" in r.getMessage()]
+
+    def test_the_fields_type_the_secret_and_reach_the_gate(self, caplog):
+        crew_result = _make_run_crew_result(raw_code=self.CODE)._replace(secret_fields=self.FIELDS)
+        with caplog.at_level(logging.WARNING):
+            seen, events = self._run(crew_result)
+        assert self.LINE in seen["code"]
+        assert "guess" not in seen["code"]
+        assert seen["kwargs"]["secret_fields"] == self.FIELDS
+        assert self._signals(caplog) == []
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["robot_code"] == seen["code"]
+
+    def test_a_secret_the_final_test_does_not_type_is_logged_by_name_only(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            seen, events = self._run(_make_run_crew_result(raw_code=self.CODE))
+        assert "guess" in seen["code"]  # control: no field, nothing linked
+        signals = self._signals(caplog)
+        assert len(signals) == 1
+        assert "PW" in signals[0]
+        assert "guess" not in signals[0]
+        assert "error" not in _event_statuses(events)
+
+    def test_a_failing_check_never_costs_the_generation(self, caplog):
+        with patch("src.backend.services.workflow_service.typed_secret_names", side_effect=RuntimeError("boom")), \
+             caplog.at_level(logging.WARNING):
+            seen, events = self._run(_make_run_crew_result(raw_code=self.CODE))
+        assert "secret-not-typed check failed (non-blocking)" in caplog.text
+        assert self._signals(caplog) == []
+        complete = next(e for e in events if e.get("status") == "complete")
+        assert complete["robot_code"] == seen["code"]
+
+    def test_a_request_without_a_secret_logs_nothing(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            self._run(_make_run_crew_result(raw_code=self.CODE), query="log in on example.com")
+        assert self._signals(caplog) == []
+
+    def test_an_eight_member_result_reads_as_no_fields(self):
+        seen, _events = self._run(tuple(_make_run_crew_result(raw_code=self.CODE))[:8])
+        assert seen["kwargs"]["secret_fields"] == ()
+
+
 class TestProviderDidNotAnswerReachesTheStream:
     def test_final_timeout_becomes_a_plain_sentence(self):
         import litellm
