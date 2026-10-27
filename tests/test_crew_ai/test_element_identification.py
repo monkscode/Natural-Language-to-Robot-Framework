@@ -1838,7 +1838,8 @@ def test_secret_map_goes_beside_the_steps_and_the_answer_is_swapped_back(signed_
         "found": True, "best_locator": f"css=input[value='{_MARKER}']",
         "all_locators": [{"locator": f"text={_MARKER}"}]}}}
     out, sent, _, get_values, kwargs = _run(elements, response, {"PW": _MARKER})
-    assert sent[0] is elements and sent[0][0]["value"] == "{{PW}}"  # the step keeps its name
+    assert sent[0] is elements  # the step keeps its name
+    assert sent[0][0]["value"] == "{{PW}}"
     assert kwargs == [{"secrets": {"PW": _MARKER}}]
     assert _MARKER not in repr(sent)
     get_values.assert_called_once_with("org-1", {"PW"})
@@ -1858,7 +1859,8 @@ def test_name_in_braces_with_spaces_and_lower_case_is_a_secret(signed_in):
 def test_value_that_only_contains_braces_is_left_alone(signed_in):
     elements = [{"id": "e", "value": "x{{PW}}"}, {"id": "f", "value": "{{PW}}{{PW}}"}]
     _, sent, org_of, get_values, kwargs = _run(elements, {"status": "success"}, {"PW": _MARKER})
-    assert sent[0] == elements and kwargs == [{}]
+    assert sent[0] == elements
+    assert kwargs == [{}]
     org_of.assert_not_called()
     get_values.assert_not_called()
 
@@ -1879,7 +1881,8 @@ def test_user_without_org_means_no_lookup(signed_in):
     elements = _pw_elements()
     _, sent, _, get_values, kwargs = _run(elements, {}, org=None)
     get_values.assert_not_called()
-    assert sent[0] == elements and kwargs == [{}]
+    assert sent[0] == elements
+    assert kwargs == [{}]
 
 
 def test_a_plain_query_never_touches_the_store(signed_in):
@@ -1887,7 +1890,8 @@ def test_a_plain_query_never_touches_the_store(signed_in):
     _, sent, org_of, get_values, kwargs = _run(elements, {"status": "success"})
     org_of.assert_not_called()
     get_values.assert_not_called()
-    assert sent[0] is elements and kwargs == [{}]
+    assert sent[0] is elements
+    assert kwargs == [{}]
 
 
 def test_name_the_store_no_longer_holds_is_left_out_of_the_map(signed_in):
