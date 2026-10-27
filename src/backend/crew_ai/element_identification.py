@@ -672,23 +672,25 @@ def _identified_from_entry(
 _batch_tool = None
 
 
-def _default_run_tool(elements: list[dict[str, Any]], url: str, user_query: str) -> dict[str, Any]:
+def _default_run_tool(
+    elements: list[dict[str, Any]], url: str, user_query: str, secrets: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Call the real batch tool (lazy import keeps unit tests network-free)."""
     global _batch_tool
     if _batch_tool is None:
         from tools.browser_use_tool import BatchBrowserUseTool
         _batch_tool = BatchBrowserUseTool()
-    return _batch_tool._run(elements=elements, url=url, user_query=user_query)
+    return _batch_tool._run(elements=elements, url=url, user_query=user_query, secrets=secrets)
 
 
 _SECRET_VALUE_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
 
 
-def _hand_secret_values(elements: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Copy of `elements` where a value that is exactly `{{NAME}}` is the org's stored value,
-    plus {stored value: "{{NAME}}"} for the swap back. Nothing to hand over (no such value, no
-    user, no org, name no longer stored) returns the same list and {}. A lost or unset key
-    raises (SecretsUnavailable; an unreadable stored value as a RuntimeError sentence) and fails the generation."""
+def _secret_values(elements: list[dict[str, Any]]) -> dict[str, str]:
+    """{NAME: the org's stored value} for each value that is exactly `{{NAME}}`; `elements` is not
+    changed. Nothing to hand over (no such value, no user, no org, name no longer stored) is {}.
+    A lost or unset key raises (SecretsUnavailable; an unreadable stored value as a RuntimeError
+    sentence) and fails the generation."""
     wanted = {}
     for index, element in enumerate(elements):
         value = element.get("value")
@@ -696,13 +698,13 @@ def _hand_secret_values(elements: list[dict[str, Any]]) -> tuple[list[dict[str, 
         if match:
             wanted[index] = match.group(1).upper()
     if not wanted:
-        return elements, {}
+        return {}
     from cryptography.fernet import InvalidToken
     from src.backend.auth import secrets  # lazy: the auth stack stays out of plain element tests
 
     org_id = secrets.org_of(structlog.contextvars.get_contextvars().get("user_id"))
     if not org_id:
-        return elements, {}
+        return {}
     try:
         stored = secrets.get_values(org_id, set(wanted.values()))
     except InvalidToken:  # carries no text: the user would see a blank "An error occurred: "
@@ -710,13 +712,7 @@ def _hand_secret_values(elements: list[dict[str, Any]]) -> tuple[list[dict[str, 
             "This request's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
             "Add them again on the Secrets page, then try again."
         ) from None
-    if not stored:
-        return elements, {}
-    handed = [
-        dict(element, value=stored[wanted[i]]) if wanted.get(i) in stored else element
-        for i, element in enumerate(elements)
-    ]
-    return handed, {stored[name]: "{{" + name + "}}" for name in sorted(stored, reverse=True)}
+    return dict(stored)
 
 
 def _swap_values_back(node: Any, name_of_value: dict[str, str]) -> Any:
@@ -755,14 +751,16 @@ def _fetch_locator_mapping(
     elements: list[dict[str, Any]],
     url: str,
     user_query: str,
-    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None,
+    run_tool: Callable[..., dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
     """ONE batch tool call; every failure mode returns {} (placeholder path)."""
     runner = run_tool or _default_run_tool
-    # shortcut: bs still types what it is handed; the bs pin PR sends the name + a "secrets" map instead
-    elements, name_of_value = _hand_secret_values(elements)
+    # bs types each value itself; the swap-back stays for page text that shows one (D22).
+    secrets = _secret_values(elements)
+    name_of_value = {secrets[name]: "{{" + name + "}}" for name in sorted(secrets, reverse=True)}
     try:
-        response = runner(elements, url, user_query) or {}
+        response = (runner(elements, url, user_query, secrets=secrets) if secrets
+                    else runner(elements, url, user_query)) or {}
     except Exception as exc:
         # CONTRACT: no retry, no reformulation — degrade to placeholders.
         if name_of_value:
@@ -995,7 +993,7 @@ def not_found_notice(count: int) -> str:
 def identify_elements(
     steps: list[Any],
     user_query: str,
-    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None = None,
+    run_tool: Callable[..., dict[str, Any]] | None = None,
     on_progress: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     """The deterministic replacement for identify_elements_task.
@@ -1008,7 +1006,8 @@ def identify_elements(
     Args:
         steps: plan steps (dicts or PlannedStep models), in plan order.
         user_query: the user's original query, forwarded VERBATIM.
-        run_tool: injectable tool runner (tests); defaults to the real tool.
+        run_tool: injectable tool runner (tests); defaults to the real tool. Called as
+            (elements, url, user_query), plus secrets= when the request names a stored secret.
         on_progress: optional callback(progress, message) for SSE routing;
             its own errors are swallowed — progress must never break the run.
     """
