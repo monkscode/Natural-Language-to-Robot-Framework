@@ -397,7 +397,7 @@ class TestPollInstrumentation:
 _MADE_UP = "x-made-up-1"
 
 
-def _posted_payload(tool, elements, caplog=None, **run_kwargs):
+def _posted_payload(tool, elements, **run_kwargs):
     """Drive _run() and return the json= payload of the POST /workflow call."""
     results = [_found("elem_1", "id=pw")]
     with patch.object(BatchBrowserUseTool, "_health_check_with_retry", return_value=True), \
@@ -423,4 +423,5 @@ class TestSecretsMap:
     def test_no_log_record_holds_the_value(self, tool, caplog):
         with caplog.at_level("DEBUG"):
             _posted_payload(tool, [{"id": "elem_1", "value": "{{PW}}"}], secrets={"PW": _MADE_UP})
+        assert caplog.records  # something was captured, so the next line cannot pass vacuously
         assert _MADE_UP not in caplog.text

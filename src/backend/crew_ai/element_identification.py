@@ -689,7 +689,8 @@ _SECRET_VALUE_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
 def _secret_values(elements: list[dict[str, Any]]) -> dict[str, str]:
     """{NAME: the org's stored value} for each value that is exactly `{{NAME}}`; `elements` is not
     changed. Nothing to hand over (no such value, no user, no org, name no longer stored) is {}.
-    A lost or unset key raises (SecretsUnavailable; an unreadable stored value as a RuntimeError sentence) and fails the generation."""
+    A lost or unset key raises (SecretsUnavailable; an unreadable stored value as a RuntimeError
+    sentence) and fails the generation."""
     wanted = {}
     for index, element in enumerate(elements):
         value = element.get("value")
@@ -992,7 +993,7 @@ def not_found_notice(count: int) -> str:
 def identify_elements(
     steps: list[Any],
     user_query: str,
-    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None = None,
+    run_tool: Callable[..., dict[str, Any]] | None = None,
     on_progress: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     """The deterministic replacement for identify_elements_task.
@@ -1005,7 +1006,8 @@ def identify_elements(
     Args:
         steps: plan steps (dicts or PlannedStep models), in plan order.
         user_query: the user's original query, forwarded VERBATIM.
-        run_tool: injectable tool runner (tests); defaults to the real tool.
+        run_tool: injectable tool runner (tests); defaults to the real tool. Called as
+            (elements, url, user_query), plus secrets= when the request names a stored secret.
         on_progress: optional callback(progress, message) for SSE routing;
             its own errors are swallowed — progress must never break the run.
     """
