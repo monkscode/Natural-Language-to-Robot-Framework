@@ -75,6 +75,10 @@ WORKDIR /app
 # step the agent keeps its screenshot on for the rest of the run (it was sent
 # on the next call only, so later points at an element with no index were
 # guesses); runtime dependencies identical.
+# Bumped 1.0.51 -> 1.0.52 on 2026-10-27: browser-service types an org secret
+# itself - NLRF sends {NAME: value} beside the steps, a step keeps {{NAME}},
+# and bs never logs, returns or reads back the value (password fields and
+# the fields it typed a secret into); runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -107,7 +111,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.51 && \
+    browser-service==1.0.52 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 

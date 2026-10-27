@@ -247,7 +247,8 @@ class BatchBrowserUseTool(BaseTool):
     )
     args_schema: Type[BaseModel] = BatchBrowserUseToolInput
 
-    def _run(self, elements: list, url: str, user_query: str = "") -> Dict[str, Any]:
+    def _run(self, elements: list, url: str, user_query: str = "",
+             secrets: dict[str, str] | None = None) -> Dict[str, Any]:
         """Execute batch browser automation to find multiple elements in one session.
 
         Since Task 16 the only production caller is the deterministic element
@@ -311,6 +312,9 @@ class BatchBrowserUseTool(BaseTool):
                     "timeout": timeout
                 }
             }
+            # Never LLM-supplied, never logged: bs types each value itself (#131 Part 2).
+            if secrets:
+                payload["secrets"] = secrets
 
             # Forward identity from contextvars (never LLM-supplied).
             # parent_workflow_id prevents duplicate metrics recording in browser-service.

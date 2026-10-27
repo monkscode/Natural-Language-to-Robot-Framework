@@ -390,3 +390,37 @@ class TestPollInstrumentation:
         assert _merge_phase_timings(None, submit_s=0.05, poll_wait_s=4.37) == {
             "submit_s": 0.05, "poll_wait_s": 4.37,
         }
+
+
+# ─── #131 Part 2: the secrets map rides beside the steps ─────────────────────
+
+_MADE_UP = "x-made-up-1"
+
+
+def _posted_payload(tool, elements, caplog=None, **run_kwargs):
+    """Drive _run() and return the json= payload of the POST /workflow call."""
+    results = [_found("elem_1", "id=pw")]
+    with patch.object(BatchBrowserUseTool, "_health_check_with_retry", return_value=True), \
+         patch("tools.browser_use_tool.requests.post", return_value=_mock_post_202()) as post, \
+         patch.object(BrowserUseAPI, "query_task_status", return_value=_completed_response(results)):
+        tool._run(elements=elements, url="https://example.com", **run_kwargs)
+    return post.call_args.kwargs["json"]
+
+
+class TestSecretsMap:
+
+    def test_map_is_sent_beside_the_steps_unchanged(self, tool):
+        elements = [{"id": "elem_1", "description": "password", "action": "input", "value": "{{PW}}"}]
+        payload = _posted_payload(tool, elements, secrets={"PW": _MADE_UP})
+        assert payload["secrets"] == {"PW": _MADE_UP}
+        assert payload["elements"] == elements
+
+    @pytest.mark.parametrize("secrets", [None, {}])
+    def test_no_map_means_no_secrets_key(self, tool, secrets):
+        payload = _posted_payload(tool, [{"id": "elem_1"}], secrets=secrets)
+        assert "secrets" not in payload
+
+    def test_no_log_record_holds_the_value(self, tool, caplog):
+        with caplog.at_level("DEBUG"):
+            _posted_payload(tool, [{"id": "elem_1", "value": "{{PW}}"}], secrets={"PW": _MADE_UP})
+        assert _MADE_UP not in caplog.text
