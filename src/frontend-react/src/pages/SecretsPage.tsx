@@ -102,8 +102,9 @@ export default function SecretsPage() {
           <p className="text-xs text-muted-foreground">
             Write {'{{NAME}}'} in a test request — for example: type {'{{SAUCE_PASSWORD}}'} in the
             password field. The AI that writes your test sees only the name; the test reads the value
-            when it runs. For now, the browser AI that finds the field is given the value so it can
-            type it.
+            when it runs. The browser AI that finds the field is never given the value either. If
+            the field is a plain text field rather than a password field, it can still see what was
+            typed on the page and may write it into the service's logs.
           </p>
           <p className="text-xs text-muted-foreground">
             Every member of your organization can use, replace and delete these.
