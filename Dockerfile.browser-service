@@ -77,9 +77,10 @@ WORKDIR /app
 # guesses); runtime dependencies identical.
 # Bumped 1.0.51 -> 1.0.52 on 2026-10-27: browser-service types an org secret
 # itself - NLRF sends {NAME: value} beside the steps, a step keeps {{NAME}},
-# bs itself never logs, returns or reads back the value (password fields and
-# the fields it typed a secret into); a plain text field still shows the typed
-# value to the browser AI; runtime dependencies identical.
+# and bs never returns or reads back the value (password fields and the
+# fields it typed a secret into); a plain text field still shows the typed
+# value to the browser AI, which may write it into the service's logs;
+# runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
