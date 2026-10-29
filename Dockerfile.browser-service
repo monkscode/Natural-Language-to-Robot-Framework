@@ -83,6 +83,10 @@ WORKDIR /app
 # class of <html> or <body> (an extension or theme may set it in the discovery
 # browser only, so the address matched nothing in the test); a read of <html> /
 # <body> itself ships the bare tag; runtime dependencies identical.
+# Bumped 1.0.53 -> 1.0.54 on 2026-10-29: a locator call that names no element
+# (no element data and no expected text) is refused instead of shipping what
+# lies at the point; the second refusal for one element ends it as not found;
+# runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -115,7 +119,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.53 && \
+    browser-service==1.0.54 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
