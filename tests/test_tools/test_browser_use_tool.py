@@ -241,6 +241,20 @@ class TestLocatorMappingFoundEntries:
         mapping = _run_mapping(tool, [result])
         assert "came_back" not in mapping["elem_1"]
 
+    def test_evidence_none_forwarded_on_a_not_found_entry(self, tool):
+        """bs #72: a call that named no element is refused with evidence 'none';
+        the mapping carries it so the Generate page can word it."""
+        result = _not_found("elem_1")
+        result["evidence"] = "none"
+        mapping = _run_mapping(tool, [result])
+        assert mapping["elem_1"]["found"] is False
+        assert mapping["elem_1"]["evidence"] == "none"
+
+    def test_evidence_key_absent_without_the_marker(self, tool):
+        mapping = _run_mapping(tool, [_not_found("elem_1"), _found("elem_2", "id=password")])
+        assert "evidence" not in mapping["elem_1"]
+        assert "evidence" not in mapping["elem_2"]
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""

@@ -894,6 +894,11 @@ def _stage_summary_message(found: int, total: int) -> str:
     return f"⚠️ Identified {found} of {total} elements"
 
 
+def _not_found_cause(entry: dict[str, Any]) -> str:
+    """bs refused the call because it named no element (evidence "none"): nothing was checked."""
+    return "nothing_checked" if entry.get("evidence") == "none" else "not_found"
+
+
 def not_found_entries(
     steps: list[dict[str, Any]],
     step_element_ids: dict[int, str],
@@ -926,7 +931,7 @@ def not_found_entries(
             # normal run backfills a record for every element it was given.
             cause = "not_checked"
         elif not _entry_found(locator_mapping[element_id]):
-            cause = "not_found"
+            cause = _not_found_cause(locator_mapping[element_id])
         else:
             continue
         listed.add(element_id)
@@ -961,6 +966,17 @@ def not_found_lines(entries: list[dict[str, Any]]) -> list[str]:
                 f"{quoted(group)} — not found on the page, so the test has no working locator for them "
                 "and will most likely fail at those steps. If the web address is right and the elements "
                 "are on the page, describe them more specifically and generate again.")
+    if group := of("nothing_checked"):
+        if len(group) == 1:
+            lines.append(
+                f"{quoted(group)} — not found: the browser AI could not point at it on the page, "
+                "so nothing was checked and the test has no working locator for it. If the "
+                "element is on the page, describe it more specifically and generate again.")
+        else:
+            lines.append(
+                f"{quoted(group)} — not found: the browser AI could not point at them on the page, "
+                "so nothing was checked and the test has no working locator for them. If the "
+                "elements are on the page, describe them more specifically and generate again.")
     if group := of("not_checked"):
         pronoun = "it" if len(group) == 1 else "them"
         lines.append(

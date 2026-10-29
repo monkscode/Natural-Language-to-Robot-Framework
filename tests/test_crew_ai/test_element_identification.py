@@ -1225,6 +1225,18 @@ class TestNotFound:
             [OPEN, self.SEARCH], self._ok({"elem_1": {"found": True, "best_locator": ""}}))
         assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
 
+    def test_evidence_none_is_nothing_checked(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH],
+            self._ok({"elem_1": {"found": False, "evidence": "none"}}))
+        assert result["not_found"] == [{"cause": "nothing_checked", "description": "search box"}]
+
+    def test_not_found_without_the_marker_stays_not_found(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH],
+            self._ok({"elem_1": {"found": False, "error": "Element not found"}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
     def test_crash_shaped_answer_is_not_checked(self):
         result, _, _ = self._run(
             [OPEN, self.SEARCH], {"status": "success", "locator_mapping": {}})
@@ -1321,6 +1333,46 @@ class TestNotFoundCopy:
         assert lines[2] == (
             "A “Get Text” step does not name an element. Describe the element in your test "
             "description and generate again.")
+
+    def test_lines_nothing_checked_singular_and_plural(self):
+        one = not_found_lines([{"cause": "nothing_checked", "description": "a"}])
+        assert one == [
+            self.TITLE_ONE,
+            ("“a” — not found: the browser AI could not point at it on the page, so nothing "
+             "was checked and the test has no working locator for it. If the element is on "
+             "the page, describe it more specifically and generate again."),
+            self.FOOTER,
+        ]
+        several = not_found_lines([
+            {"cause": "nothing_checked", "description": "a"},
+            {"cause": "nothing_checked", "description": "b"},
+        ])
+        assert several[1] == (
+            "“a”, “b” — not found: the browser AI could not point at them on the page, so "
+            "nothing was checked and the test has no working locator for them. If the "
+            "elements are on the page, describe them more specifically and generate again.")
+
+    def test_lines_mixed_not_found_and_nothing_checked_in_order(self):
+        lines = not_found_lines([
+            {"cause": "no_description", "keyword": "Click"},
+            {"cause": "no_url", "description": "d"},
+            {"cause": "not_checked", "description": "c"},
+            {"cause": "nothing_checked", "description": "b"},
+            {"cause": "not_found", "description": "a"},
+        ])
+        assert lines[0] == "Delivered — 5 elements were not found while this test was generated"
+        assert lines[1].startswith("“a” — not found on the page,")
+        assert lines[2].startswith("“b” — not found: the browser AI could not point at it")
+        assert lines[3].startswith("“c” — the page could not be checked just now")
+        assert lines[4].startswith("“d” — not checked: your description has no web address")
+        assert lines[5].startswith("A “Click” step does not name an element")
+        assert lines[6] == self.FOOTER
+        two = not_found_lines([
+            {"cause": "not_found", "description": "a"},
+            {"cause": "nothing_checked", "description": "b"},
+        ])
+        assert two[0] == "Delivered — 2 elements were not found while this test was generated"
+        assert len(two) == 4
 
     def test_lines_empty(self):
         assert not_found_lines([]) == []
