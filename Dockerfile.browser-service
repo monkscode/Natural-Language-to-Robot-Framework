@@ -79,6 +79,10 @@ WORKDIR /app
 # itself - NLRF sends {NAME: value} beside the steps and a step keeps
 # {{NAME}}; what bs hides, and its limits: browser-service PR #70 and the
 # Secrets page; runtime dependencies identical.
+# Bumped 1.0.52 -> 1.0.53 on 2026-10-29: a read address is never anchored on a
+# class of <html> or <body> (an extension or theme may set it in the discovery
+# browser only, so the address matched nothing in the test); a read of <html> /
+# <body> itself ships the bare tag; runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -111,7 +115,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.52 && \
+    browser-service==1.0.53 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
