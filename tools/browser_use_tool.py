@@ -512,6 +512,10 @@ class BatchBrowserUseTool(BaseTool):
                             "found": False,
                             "error": elem_result.get("error", "Element not found")
                         }
+                        # bs #72: bs refused a call that named no element ("evidence":
+                        # "none"). Carried only when set, so the Generate page can word it.
+                        if elem_result.get("evidence") == "none":
+                            locator_mapping[element_id]["evidence"] = "none"
 
                 return {
                     "status": "success",
