@@ -90,6 +90,9 @@ WORKDIR /app
 # Bumped 1.0.54 -> 1.0.55 on 2026-10-29: a refused call no longer replaces an
 # earlier rejection of the same element, so the record says "nothing was
 # checked" only when no call checked it; runtime dependencies identical.
+# Bumped 1.0.55 -> 1.0.56 on 2026-11-03: a click the agent pointed at a bare
+# wrapper of one control (a menu item holding one link) goes to that control,
+# in the test and in discovery's own click; runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -122,7 +125,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.55 && \
+    browser-service==1.0.56 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
