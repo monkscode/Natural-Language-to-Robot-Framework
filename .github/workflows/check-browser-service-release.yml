@@ -147,7 +147,7 @@ jobs:
           # uv is pinned and wheel-only: this step runs with contents: write, so
           # an unpinned install would execute whatever that project shipped today
           # in a job that can push branches.
-          python3 -m pip install --quiet --only-binary=:all: uv==0.9.7
+          python3 -m pip install --quiet --only-binary=:all: uv==0.13.7
           {
             grep -oE '^\s+[a-zA-Z0-9_.-]+==[0-9][^ \\]*' Dockerfile.browser-service \
               | tr -d ' ' | grep -v '^browser-service=='
