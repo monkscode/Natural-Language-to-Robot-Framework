@@ -556,6 +556,18 @@ class TestExtractAndNormalize:
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert "\n" in out and "\\n" not in out
 
+    def test_escaped_code_with_a_trailing_real_newline_is_normalised(self):
+        """Edge whitespace is not structure: one escaped line plus a final real
+        newline still has no executable test until the `\\n` are converted."""
+        raw = "*** Settings ***\\nLibrary    Browser\\n*** Test Cases ***\\nT\\n    Log    hi\n"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "\\n" not in out and out.count("\n") >= 4
+
+    def test_escaped_code_with_a_leading_real_newline_is_normalised(self):
+        raw = "\n*** Settings ***\\nLibrary    Browser\\n*** Test Cases ***\\nT\\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "\\n" not in out and out.count("\n") >= 4
+
     def test_robot_newline_escape_in_a_multiline_code_is_kept(self):
         """a930d718: `SEPARATOR=\\n` in a normal multi-line test is a Robot escape;
         turning it into a real line break made `robot --dryrun` fail."""
