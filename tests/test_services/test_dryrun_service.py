@@ -556,6 +556,35 @@ class TestExtractAndNormalize:
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert "\n" in out and "\\n" not in out
 
+    def test_escaped_code_with_a_trailing_real_newline_is_normalised(self):
+        """Edge whitespace is not structure: one escaped line plus a final real
+        newline still has no executable test until the `\\n` are converted."""
+        raw = "*** Settings ***\\nLibrary    Browser\\n*** Test Cases ***\\nT\\n    Log    hi\n"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "\\n" not in out and out.count("\n") >= 4
+
+    def test_escaped_code_with_a_leading_real_newline_is_normalised(self):
+        raw = "\n*** Settings ***\\nLibrary    Browser\\n*** Test Cases ***\\nT\\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "\\n" not in out and out.count("\n") >= 4
+
+    def test_robot_newline_escape_in_a_multiline_code_is_kept(self):
+        """a930d718: `SEPARATOR=\\n` in a normal multi-line test is a Robot escape;
+        turning it into a real line break made `robot --dryrun` fail."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    ${t}=    Catenate    SEPARATOR=\\n    a    b\n"
+               "    Log    ${t}")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "SEPARATOR=\\n    a    b" in out
+        assert out.count("\n") == raw.count("\n")
+
+    def test_robot_tab_escape_in_a_multiline_code_is_kept(self):
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Log    a\\tb")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "a\\tb" in out and "\t" not in out
+        assert out.count("\n") == raw.count("\n")
+
     def test_redundant_css_prefix_is_stripped_by_the_pipeline(self):
         """The strip is only worth anything if it is actually wired in here.
 
