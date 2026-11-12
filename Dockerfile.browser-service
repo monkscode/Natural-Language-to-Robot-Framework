@@ -98,6 +98,10 @@ WORKDIR /app
 # 1.0.58 retries a refused index-less read at the agent's point read as pixels,
 # only when one element shows the text, and screen-checks an indexed read at its
 # own box centre; runtime dependencies identical.
+# Bumped 1.0.58 -> 1.0.59 on 2026-11-12: a class or id token that is not a
+# plain CSS name (md:col-span-2, w-1/2, form:main) is written as a quoted
+# attribute selector ([class~="..."] / [id="..."]) instead of a backslash
+# escape that Robot Framework strips; runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -130,7 +134,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.58 && \
+    browser-service==1.0.59 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
