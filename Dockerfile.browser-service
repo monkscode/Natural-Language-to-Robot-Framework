@@ -102,6 +102,9 @@ WORKDIR /app
 # plain CSS name (md:col-span-2, w-1/2, form:main) is written as a quoted
 # attribute selector ([class~="..."] / [id="..."]) instead of a backslash
 # escape that Robot Framework strips; runtime dependencies identical.
+# Bumped 1.0.59 -> 1.0.60 on 2026-11-13: a locator a Robot Framework cell would
+# change (a backslash, a run of spaces, a TAB or line break, a ${...}) is never
+# shipped; quotes pick '...' or "..." instead of \"; runtime dependencies identical.
 # After merging a browser-service
 # PR (which auto-publishes), bump this line or the fix ships to nobody.
 #
@@ -134,7 +137,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     playwright==1.62.0 \
     structlog==26.1.0 \
     PyYAML==6.0.3 \
-    browser-service==1.0.59 && \
+    browser-service==1.0.60 && \
     playwright install chromium && \
     chmod -R 755 /opt/playwright-browsers
 
