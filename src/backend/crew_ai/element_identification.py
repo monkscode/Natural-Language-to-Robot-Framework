@@ -127,8 +127,8 @@ _LOCATE_ONLY_KEYWORDS = frozenset({
     "wait for elements state", "wait until element is visible",
     "wait until element is not visible", "wait until element is enabled",
     "hover", "get element count", "upload file by selector", "upload file",
-    # A state check reads no text; the visibility rewrite turns it into a wait
-    # in the final test (the planner writes it for ~1 visibility check in 16).
+    # A state check returns only state flags (visible, enabled, checked), never
+    # text; the visibility rewrite usually makes it a wait in the final test.
     "get element states",
 })
 
