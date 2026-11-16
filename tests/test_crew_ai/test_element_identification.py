@@ -688,6 +688,7 @@ class TestBuildElements:
     @pytest.mark.parametrize("keyword", [
         "Get Text", "Get Texts", "Get Selected Options", "Get Attribute", "Get Classes",
         "Get Element States", "Get Elements", "Some Unknown Keyword",
+        "Wait Until Element Contains", "Wait For Condition", "Wait Until Keyword Succeeds",
         "Click", "Fill Text", "Select Options By", "Press Keys",
     ])
     def test_a_step_that_reads_or_acts_is_not_flagged(self, keyword):
