@@ -689,6 +689,7 @@ class TestBuildElements:
         "Get Text", "Get Texts", "Get Selected Options", "Get Attribute", "Get Classes",
         "Get Element States", "Get Elements", "Some Unknown Keyword",
         "Wait Until Element Contains", "Wait For Condition", "Wait Until Keyword Succeeds",
+        "Hover And Get Text", "Upload And Get Text", "Get Element Count And Text",
         "Click", "Fill Text", "Select Options By", "Press Keys",
     ])
     def test_a_step_that_reads_or_acts_is_not_flagged(self, keyword):

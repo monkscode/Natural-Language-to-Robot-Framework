@@ -118,14 +118,16 @@ _ACTION_PREFIXES: tuple[tuple[str, str], ...] = (
 # get_text keywords that find an element without reading a value from it
 # (#162). Their element is flagged `locate_only`, so browser-service's "a read
 # locator must not hold the value" rule may keep a locator that names the
-# step's text when it lands on the element the agent pointed at. An allowlist:
-# everything else mapped to get_text — Get Attribute, Get Classes, a wait that
-# checks text (Wait Until Element Contains, Wait For Condition), unknown
-# keywords — stays a read, the conservative side.
-_LOCATE_ONLY_PREFIXES = (
-    "wait for elements state", "wait until element is ",
-    "hover", "upload", "get element count",
-)
+# step's text when it lands on the element the agent pointed at. An exact
+# allowlist, no prefixes: everything else mapped to get_text — Get Attribute,
+# Get Classes, a wait that checks text (Wait Until Element Contains, Wait For
+# Condition), "Hover And Get Text", unknown keywords — stays a read, the
+# conservative side.
+_LOCATE_ONLY_KEYWORDS = frozenset({
+    "wait for elements state", "wait until element is visible",
+    "wait until element is not visible", "wait until element is enabled",
+    "hover", "get element count", "upload file by selector", "upload file",
+})
 
 # Dedup precedence: when several steps share one element, the element's action
 # is the highest-precedence one and the value comes from that winning step
@@ -507,7 +509,7 @@ def _mark_locate_only(element: dict[str, Any] | None, keyword: Any, created: boo
         return
     locate_only = (
         action_for_keyword(keyword) == "get_text"
-        and _normalize_keyword(keyword).startswith(_LOCATE_ONLY_PREFIXES)
+        and _normalize_keyword(keyword) in _LOCATE_ONLY_KEYWORDS
     )
     if created and locate_only:
         element["locate_only"] = True
