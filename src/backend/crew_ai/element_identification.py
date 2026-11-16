@@ -115,6 +115,13 @@ _ACTION_PREFIXES: tuple[tuple[str, str], ...] = (
     ("hover", "get_text"), ("upload", "get_text"),
 )
 
+# get_text keywords that find an element without reading a value from it
+# (#162). Their element is flagged `locate_only`, so browser-service's "a read
+# locator must not hold the value" rule keeps a locator that names the step's
+# text. Everything else mapped to get_text — Get Attribute, Get Classes,
+# unknown keywords — stays a read: the conservative side.
+_LOCATE_ONLY_PREFIXES = ("wait ", "hover", "upload", "get element count")
+
 # Dedup precedence: when several steps share one element, the element's action
 # is the highest-precedence one and the value comes from that winning step
 # (e.g. Input Text + Press Keys on the search box → action=input, value from
@@ -543,14 +550,21 @@ def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, st
         description = rewrite_form_description(description)
         action = action_for_keyword(step.get("keyword"))
         value = step.get("value")
+        locate_only = action == "get_text" and _normalize_keyword(
+            step.get("keyword")).startswith(_LOCATE_ONLY_PREFIXES)
 
         element = by_description.get(description)
+        if element is not None and not locate_only:
+            # One step that reads or acts makes the whole element a read / an action.
+            element.pop("locate_only", None)
         if element is None:
             element = {
                 "id": f"elem_{len(elements) + 1}",
                 "description": description,
                 "action": action,
             }
+            if locate_only:
+                element["locate_only"] = True
             if pending_navigation:
                 element["navigate_before"] = pending_navigation
             _apply_action_value(element, action, value)

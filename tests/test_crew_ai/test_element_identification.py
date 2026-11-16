@@ -670,6 +670,51 @@ class TestBuildElements:
         assert elements == []
         assert step_element_ids == {}
 
+    # ── #162: a wait / hover / count / upload reads no value ────────────────
+
+    @pytest.mark.parametrize("keyword", [
+        "Wait For Elements State", "Wait Until Element Is Visible", "Hover",
+        "Get Element Count", "Upload File By Selector", "Upload File",
+    ])
+    def test_a_locate_only_step_is_flagged(self, keyword):
+        elements, _ = build_elements([OPEN, _step(keyword, description="Dashboard heading")])
+        assert elements == [{
+            "id": "elem_1",
+            "description": "Dashboard heading",
+            "action": "get_text",  # unchanged: browser-service's prompts stay byte-identical
+            "locate_only": True,
+        }]
+
+    @pytest.mark.parametrize("keyword", [
+        "Get Text", "Get Texts", "Get Selected Options", "Get Attribute", "Get Classes",
+        "Get Element States", "Get Elements", "Some Unknown Keyword",
+        "Click", "Fill Text", "Select Options By", "Press Keys",
+    ])
+    def test_a_step_that_reads_or_acts_is_not_flagged(self, keyword):
+        elements, _ = build_elements([OPEN, _step(keyword, description="status message", value="x")])
+        assert "locate_only" not in elements[0]
+
+    @pytest.mark.parametrize("other", ["Get Text", "Get Attribute", "Click", "Fill Text"])
+    @pytest.mark.parametrize("wait_first", [True, False])
+    def test_the_flag_needs_every_step_of_the_element_to_be_locate_only(self, other, wait_first):
+        """"is displayed" + named words plans a wait AND a Get Text on one element: that element is read."""
+        pair = [
+            _step("Wait For Elements State", description="status message", value="visible"),
+            _step(other, description="status message", value="x"),
+        ]
+        elements, _ = build_elements([OPEN, *(pair if wait_first else reversed(pair))])
+        assert len(elements) == 1
+        assert "locate_only" not in elements[0]
+
+    def test_two_locate_only_steps_keep_the_flag(self):
+        steps = [
+            OPEN,
+            _step("Hover", description="Products menu"),
+            _step("Wait For Elements State", description="Products menu", value="visible"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements[0]["locate_only"] is True
+
 
 # ─── merge: stapling the full contract (port checklist #8) ───────────────────
 
