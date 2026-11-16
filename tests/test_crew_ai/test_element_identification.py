@@ -675,6 +675,7 @@ class TestBuildElements:
     @pytest.mark.parametrize("keyword", [
         "Wait For Elements State", "Wait Until Element Is Visible", "Hover",
         "Get Element Count", "Upload File By Selector", "Upload File",
+        "Get Element States",  # a state check: the visibility rewrite makes it a wait in the final test
     ])
     def test_a_locate_only_step_is_flagged(self, keyword):
         elements, _ = build_elements([OPEN, _step(keyword, description="Dashboard heading")])
@@ -687,7 +688,7 @@ class TestBuildElements:
 
     @pytest.mark.parametrize("keyword", [
         "Get Text", "Get Texts", "Get Selected Options", "Get Attribute", "Get Classes",
-        "Get Element States", "Get Elements", "Some Unknown Keyword",
+        "Get Elements", "Some Unknown Keyword",
         "Wait Until Element Contains", "Wait For Condition", "Wait Until Keyword Succeeds",
         "Hover And Get Text", "Upload And Get Text", "Get Element Count And Text",
         "Click", "Fill Text", "Select Options By", "Press Keys",
