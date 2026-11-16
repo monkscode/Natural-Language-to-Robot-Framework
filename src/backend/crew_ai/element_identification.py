@@ -115,6 +115,20 @@ _ACTION_PREFIXES: tuple[tuple[str, str], ...] = (
     ("hover", "get_text"), ("upload", "get_text"),
 )
 
+# get_text keywords that find an element without reading a value from it
+# (#162). Their element is flagged `locate_only`, so browser-service's "a read
+# locator must not hold the value" rule may keep a locator that names the
+# step's text when it lands on the element the agent pointed at. An exact
+# allowlist, no prefixes: everything else mapped to get_text — Get Attribute,
+# Get Classes, a wait that checks text (Wait Until Element Contains, Wait For
+# Condition), "Hover And Get Text", unknown keywords — stays a read, the
+# conservative side.
+_LOCATE_ONLY_KEYWORDS = frozenset({
+    "wait for elements state", "wait until element is visible",
+    "wait until element is not visible", "wait until element is enabled",
+    "hover", "get element count", "upload file by selector", "upload file",
+})
+
 # Dedup precedence: when several steps share one element, the element's action
 # is the highest-precedence one and the value comes from that winning step
 # (e.g. Input Text + Press Keys on the search box → action=input, value from
@@ -489,6 +503,20 @@ def _apply_action_value(element: dict[str, Any], action: str, value: Any) -> Non
         element["value"] = value
 
 
+def _mark_locate_only(element: dict[str, Any] | None, keyword: Any, created: bool = False) -> None:
+    """#162: flag an element a locate-only step creates; any step that reads or acts drops the flag for good."""
+    if element is None:
+        return
+    locate_only = (
+        action_for_keyword(keyword) == "get_text"
+        and _normalize_keyword(keyword) in _LOCATE_ONLY_KEYWORDS
+    )
+    if created and locate_only:
+        element["locate_only"] = True
+    elif not locate_only:
+        element.pop("locate_only", None)
+
+
 def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, str]]:
     """Build the batch-tool element specs from the plan.
 
@@ -545,12 +573,14 @@ def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, st
         value = step.get("value")
 
         element = by_description.get(description)
+        _mark_locate_only(element, step.get("keyword"))
         if element is None:
             element = {
                 "id": f"elem_{len(elements) + 1}",
                 "description": description,
                 "action": action,
             }
+            _mark_locate_only(element, step.get("keyword"), created=True)
             if pending_navigation:
                 element["navigate_before"] = pending_navigation
             _apply_action_value(element, action, value)
