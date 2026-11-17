@@ -219,9 +219,12 @@ def run_sweep(queries: list[SweepQuery], repeats: int, base_url: str,
               token: str | None, conn, out_dir: Path) -> None:
     """File order, repeats inside each query; one flushed JSON line per run."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    results = out_dir / "results.jsonl"
+    if results.exists() and results.stat().st_size > 0:  # appended rows would mix two sweeps in one report
+        raise SystemExit(f"refusing to start: {results} already holds rows; use a fresh --out-dir")
     total = len(queries) * repeats
     done = 0
-    with open(out_dir / "results.jsonl", "a", encoding="utf-8") as f:
+    with open(results, "a", encoding="utf-8") as f:
         for q in queries:
             for repeat in range(1, repeats + 1):
                 done += 1

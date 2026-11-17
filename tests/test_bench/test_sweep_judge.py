@@ -97,3 +97,32 @@ def test_close_browser_inside_user_keyword_is_not_top_level():
     lines = insert_judge(code, JUDGE).split("\n")
     assert lines[6:8] == ["    Log    x", "    " + JUDGE]
     assert lines.count("    Close Browser") == 1
+
+
+def test_refuses_per_test_template():
+    code = HEAD + "    [Template]    Log Many\n    a    b\n    Close Browser\n"
+    with pytest.raises(JudgeRefused, match="[Tt]emplate"):
+        insert_judge(code, JUDGE)
+
+
+def test_refuses_suite_level_test_template():
+    code = HEAD.replace("Library    Browser\n", "Library    Browser\nTest Template    Log Many\n")
+    with pytest.raises(JudgeRefused, match="parse"):
+        insert_judge(code + "    a    b\n", JUDGE)
+
+
+@pytest.mark.parametrize("step", [
+    "Pass Execution    done",
+    "Pass Execution If    ${x}    done",
+    "BuiltIn.Pass Execution    done",
+    "builtin.pass_execution_if    ${x}    done",
+    "PASS_execution    done",
+])
+def test_refuses_pass_execution(step):
+    with pytest.raises(JudgeRefused, match="Pass Execution"):
+        insert_judge(HEAD + f"    {step}\n    Close Browser\n", JUDGE)
+
+
+def test_logging_the_words_pass_execution_is_judged():
+    out = insert_judge(HEAD + "    Log    Pass Execution\n    Close Browser\n", JUDGE)
+    assert "    " + JUDGE in out

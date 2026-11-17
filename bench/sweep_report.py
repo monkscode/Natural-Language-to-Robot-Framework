@@ -39,9 +39,10 @@ def _count(rows: list[dict]) -> tuple[int, int]:
 def summarize(rows: list[dict]) -> dict:
     """Per half: counts, cold/warm/run-1 splits, outcome/tag/hollow tallies.
 
-    Only the dev half carries "per_query" (outcomes of r1 r2 r3 by query id).
+    "max_repeat" is the highest repeat in the rows (1 when there are none). Only the dev half
+    carries "per_query" (outcomes of each repeat by query id).
     """
-    out: dict = {}
+    out: dict = {"max_repeat": max((r["repeat"] for r in rows), default=1)}
     for half in HALVES:
         hr = [r for r in rows if r["half"] == half]
         run1 = [r for r in hr if r["repeat"] == 1]
@@ -73,12 +74,13 @@ def _line(label: str, k: int, n: int, unit: str = "") -> str:
 
 def render(summary: dict) -> str:
     lines: list[str] = []
+    top = summary["max_repeat"]
     for half in HALVES:
         s = summary[half]
         lines.append(f"== {half} half ==")
         lines.append(_line("handled / runs", s["handled"], s["runs"]))
         lines.append(_line("run 1 (cold) runs", *s["cold"]))
-        lines.append(_line("runs 2-3 (after learning)", *s["warm"]))
+        lines.append(_line(f"runs 2-{top} (after learning)", *s["warm"]))
         lines.append(_line("handled on run 1", *s["run1_queries"], unit=" queries"))
         lines.append("  outcomes: " + (", ".join(f"{o}={c}" for o, c in sorted(s["outcomes"].items())) or "none"))
         lines.append("  tags: " + (", ".join(f"{t}={c}" for t, c in sorted(s["tags"].items())) or "none"))
@@ -86,7 +88,7 @@ def render(summary: dict) -> str:
         lines.append("")
     lines.append("== dev half, per query ==")
     for qid, by_repeat in sorted(summary["dev"]["per_query"].items()):
-        lines.append(f"  {qid}: " + " ".join(by_repeat.get(i, "-") for i in (1, 2, 3)))
+        lines.append(f"  {qid}: " + " ".join(by_repeat.get(i, "-") for i in range(1, top + 1)))
     return "\n".join(lines)
 
 

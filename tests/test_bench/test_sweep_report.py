@@ -6,7 +6,7 @@ Depends on: bench.sweep_report.
 
 import json
 
-from bench.sweep_report import main, summarize, wilson
+from bench.sweep_report import main, render, summarize, wilson
 
 
 def _row(qid, half, repeat, outcome, tag=None, hollow=(), error_message=None):
@@ -94,3 +94,27 @@ def test_empty_half_prints_n0(tmp_path, capsys):
     _write(tmp_path, [_row("d1", "dev", 1, "handled")])
     main([str(tmp_path)])
     assert "n=0" in capsys.readouterr().out
+
+
+_THREE = [_row(q, "dev", r, "handled") for q in ("d1", "d2") for r in (1, 2, 3)] + [
+    _row("s1", "sealed", r, "handled") for r in (1, 2, 3)]
+
+
+def test_three_repeat_output_is_unchanged():
+    out = render(summarize(_THREE))
+    assert "  runs 2-3 (after learning): 4 of 4 (100.0%), Wilson 95% 0.510-1.000" in out
+    assert "  d1: handled handled handled\n  d2: handled handled handled" in out
+    assert summarize(_THREE)["max_repeat"] == 3
+
+
+def test_five_repeats_label_and_columns():
+    rows = [_row("d1", "dev", r, "handled") for r in (1, 2, 3, 4, 5)] + [
+        _row("d2", "dev", r, "not_handled") for r in (1, 2)]
+    out = render(summarize(rows))
+    assert "runs 2-5 (after learning)" in out
+    assert "  d1: handled handled handled handled handled" in out
+    assert "  d2: not_handled not_handled - - -" in out
+
+
+def test_no_rows_defaults_to_one_repeat():
+    assert summarize([])["max_repeat"] == 1

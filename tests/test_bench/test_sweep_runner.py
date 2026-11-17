@@ -278,9 +278,9 @@ class TestRunSweep:
         assert (row["outcome"], row["tag"]) == ("test_failed", "assertion")
         assert row["judge_error_message"] is None
 
-    def test_results_file_appends(self, tmp_path):
-        _Rig(tmp_path, _gen_events("failed"), error_message="BUG").run([FAIL_Q])
-        _Rig(tmp_path, _gen_events("failed"), error_message="BUG").run([FAIL_Q])
+    def test_results_file_holds_one_row_per_run(self, tmp_path):
+        rows = _Rig(tmp_path, _gen_events("failed"), error_message="BUG").run([FAIL_Q], repeats=2)
+        assert len(rows) == 2
         assert len((tmp_path / "results.jsonl").read_text().splitlines()) == 2
 
     def _run_with_empty_capture(self, tmp_path, second_gen):
@@ -377,3 +377,20 @@ class TestMain:
              patch("bench.sweep.run_sweep") as run:
             assert sw.main(self._argv(tmp_path, "--only", "nope")) != 0
         run.assert_not_called()
+
+
+class TestResultsFileGuard:
+    def test_refuses_a_non_empty_results_file_before_any_http_call(self, tmp_path):
+        (tmp_path / "results.jsonl").write_text('{"query_id": "q"}\n', encoding="utf-8")
+        with patch("bench.sweep.stream_generate_and_run") as gen, \
+                pytest.raises(SystemExit, match="results.jsonl.*--out-dir"):
+            sw.run_sweep([PASS_Q], 1, "http://x", None, None, tmp_path)
+        gen.assert_not_called()
+        assert (tmp_path / "results.jsonl").read_text(encoding="utf-8") == '{"query_id": "q"}\n'
+
+    def test_empty_or_absent_results_file_starts(self, tmp_path):
+        (tmp_path / "results.jsonl").write_text("", encoding="utf-8")
+        (row,) = _Rig(tmp_path, _gen_events(), _judge_events()).run([PASS_Q])
+        assert row["outcome"] == "handled"
+        (row,) = _Rig(tmp_path / "fresh", _gen_events(), _judge_events()).run([PASS_Q])
+        assert row["outcome"] == "handled"

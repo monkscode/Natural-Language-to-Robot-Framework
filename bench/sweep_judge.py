@@ -5,12 +5,17 @@ It goes before the test's closing `Close Browser` (the page is still open), or
 after the test's last line when the test never closes the browser.
 
 Referenced by: bench/sweep.py
-Depends on: src/backend/crew_ai/robot_code_normalizer.py (_parse_suite, _BROWSER_PREFIXES)
+Depends on: src/backend/crew_ai/robot_code_normalizer.py (_parse_suite, _BROWSER_PREFIXES, _BUILTIN_PREFIXES,
+_SPACE_UNDERSCORE)
 """
 
-from src.backend.crew_ai.robot_code_normalizer import _BROWSER_PREFIXES, _parse_suite
+import re
+
+from src.backend.crew_ai.robot_code_normalizer import (
+    _BROWSER_PREFIXES, _BUILTIN_PREFIXES, _SPACE_UNDERSCORE, _parse_suite)
 
 
+_PASS_EXECUTION = frozenset({"passexecution", "passexecutionif"})  # these end the test as PASS
 _BLOCK_OPENERS = frozenset({"FOR", "WHILE", "TRY", "GROUP"})  # each is closed by END
 
 
@@ -49,6 +54,17 @@ def _top_level_closes(test) -> list:
     return closes
 
 
+def _refuse_unjudgeable_steps(test) -> None:
+    """Refuse a test whose judge line would not run as a keyword call, or would not run at all."""
+    # Same check as the normalizer's empty-loop rewrite: a templated test runs every row, the judge included, as
+    # the template's arguments.
+    if any(step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[template]" for step in test.steps):
+        raise JudgeRefused("the test has a [Template] setting; the judge would run as template arguments")
+    if any(not step.setting and step.prefix in _BUILTIN_PREFIXES
+           and step.keyword.replace(" ", "") in _PASS_EXECUTION for step in test.steps):
+        raise JudgeRefused("the test calls Pass Execution, so it can pass before the judge runs")
+
+
 def insert_judge(robot_code: str, judge_line: str) -> str:
     """robot_code with judge_line added to its one test, in the file's own line ending."""
     suite = _parse_suite(robot_code)
@@ -60,6 +76,7 @@ def insert_judge(robot_code: str, judge_line: str) -> str:
     if not test.line_nos:
         raise JudgeRefused("the test has no body line to place the judge next to")
 
+    _refuse_unjudgeable_steps(test)
     closes = _top_level_closes(test)
     lines = list(suite.lines)
     if closes:
