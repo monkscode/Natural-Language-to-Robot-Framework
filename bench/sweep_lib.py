@@ -82,6 +82,15 @@ def failure_tag(error_message: str | None) -> str:
     return "other"
 
 
+def _catch_text(error_message: str | None) -> str:
+    """The message without Playwright's `- locator resolved to <html>` call-log
+    lines, which print the resolved element's HTML (and so any bug text)."""
+    return "\n".join(
+        ln for ln in (error_message or "").splitlines()
+        if not ln.strip().startswith("- locator resolved to")
+    )
+
+
 def score_run(
     q: SweepQuery,
     generation_status: str | None,
@@ -101,6 +110,6 @@ def score_run(
         return "judge_failed" if judge_status == "failed" else "judge_error"
     if test_status == "passed":
         return "missed_bug"
-    if test_status == "failed" and q.bug_signature and q.bug_signature in (error_message or ""):
+    if test_status == "failed" and q.bug_signature and q.bug_signature in _catch_text(error_message):
         return "handled"
     return "not_handled"

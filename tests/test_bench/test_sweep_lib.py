@@ -136,6 +136,28 @@ def test_score_planted_wrong_failure():
     assert score_run(q, "complete", "error", None, "$54.00") == "not_handled"
 
 
+def test_score_planted_signature_only_in_resolved_html():
+    msg = (
+        "TimeoutError: locator.click: Timeout 30000ms exceeded.\n"
+        "Call log:\n"
+        "  - waiting for locator('#react-select-3-option-1')\n"
+        '    - locator resolved to <div id="x" class="select__option '
+        'select__option--is-disabled css-1">Blue</div>\n'
+    )
+    q = _q(expect="fail", judge=None, bug_signature="Blue")
+    assert score_run(q, "complete", "failed", None, msg) == "not_handled"
+
+
+def test_score_planted_timeout_catch_counts():
+    msg = (
+        "TimeoutError: locator.waitFor: Timeout 10000ms exceeded.\n"
+        "Call log:\n"
+        "  - waiting for locator('[data-testid=\"orders-list\"]') to be visible"
+    )
+    q = _q(expect="fail", judge=None, bug_signature="orders-list")
+    assert score_run(q, "complete", "failed", None, msg) == "handled"
+
+
 def test_score_pass_handled():
     assert score_run(_q(), "complete", "passed", "passed", None) == "handled"
 
