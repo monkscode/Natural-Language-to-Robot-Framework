@@ -158,6 +158,30 @@ def test_score_planted_timeout_catch_counts():
     assert score_run(q, "complete", "failed", None, msg) == "handled"
 
 
+def test_catch_repeat_collapsed_form_dropped():
+    msg = (
+        "TimeoutError: locator.waitFor: Timeout 10000ms exceeded.\n"
+        "Call log:\n"
+        "  - waiting for locator('#total') to be hidden\n"
+        '    64 × locator resolved to visible <span id="total">$54.00</span>'
+    )
+    q = _q(expect="fail", judge=None, bug_signature="$54.00")
+    assert score_run(q, "complete", "failed", None, msg) == "not_handled"
+
+
+def test_catch_strict_mode_list_dropped():
+    msg = (
+        "Error: strict mode violation: locator('a') resolved to 2 elements:\n"
+        "    1) <a href=\"x\">Sony vaio i5</a> aka getByRole('link')\n"
+        "    2) <a href=\"y\">Sony vaio i7</a> aka getByRole('link')\n"
+        "\n"
+        "Call log:\n"
+        "  - waiting for locator('a')"
+    )
+    q = _q(expect="fail", judge=None, bug_signature="Sony vaio")
+    assert score_run(q, "complete", "failed", None, msg) == "not_handled"
+
+
 def test_score_pass_handled():
     assert score_run(_q(), "complete", "passed", "passed", None) == "handled"
 

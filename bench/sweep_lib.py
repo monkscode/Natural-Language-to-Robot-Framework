@@ -83,11 +83,15 @@ def failure_tag(error_message: str | None) -> str:
 
 
 def _catch_text(error_message: str | None) -> str:
-    """The message without Playwright's `- locator resolved to <html>` call-log
-    lines, which print the resolved element's HTML (and so any bug text)."""
+    """A Playwright message with a call log keeps only its first line and the
+    `- waiting for locator(` lines: everything else may print page HTML (resolved
+    elements, strict-mode lists) and so the bug text. No call log: the whole message."""
+    msg = error_message or ""
+    if "\nCall log:" not in msg:
+        return msg
+    lines = msg.splitlines()
     return "\n".join(
-        ln for ln in (error_message or "").splitlines()
-        if not ln.strip().startswith("- locator resolved to")
+        [lines[0]] + [ln for ln in lines[1:] if ln.strip().startswith("- waiting for locator(")]
     )
 
 
