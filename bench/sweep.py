@@ -107,7 +107,9 @@ def judge_identity(events: list) -> dict:
 def check_target(base_url: str, health: dict) -> list[str]:
     """Reasons to refuse this target; empty when the sweep may start.
 
-    The real guards are not this list: production refuses the probe token (its user exists only in the copy, which signs with its own JWT secret), and run_one stops on a finished run missing from the copy DB.
+    The real guards are not this list: production refuses the probe token (its user exists only in the copy, and
+    the copy stack's up.sh gives that fastapi its own JWT secret), and run_one stops on a finished run missing from
+    the copy DB.
     """
     reasons = []
     parsed = urlparse(base_url)

@@ -38,7 +38,8 @@ def _top_level_closes(test) -> list:
         depth += change
         if depth < 0:
             break
-        # shortcut: a continued Close Browser (a "..." line after it) is not an anchor, so the judge goes after the test's last line; upgrade if a real generated test shows it
+        # shortcut: a continued Close Browser (a "..." line after it) is not an anchor, so the judge goes after
+        # the test's last line; upgrade if a real generated test shows it
         is_close = (not step.setting and not step.continued and change == 0 and depth == 0
                     and step.keyword.replace(" ", "") == "closebrowser" and step.prefix in _BROWSER_PREFIXES)
         if is_close:
