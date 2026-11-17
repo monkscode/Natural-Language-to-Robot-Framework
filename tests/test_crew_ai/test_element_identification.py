@@ -675,6 +675,7 @@ class TestBuildElements:
     @pytest.mark.parametrize("keyword", [
         "Wait For Elements State", "Wait Until Element Is Visible", "Hover",
         "Get Element Count", "Upload File By Selector", "Upload File",
+        "Get Element States",  # a state check returns state flags, never text
     ])
     def test_a_locate_only_step_is_flagged(self, keyword):
         elements, _ = build_elements([OPEN, _step(keyword, description="Dashboard heading")])
@@ -687,7 +688,7 @@ class TestBuildElements:
 
     @pytest.mark.parametrize("keyword", [
         "Get Text", "Get Texts", "Get Selected Options", "Get Attribute", "Get Classes",
-        "Get Element States", "Get Elements", "Some Unknown Keyword",
+        "Get Elements", "Some Unknown Keyword",
         "Wait Until Element Contains", "Wait For Condition", "Wait Until Keyword Succeeds",
         "Hover And Get Text", "Upload And Get Text", "Get Element Count And Text",
         "Click", "Fill Text", "Select Options By", "Press Keys",
@@ -698,10 +699,11 @@ class TestBuildElements:
 
     @pytest.mark.parametrize("other", ["Get Text", "Get Attribute", "Click", "Fill Text"])
     @pytest.mark.parametrize("wait_first", [True, False])
-    def test_the_flag_needs_every_step_of_the_element_to_be_locate_only(self, other, wait_first):
+    @pytest.mark.parametrize("wait", ["Wait For Elements State", "Get Element States"])
+    def test_the_flag_needs_every_step_of_the_element_to_be_locate_only(self, wait, other, wait_first):
         """"is displayed" + named words plans a wait AND a Get Text on one element: that element is read."""
         pair = [
-            _step("Wait For Elements State", description="status message", value="visible"),
+            _step(wait, description="status message", value="visible"),
             _step(other, description="status message", value="x"),
         ]
         elements, _ = build_elements([OPEN, *(pair if wait_first else reversed(pair))])
