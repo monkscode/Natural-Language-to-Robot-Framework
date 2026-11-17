@@ -116,5 +116,12 @@ def test_five_repeats_label_and_columns():
     assert "  d2: not_handled not_handled - - -" in out
 
 
+def test_one_repeat_prints_no_warm_line():
+    out = render(summarize([_row("d1", "dev", 1, "handled"), _row("s1", "sealed", 1, "handled")]))
+    assert "runs 2-" not in out and "after learning" not in out
+    assert "run 1 (cold) runs" in out
+    assert "runs 2-" not in render(summarize([]))
+
+
 def test_no_rows_defaults_to_one_repeat():
     assert summarize([])["max_repeat"] == 1

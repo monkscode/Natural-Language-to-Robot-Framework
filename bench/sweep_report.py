@@ -80,7 +80,8 @@ def render(summary: dict) -> str:
         lines.append(f"== {half} half ==")
         lines.append(_line("handled / runs", s["handled"], s["runs"]))
         lines.append(_line("run 1 (cold) runs", *s["cold"]))
-        lines.append(_line(f"runs 2-{top} (after learning)", *s["warm"]))
+        if top >= 2:  # one repeat has no warm runs; "2-1" would be an inverted range
+            lines.append(_line(f"runs 2-{top} (after learning)", *s["warm"]))
         lines.append(_line("handled on run 1", *s["run1_queries"], unit=" queries"))
         lines.append("  outcomes: " + (", ".join(f"{o}={c}" for o, c in sorted(s["outcomes"].items())) or "none"))
         lines.append("  tags: " + (", ".join(f"{t}={c}" for t, c in sorted(s["tags"].items())) or "none"))

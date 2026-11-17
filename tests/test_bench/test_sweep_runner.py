@@ -332,6 +332,33 @@ class TestRunSweep:
         assert "d1" in text and "dev query text" in text and "handled" in text
 
 
+class TestWarningsKeepSealedIdsOffTheConsole:
+    """The three _warn paths name the run like the _log lines: dev id + repeat, sealed `(n/total) sealed`."""
+
+    DEV_Q = SweepQuery("d1", "dev query text", "local", "dev", "pass", JUDGE, None)
+    SEALED_Q = SweepQuery("s1", "sealed text", "local", "sealed", "pass", JUDGE, None)
+
+    def _paths(self, tmp_path, q):
+        gen_dies = _Rig(tmp_path / "a", requests.ConnectionError("gone"))
+        judge_dies = _Rig(tmp_path / "b", _gen_events(), requests.ConnectionError("gone"))
+        checker = _Rig(tmp_path / "c", _gen_events(), _judge_events())
+        gen_dies.run([q])
+        judge_dies.run([q])
+        with patch("bench.sweep.hollow_shapes", side_effect=RuntimeError("x")):
+            checker.run([q])
+
+    def test_sealed_id_never_reaches_the_console(self, tmp_path, capsys):
+        self._paths(tmp_path, self.SEALED_Q)
+        out = capsys.readouterr()
+        assert "s1" not in out.out + out.err
+        assert out.err.count("(1/1) sealed:") == 3  # all three warnings fired, label only
+
+    def test_dev_id_still_reaches_the_console(self, tmp_path, capsys):
+        self._paths(tmp_path, self.DEV_Q)
+        err = capsys.readouterr().err
+        assert err.count("d1 repeat 1") == 3
+
+
 class TestMain:
     def _argv(self, tmp_path, *extra):
         qf = tmp_path / "q.json"

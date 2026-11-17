@@ -4,15 +4,18 @@ The judge is one Browser keyword line that reads the element the query is about.
 It goes before the test's closing `Close Browser` (the page is still open), or
 after the test's last line when the test never closes the browser.
 
+A file is refused when any cell in it, anywhere (an inline IF, Run Keyword If, a user keyword), names Pass
+Execution / Pass Execution If: the test could pass before the judge runs.
+
 Referenced by: bench/sweep.py
-Depends on: src/backend/crew_ai/robot_code_normalizer.py (_parse_suite, _BROWSER_PREFIXES, _BUILTIN_PREFIXES,
-_SPACE_UNDERSCORE)
+Depends on: src/backend/crew_ai/robot_code_normalizer.py (_parse_suite, _canon_keyword, _CELL_SPLIT_RE,
+_BROWSER_PREFIXES, _SPACE_UNDERSCORE)
 """
 
 import re
 
 from src.backend.crew_ai.robot_code_normalizer import (
-    _BROWSER_PREFIXES, _BUILTIN_PREFIXES, _SPACE_UNDERSCORE, _parse_suite)
+    _BROWSER_PREFIXES, _CELL_SPLIT_RE, _SPACE_UNDERSCORE, _canon_keyword, _parse_suite)
 
 
 _PASS_EXECUTION = frozenset({"passexecution", "passexecutionif"})  # these end the test as PASS
@@ -54,15 +57,27 @@ def _top_level_closes(test) -> list:
     return closes
 
 
-def _refuse_unjudgeable_steps(test) -> None:
+def _has_pass_execution_cell(robot_code: str) -> bool:
+    """True when any non-comment cell anywhere in the file names Pass Execution (Robot's cell rule)."""
+    for line in robot_code.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for cell in _CELL_SPLIT_RE.split(line.strip()):
+            if cell and _canon_keyword(cell).replace(" ", "") in _PASS_EXECUTION:
+                return True
+    return False
+
+
+def _refuse_unjudgeable_steps(test, robot_code: str) -> None:
     """Refuse a test whose judge line would not run as a keyword call, or would not run at all."""
     # Same check as the normalizer's empty-loop rewrite: a templated test runs every row, the judge included, as
     # the template's arguments.
     if any(step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[template]" for step in test.steps):
         raise JudgeRefused("the test has a [Template] setting; the judge would run as template arguments")
-    if any(not step.setting and step.prefix in _BUILTIN_PREFIXES
-           and step.keyword.replace(" ", "") in _PASS_EXECUTION for step in test.steps):
-        raise JudgeRefused("the test calls Pass Execution, so it can pass before the judge runs")
+    # Refuse by default (owner ruling, CR2): inline IF, Run Keyword If and user keywords all reach Pass Execution,
+    # so ANY cell in the file naming it refuses; a false refusal is a visible judge_error.
+    if _has_pass_execution_cell(robot_code):
+        raise JudgeRefused("the file has a Pass Execution cell, so the test can pass before the judge runs")
 
 
 def insert_judge(robot_code: str, judge_line: str) -> str:
@@ -76,7 +91,7 @@ def insert_judge(robot_code: str, judge_line: str) -> str:
     if not test.line_nos:
         raise JudgeRefused("the test has no body line to place the judge next to")
 
-    _refuse_unjudgeable_steps(test)
+    _refuse_unjudgeable_steps(test, robot_code)
     closes = _top_level_closes(test)
     lines = list(suite.lines)
     if closes:

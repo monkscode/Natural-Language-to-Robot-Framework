@@ -129,8 +129,13 @@ def _captured_row(dest: Path) -> dict:
         return {}
 
 
+def _label(q: SweepQuery, repeat: int, pos: str = "") -> str:
+    """How the console names a run: a dev query by id + repeat, a sealed one by position only."""
+    return f"{pos}{q.id} repeat {repeat}" if q.half == "dev" else f"{pos}sealed"
+
+
 def _judge(q: SweepQuery, robot_code: str | None, base_url: str, token: str | None,
-           conn, out_dir: Path, wf: str) -> dict:
+           conn, out_dir: Path, wf: str, label: str) -> dict:
     """Re-run the generated test with the judge line; returns the judge_* fields."""
     out = {"judge_run_id": None, "judge_status": None, "judge_refused": None,
            "judge_error_message": None}
@@ -146,7 +151,7 @@ def _judge(q: SweepQuery, robot_code: str | None, base_url: str, token: str | No
     try:
         stream_execute(base_url, code, token, events)
     except requests.RequestException as e:
-        _warn(f"{q.id}: judge request failed: {e}")
+        _warn(f"{label}: judge request failed: {e}")
         out["judge_status"] = "error"
     ident = judge_identity(events)
     out["judge_run_id"] = ident["run_id"]
@@ -159,7 +164,8 @@ def _judge(q: SweepQuery, robot_code: str | None, base_url: str, token: str | No
 
 
 def run_one(q: SweepQuery, repeat: int, base_url: str, token: str | None,
-            conn, out_dir: Path) -> dict:
+            conn, out_dir: Path, pos: str = "") -> dict:
+    label = _label(q, repeat, pos)
     row = {"query_id": q.id, "half": q.half, "source": q.source, "expect": q.expect,
            "repeat": repeat, "workflow_id": None, "generation_status": None,
            "test_status": None, "judge_run_id": None, "judge_status": None,
@@ -173,7 +179,7 @@ def run_one(q: SweepQuery, repeat: int, base_url: str, token: str | None,
     try:
         stream_generate_and_run(base_url, q.query, token, events)
     except requests.RequestException as e:
-        _warn(f"{q.id} repeat {repeat}: request failed: {e}")
+        _warn(f"{label}: request failed: {e}")
         died = True
     row["total_s"] = round(time.monotonic() - t0, 3)
     ident = extract_run_identity(events)
@@ -196,13 +202,13 @@ def run_one(q: SweepQuery, repeat: int, base_url: str, token: str | None,
                     f"writes to another database; stopping")
         if q.expect == "pass" and row["generation_status"] == "complete" \
                 and row["test_status"] == "passed":
-            row.update(_judge(q, robot_code, base_url, token, conn, out_dir, wf))
+            row.update(_judge(q, robot_code, base_url, token, conn, out_dir, wf, label))
         if row["generation_status"] == "complete" and row["test_status"] == "passed" \
                 and robot_code:
             try:
                 row["hollow"] = sorted(hollow_shapes(robot_code, q.query))
             except Exception as e:  # noqa: BLE001 - as production: a checker bug must not end a paid sweep
-                _warn(f"{q.id} repeat {repeat}: hollow checker raised {type(e).__name__}")
+                _warn(f"{label}: hollow checker raised {type(e).__name__}")
                 row["hollow"] = ["CHECKER_ERROR"]
 
     row["outcome"] = score_run(q, row["generation_status"], row["test_status"],
@@ -229,13 +235,14 @@ def run_sweep(queries: list[SweepQuery], repeats: int, base_url: str,
             for repeat in range(1, repeats + 1):
                 done += 1
                 dev = q.half == "dev"  # a sealed query's id, text and outcome stay off the console
-                _log(f"({done}/{total}) {q.id} repeat {repeat}: {q.query[:60]}..."
-                     if dev else f"({done}/{total}) sealed")
-                row = run_one(q, repeat, base_url, token, conn, out_dir)
+                pos = f"({done}/{total}) "
+                label = _label(q, repeat, pos)
+                _log(f"{label}: {q.query[:60]}..." if dev else label)
+                row = run_one(q, repeat, base_url, token, conn, out_dir, pos)
                 f.write(json.dumps(row) + "\n")
                 f.flush()
                 if dev:
-                    _log(f"({done}/{total}) {q.id} repeat {repeat}: {row['outcome']}")
+                    _log(f"{label}: {row['outcome']}")
 
 
 def main(argv: list[str] | None = None) -> int:

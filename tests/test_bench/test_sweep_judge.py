@@ -117,12 +117,37 @@ def test_refuses_suite_level_test_template():
     "BuiltIn.Pass Execution    done",
     "builtin.pass_execution_if    ${x}    done",
     "PASS_execution    done",
+    "pass_execution    done",
+    "IF    ${x}    Pass Execution    done",
+    "Run Keyword If    ${x}    Pass Execution    done",
 ])
 def test_refuses_pass_execution(step):
     with pytest.raises(JudgeRefused, match="Pass Execution"):
         insert_judge(HEAD + f"    {step}\n    Close Browser\n", JUDGE)
 
 
-def test_logging_the_words_pass_execution_is_judged():
-    out = insert_judge(HEAD + "    Log    Pass Execution\n    Close Browser\n", JUDGE)
-    assert "    " + JUDGE in out
+def test_refuses_pass_execution_in_a_user_keyword():
+    code = HEAD + "    Finish\n    Close Browser\n\n*** Keywords ***\nFinish\n    Pass Execution    done\n"
+    with pytest.raises(JudgeRefused, match="Pass Execution"):
+        insert_judge(code, JUDGE)
+
+
+def test_refuses_pass_execution_in_a_for_loop():
+    with pytest.raises(JudgeRefused, match="Pass Execution"):
+        insert_judge(HEAD + "    FOR    ${i}    IN    a\n        Pass Execution    ${i}\n    END\n", JUDGE)
+
+
+def test_a_cell_that_only_contains_the_words_is_refused_by_design():
+    # Owner ruling (CR2 fix 1): refuse by default. ANY cell equal to Pass Execution refuses the file, even as
+    # a Log argument; a false refusal scores a visible judge_error, a missed one a false "handled".
+    with pytest.raises(JudgeRefused, match="Pass Execution"):
+        insert_judge(HEAD + "    Log    Pass Execution\n    Close Browser\n", JUDGE)
+
+
+def test_words_inside_a_longer_cell_and_comments_are_judged():
+    code = HEAD + "    # Pass Execution    here\n    Log    Pass Execution done\n    Close Browser\n"
+    assert "    " + JUDGE in insert_judge(code, JUDGE)
+
+
+def test_for_loop_test_without_pass_execution_is_judged():
+    assert "    " + JUDGE in insert_judge(HEAD + LOOP + "    Close Browser\n", JUDGE)
