@@ -125,7 +125,7 @@ def _apply_generation_event(ident, ev, status):
         ident["workflow_id"] = ev.get("workflow_id")
     if status == "complete":
         ident["generation_status"] = "complete"
-        ident["workflow_id"] = ev.get("workflow_id") or ident["workflow_id"] or ident["workflow_id"]
+        ident["workflow_id"] = ev.get("workflow_id") or ident["workflow_id"]
         if "dryrun_status" in ev:
             ident["dryrun_status"] = ev["dryrun_status"]
     elif status == "error" and ident["generation_status"] != "complete":

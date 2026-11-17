@@ -4,7 +4,7 @@ The judge is one Browser keyword line that reads the element the query is about.
 It goes before the test's closing `Close Browser` (the page is still open), or
 after the test's last line when the test never closes the browser.
 
-Referenced by: bench/sweep_lib.py
+Referenced by: bench/sweep.py
 Depends on: src/backend/crew_ai/robot_code_normalizer.py (_parse_suite, _BROWSER_PREFIXES)
 """
 
@@ -38,6 +38,7 @@ def _top_level_closes(test) -> list:
         depth += change
         if depth < 0:
             break
+        # shortcut: a continued Close Browser (a "..." line after it) is not an anchor, so the judge goes after the test's last line; upgrade if a real generated test shows it
         is_close = (not step.setting and not step.continued and change == 0 and depth == 0
                     and step.keyword.replace(" ", "") == "closebrowser" and step.prefix in _BROWSER_PREFIXES)
         if is_close:

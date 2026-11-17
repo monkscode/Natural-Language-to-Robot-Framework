@@ -9,7 +9,7 @@ Status values are the stream's own (docker_service.py): generation_status is
 "complete" / "error" / None; test and judge statuses are "passed" / "failed" /
 "error" / None.
 
-Referenced by: bench sweep runner (later task), tests/test_bench/test_sweep_lib.py
+Referenced by: bench/sweep.py,tests/test_bench/test_sweep_lib.py
 Depends on: nothing (standard library only)
 """
 

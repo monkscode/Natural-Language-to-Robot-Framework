@@ -14,6 +14,10 @@ so judging it would cost an execution for nothing. For judge_failed / judge_erro
 rows the tag comes from the judge run's own error text (judge_error_message);
 every other non-handled row is tagged from the generation run's.
 
+`--out-dir` must sit under bench/private/nlrf179/ (gitignored; runs/<wf>/*.json hold the query text); nothing checks it.
+A dead generation stream captures no evidence; the server still finishes that run in the copy, so its rows live only in
+the copy DB until down.sh drops it.
+
 Environment: SWEEP_TOKEN (optional Bearer token), SWEEP_DATABASE_URL (required;
 never settings.DATABASE_URL).
 
@@ -101,7 +105,10 @@ def judge_identity(events: list) -> dict:
 
 
 def check_target(base_url: str, health: dict) -> list[str]:
-    """Reasons to refuse this target; empty when the sweep may start."""
+    """Reasons to refuse this target; empty when the sweep may start.
+
+    The real guards are not this list: production refuses the probe token (its user exists only in the copy, which signs with its own JWT secret), and run_one stops on a finished run missing from the copy DB.
+    """
     reasons = []
     parsed = urlparse(base_url)
     if parsed.hostname in PRODUCTION_HOSTS and parsed.port == PRODUCTION_PORT:
@@ -180,6 +187,11 @@ def run_one(q: SweepQuery, repeat: int, base_url: str, token: str | None,
             captured = _captured_row(dest)
             robot_code = captured.get("robot_code") or None
             row["error_message"] = captured.get("error_message")
+            if not captured and row["generation_status"] == "complete":
+                # The opening row is written before the stream starts: a correct copy always has it.
+                raise SystemExit(
+                    f"[bench] workflow {wf} is not in SWEEP_DATABASE_URL - the target "
+                    f"writes to another database; stopping")
         if q.expect == "pass" and row["generation_status"] == "complete" \
                 and row["test_status"] == "passed":
             row.update(_judge(q, robot_code, base_url, token, conn, out_dir, wf))
@@ -211,11 +223,14 @@ def run_sweep(queries: list[SweepQuery], repeats: int, base_url: str,
         for q in queries:
             for repeat in range(1, repeats + 1):
                 done += 1
-                _log(f"({done}/{total}) {q.id} repeat {repeat}: {q.query[:60]}...")
+                dev = q.half == "dev"  # a sealed query's id, text and outcome stay off the console
+                _log(f"({done}/{total}) {q.id} repeat {repeat}: {q.query[:60]}..."
+                     if dev else f"({done}/{total}) sealed")
                 row = run_one(q, repeat, base_url, token, conn, out_dir)
                 f.write(json.dumps(row) + "\n")
                 f.flush()
-                _log(f"({done}/{total}) {q.id} repeat {repeat}: {row['outcome']}")
+                if dev:
+                    _log(f"({done}/{total}) {q.id} repeat {repeat}: {row['outcome']}")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -6,8 +6,10 @@ a stack. The two streams are replaced by fakes that hand back event lists.
 """
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 import bench.sweep as sw
@@ -281,6 +283,54 @@ class TestRunSweep:
         _Rig(tmp_path, _gen_events("failed"), error_message="BUG").run([FAIL_Q])
         assert len((tmp_path / "results.jsonl").read_text().splitlines()) == 2
 
+    def _run_with_empty_capture(self, tmp_path, second_gen):
+        """Two queries; the second one's workflow is absent from the capture database."""
+        gens = iter([_gen_events("failed", wf=WF), second_gen])
+
+        def gen(base_url, query, token, sink=None):
+            sink.extend(next(gens))
+
+        def capture(conn, wf, dest=None):
+            dest.mkdir(parents=True, exist_ok=True)
+            rows = [{"robot_code": ROBOT, "error_message": "BUG"}] if wf == WF else []
+            (dest / "test_runs.json").write_text(json.dumps(rows), encoding="utf-8")
+            return True
+
+        with patch("bench.sweep.stream_generate_and_run", side_effect=gen), \
+             patch("bench.sweep.capture_evidence", side_effect=capture):
+            sw.run_sweep([FAIL_Q, PASS_Q], 1, "http://x", None, None, tmp_path)
+
+    def test_complete_run_missing_from_capture_database_stops_the_sweep(self, tmp_path):
+        other = "cccccccc-0000-0000-0000-000000000003"
+        with pytest.raises(SystemExit) as stop:
+            self._run_with_empty_capture(tmp_path, _gen_events(wf=other))
+        assert other in str(stop.value) and "SWEEP_DATABASE_URL" in str(stop.value)
+        rows = [json.loads(ln) for ln in
+                (tmp_path / "results.jsonl").read_text().splitlines()]
+        assert [r["query_id"] for r in rows] == ["f1"]  # earlier row stays flushed
+
+    def test_incomplete_run_missing_from_capture_database_still_writes_row(self, tmp_path):
+        self._run_with_empty_capture(
+            tmp_path, _gen_events(gen="error", test_status=None)[:1])
+        rows = [json.loads(ln) for ln in
+                (tmp_path / "results.jsonl").read_text().splitlines()]
+        assert [(r["query_id"], r["outcome"]) for r in rows] == [
+            ("f1", "handled"), ("p1", "generation_failed")]
+
+    def test_sealed_query_prints_no_id_text_or_outcome(self, tmp_path, capsys):
+        _Rig(tmp_path, _gen_events("failed"), error_message="BUG").run([FAIL_Q])
+        out = capsys.readouterr()
+        text = out.out + out.err
+        assert "(1/1) sealed" in text
+        for leak in ("f1", "planted bug page", "handled"):
+            assert leak not in text
+
+    def test_dev_query_prints_id_text_and_outcome(self, tmp_path, capsys):
+        dev_q = SweepQuery("d1", "dev query text", "local", "dev", "fail", None, "BUG")
+        _Rig(tmp_path, _gen_events("failed"), error_message="BUG").run([dev_q])
+        text = capsys.readouterr().out
+        assert "d1" in text and "dev query text" in text and "handled" in text
+
 
 class TestMain:
     def _argv(self, tmp_path, *extra):
@@ -292,9 +342,9 @@ class TestMain:
              "expect": "fail", "bug_signature": "BUG"}]}), encoding="utf-8")
         return ["--queries", str(qf), "--out-dir", str(tmp_path / "out"), *extra]
 
-    def test_production_url_exits_nonzero_before_any_run(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SWEEP_DATABASE_URL", "postgresql://x")
-        with patch("bench.sweep.fetch_health",
+    def test_production_url_exits_nonzero_before_any_run(self, tmp_path):
+        with patch.dict(os.environ, {"SWEEP_DATABASE_URL": "postgresql://x"}), \
+             patch("bench.sweep.fetch_health",
                    return_value={"pins": {"optimization_enabled": True}}), \
              patch("bench.sweep.psycopg.connect") as connect, \
              patch("bench.sweep.run_sweep") as run:
@@ -303,16 +353,16 @@ class TestMain:
         run.assert_not_called()
         connect.assert_not_called()
 
-    def test_database_url_is_required(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("SWEEP_DATABASE_URL", raising=False)
-        with patch("bench.sweep.run_sweep") as run:
+    def test_database_url_is_required(self, tmp_path):
+        with patch.dict(os.environ), patch("bench.sweep.run_sweep") as run:
+            os.environ.pop("SWEEP_DATABASE_URL", None)
             assert sw.main(self._argv(tmp_path)) != 0
         run.assert_not_called()
 
-    def test_only_filters_by_id_in_file_order(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SWEEP_DATABASE_URL", "postgresql://x")
-        monkeypatch.setenv("SWEEP_TOKEN", "tok")
-        with patch("bench.sweep.fetch_health",
+    def test_only_filters_by_id_in_file_order(self, tmp_path):
+        env = {"SWEEP_DATABASE_URL": "postgresql://x", "SWEEP_TOKEN": "tok"}
+        with patch.dict(os.environ, env), \
+             patch("bench.sweep.fetch_health",
                    return_value={"pins": {"optimization_enabled": True}}), \
              patch("bench.sweep.psycopg.connect"), \
              patch("bench.sweep.run_sweep") as run:
@@ -322,8 +372,8 @@ class TestMain:
         assert [q.id for q in queries] == ["f2"]
         assert (repeats, base_url, token) == (2, "http://127.0.0.1:5002", "tok")
 
-    def test_unknown_only_id_exits_nonzero(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SWEEP_DATABASE_URL", "postgresql://x")
-        with patch("bench.sweep.run_sweep") as run:
+    def test_unknown_only_id_exits_nonzero(self, tmp_path):
+        with patch.dict(os.environ, {"SWEEP_DATABASE_URL": "postgresql://x"}), \
+             patch("bench.sweep.run_sweep") as run:
             assert sw.main(self._argv(tmp_path, "--only", "nope")) != 0
         run.assert_not_called()
