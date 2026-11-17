@@ -12,7 +12,7 @@ bind-mounted robot_tests/<id> out from under a live container.
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -234,6 +234,32 @@ class TestTheSweepAlwaysDrainsWhatItQueued:
         drained = self._sweep(self._queue_then(KeyboardInterrupt()), tmp_path)
         assert drained == ["wf-q01", "wf-q02"], (
             "the sweep was abandoned with runs still attached to History/metrics")
+
+
+class TestCaptureEvidenceDest:
+    """The sweep captures into its own folder; the default stays bench/runs."""
+
+    @staticmethod
+    def _conn():
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [{"run_id": WF}]
+        return conn
+
+    def test_dest_is_honoured_and_bench_runs_untouched(self, tmp_path):
+        import bench.run_bench as rb
+
+        dest = tmp_path / "elsewhere" / "judge"
+        with patch.object(rb, "RUNS_DIR", tmp_path / "bench_runs"):
+            assert rb.capture_evidence(self._conn(), WF, dest) is True
+        assert (dest / "test_runs.json").exists()
+        assert not (tmp_path / "bench_runs").exists()
+
+    def test_default_dest_is_runs_dir_workflow(self, tmp_path):
+        import bench.run_bench as rb
+
+        with patch.object(rb, "RUNS_DIR", tmp_path / "bench_runs"):
+            assert rb.capture_evidence(self._conn(), WF) is True
+        assert (tmp_path / "bench_runs" / WF / "test_runs.json").exists()
 
 
 class TestPreflightLogIsHonest:
