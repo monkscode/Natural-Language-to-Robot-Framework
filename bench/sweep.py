@@ -185,7 +185,11 @@ def run_one(q: SweepQuery, repeat: int, base_url: str, token: str | None,
             row.update(_judge(q, robot_code, base_url, token, conn, out_dir, wf))
         if row["generation_status"] == "complete" and row["test_status"] == "passed" \
                 and robot_code:
-            row["hollow"] = sorted(hollow_shapes(robot_code, q.query))
+            try:
+                row["hollow"] = sorted(hollow_shapes(robot_code, q.query))
+            except Exception as e:  # noqa: BLE001 - as production: a checker bug must not end a paid sweep
+                _warn(f"{q.id} repeat {repeat}: hollow checker raised {type(e).__name__}")
+                row["hollow"] = ["CHECKER_ERROR"]
 
     row["outcome"] = score_run(q, row["generation_status"], row["test_status"],
                                row["judge_status"], row["error_message"])

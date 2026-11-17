@@ -28,10 +28,9 @@ BROWSER_HEALTH = {"status": "healthy", "model_provider": "gemini", "headless": T
 
 WF = "11111111-2222-3333-4444-555555555555"
 
-# The id reaches the client only on the terminal generation event
-# (workflow_service.py: in-progress events carry "progress", never
-# "workflow_id"), so this is what a detachable partial stream looks like: the
-# generation finished, and the connection died during the execution phase.
+# The id rides on the opening generation event too (workflow_service.py), and
+# extract_run_identity takes it from any generation event. This is a partial
+# stream that dies in the execution phase, after the terminal generation event.
 PARTIAL_EVENTS = [
     (0.0, {"stage": "generation", "status": "running", "progress": 62}),
     (1.0, {"stage": "generation", "status": "complete", "workflow_id": WF}),

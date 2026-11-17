@@ -198,6 +198,39 @@ class TestRunSweep:
         assert all(r["outcome"] == "generation_failed" for r in rows)
         assert rows[0]["generation_status"] == "error"
 
+    def test_stream_death_after_running_event_keeps_id(self, tmp_path):
+        rig = _Rig(tmp_path, None)
+        calls = []
+
+        def gen(base_url, query, token, sink=None):
+            calls.append(query)
+            sink.append((0.0, {"stage": "generation", "status": "running",
+                               "workflow_id": WF}))
+            raise requests.ConnectionError("gone")
+
+        with patch("bench.sweep.stream_generate_and_run", side_effect=gen), \
+             patch("bench.sweep.capture_evidence", side_effect=rig._capture):
+            sw.run_sweep([PASS_Q, FAIL_Q], 1, "http://x", None, None, tmp_path)
+        rows = [json.loads(ln) for ln in
+                (tmp_path / "results.jsonl").read_text().splitlines()]
+        assert len(calls) == 2
+        assert [(r["workflow_id"], r["outcome"], r["generation_status"])
+                for r in rows] == [(WF, "generation_failed", "error")] * 2
+
+    def test_checker_error_keeps_row(self, tmp_path):
+        rig = _Rig(tmp_path, _gen_events(), _judge_events())
+        with patch("bench.sweep.hollow_shapes", side_effect=RuntimeError("secret q")):
+            rows = rig.run([PASS_Q, PASS_Q])
+        assert [r["hollow"] for r in rows] == [["CHECKER_ERROR"]] * 2
+        assert all(r["outcome"] == "handled" for r in rows)
+
+    def test_checker_error_warning_names_only_the_type(self, tmp_path, capsys):
+        rig = _Rig(tmp_path, _gen_events(), _judge_events())
+        with patch("bench.sweep.hollow_shapes", side_effect=RuntimeError("secret q")):
+            rig.run([PASS_Q])
+        err = capsys.readouterr().err
+        assert "RuntimeError" in err and "secret q" not in err
+
     def test_judge_stream_death_is_judge_error_and_continues(self, tmp_path):
         rig = _Rig(tmp_path, _gen_events(), requests.ConnectionError("gone"))
         rows = rig.run([PASS_Q], repeats=2)
