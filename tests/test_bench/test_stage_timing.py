@@ -163,6 +163,15 @@ class TestRunIdentity:
         assert ident["workflow_id"] is None
         assert ident["test_status"] is None
 
+    def test_identity_takes_id_from_running_event(self):
+        """The opening event carries the id; a stream that dies after it must
+        still be attributable. A later complete event still sets it."""
+        events = [(0.0, _gen(5, "start", workflow_id="wf-run"))]
+        assert extract_run_identity(events)["workflow_id"] == "wf-run"
+        events.append((1.0, _gen(100, "done", status="complete",
+                                 workflow_id="wf-final")))
+        assert extract_run_identity(events)["workflow_id"] == "wf-final"
+
     def test_generation_error_carries_workflow_id_when_present(self):
         """Failed runs must still be detachable — their pre-failure LLM calls
         are already in llm_traces, so the id must survive the error event."""

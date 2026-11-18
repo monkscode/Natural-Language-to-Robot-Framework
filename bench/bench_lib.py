@@ -119,10 +119,13 @@ def count_dryrun_repairs(events):
 def _apply_generation_event(ident, ev, status):
     """Fold one generation-stage event into the identity dict. Error events
     keep the workflow_id too — failed runs must still be detachable (their
-    pre-failure LLM calls are already in llm_traces)."""
+    pre-failure LLM calls are already in llm_traces). The opening event carries
+    the id too, so a stream that dies mid-generation is still attributable."""
+    if ident["workflow_id"] is None:
+        ident["workflow_id"] = ev.get("workflow_id")
     if status == "complete":
         ident["generation_status"] = "complete"
-        ident["workflow_id"] = ev.get("workflow_id")
+        ident["workflow_id"] = ev.get("workflow_id") or ident["workflow_id"]
         if "dryrun_status" in ev:
             ident["dryrun_status"] = ev["dryrun_status"]
     elif status == "error" and ident["generation_status"] != "complete":

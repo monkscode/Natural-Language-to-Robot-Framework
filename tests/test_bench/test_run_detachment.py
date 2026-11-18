@@ -12,7 +12,7 @@ bind-mounted robot_tests/<id> out from under a live container.
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -28,10 +28,9 @@ BROWSER_HEALTH = {"status": "healthy", "model_provider": "gemini", "headless": T
 
 WF = "11111111-2222-3333-4444-555555555555"
 
-# The id reaches the client only on the terminal generation event
-# (workflow_service.py: in-progress events carry "progress", never
-# "workflow_id"), so this is what a detachable partial stream looks like: the
-# generation finished, and the connection died during the execution phase.
+# The id rides on the opening generation event too (workflow_service.py), and
+# extract_run_identity takes it from any generation event. This is a partial
+# stream that dies in the execution phase, after the terminal generation event.
 PARTIAL_EVENTS = [
     (0.0, {"stage": "generation", "status": "running", "progress": 62}),
     (1.0, {"stage": "generation", "status": "complete", "workflow_id": WF}),
@@ -234,6 +233,32 @@ class TestTheSweepAlwaysDrainsWhatItQueued:
         drained = self._sweep(self._queue_then(KeyboardInterrupt()), tmp_path)
         assert drained == ["wf-q01", "wf-q02"], (
             "the sweep was abandoned with runs still attached to History/metrics")
+
+
+class TestCaptureEvidenceDest:
+    """The sweep captures into its own folder; the default stays bench/runs."""
+
+    @staticmethod
+    def _conn():
+        conn = MagicMock()
+        conn.execute.return_value.fetchall.return_value = [{"run_id": WF}]
+        return conn
+
+    def test_dest_is_honoured_and_bench_runs_untouched(self, tmp_path):
+        import bench.run_bench as rb
+
+        dest = tmp_path / "elsewhere" / "judge"
+        with patch.object(rb, "RUNS_DIR", tmp_path / "bench_runs"):
+            assert rb.capture_evidence(self._conn(), WF, dest) is True
+        assert (dest / "test_runs.json").exists()
+        assert not (tmp_path / "bench_runs").exists()
+
+    def test_default_dest_is_runs_dir_workflow(self, tmp_path):
+        import bench.run_bench as rb
+
+        with patch.object(rb, "RUNS_DIR", tmp_path / "bench_runs"):
+            assert rb.capture_evidence(self._conn(), WF) is True
+        assert (tmp_path / "bench_runs" / WF / "test_runs.json").exists()
 
 
 class TestPreflightLogIsHonest:

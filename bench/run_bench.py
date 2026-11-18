@@ -284,13 +284,14 @@ def _fetch_rows(conn, sql: str, workflow_id: str) -> list[dict]:
     return [dict(r) for r in conn.execute(sql, (workflow_id,)).fetchall()]
 
 
-def capture_evidence(conn, workflow_id: str) -> bool:
-    """Copy everything the run produced into bench/runs/<workflow_id>/.
+def capture_evidence(conn, workflow_id: str, dest: Path | None = None) -> bool:
+    """Copy everything the run produced into `dest` (default
+    bench/runs/<workflow_id>/).
 
     Returns False (and deletes nothing downstream) on any failure — the
     capture-before-delete contract.
     """
-    dest = RUNS_DIR / workflow_id
+    dest = RUNS_DIR / workflow_id if dest is None else dest
     try:
         dest.mkdir(parents=True, exist_ok=True)
         captures = {
