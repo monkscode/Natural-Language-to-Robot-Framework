@@ -528,9 +528,13 @@ Start it without the overlay: `docker compose up -d`
 
 ### Fully local (Ollama)
 
-`local` drives the backend LLM only. The browser service requires a Google vision
-model and does **not** support Ollama, so element detection still needs
-`GEMINI_API_KEY` or Vertex credentials.
+`MODEL_PROVIDER=local` is **not usable with the shipped launchers today**. The browser
+service reads the same `MODEL_PROVIDER` (`run.sh` and docker compose load the same
+`src/backend/.env`), requires a Google vision model and does not support Ollama. With
+`local`, every generation fails at element discovery. Element detection needs
+`GEMINI_API_KEY` or Vertex credentials. The gap is tracked in
+[NLRF issue 190](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues/190). The
+variables below apply only if you run the backend with its own `.env`.
 
 ```env
 MODEL_PROVIDER=local
