@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
@@ -12,12 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.backend.core.secret_scrub import ScrubError, mask_values, scrub_run_dir
+from src.backend.core.secret_scrub import _STRINGS, ScrubError, mask_values, scrub_run_dir
 from src.backend.crew_ai.optimization.failure_analyzer import OutputXmlParser
 
 MARK = "pw_marker_131"
 _ARRAY = re.compile(
-    r'window\.output\["strings"\]\.concat\((\[(?:"(?:[^"\\]|\\.)*"\s*,?\s*)*\])\);'
+    r'window\.output\["strings"\]\.concat\((\[(?:"(?:[^"\\]|\\.)*"\s*(?:,\s*)?)*\])\);'
 )
 
 
@@ -292,3 +293,29 @@ def test_logged_file_names_are_masked(tmp_path, caplog):
         scrub_run_dir(tmp_path, [MARK])
     assert MARK not in caplog.text
     assert "***.log" in caplog.text
+
+
+_PREFIX = 'window.output["strings"]=window.output["strings"].concat('
+
+
+@pytest.mark.parametrize(
+    "tail, group",
+    [
+        ('["*a","eJxLy","*b\\"c"]);', '["*a","eJxLy","*b\\"c"]'),
+        ('["*a", "*b" ,"*c"]);', '["*a", "*b" ,"*c"]'),
+        ("[]);", "[]"),
+        ('["*x"]);', '["*x"]'),
+        ('["*a" "*b"]);', '["*a" "*b"]'),
+        ('["*a",,"*b"]);', None),
+    ],
+)
+def test_strings_regex_matches_item_separators(tail, group):
+    m = _STRINGS.search(_PREFIX + tail)
+    assert (m.group(2) if m else None) == group
+
+
+def test_strings_regex_has_no_exponential_backtracking():
+    text = _PREFIX + '[""' + ' ""' * 22  # unclosed; the old pattern took ~0.65 s here, a fixed one ~0 s
+    start = time.perf_counter()
+    _STRINGS.search(text)
+    assert time.perf_counter() - start < 0.1

@@ -43,7 +43,7 @@ class ScrubError(Exception):
 # message cannot end the match early.
 _STRINGS = re.compile(
     r'(window\.output\["strings"\]\s*=\s*window\.output\["strings"\]\.concat\()'
-    r'(\[(?:"(?:[^"\\]|\\.)*"\s*,?\s*)*\])'
+    r'(\[(?:"(?:[^"\\]|\\.)*"\s*(?:,\s*)?)*\])'
     r"(\);)"
 )
 # A JS \xNN escape (JSON has none); the pair form skips an escaped backslash before an x.
