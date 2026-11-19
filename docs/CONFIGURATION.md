@@ -531,10 +531,10 @@ Start it without the overlay: `docker compose up -d`
 `MODEL_PROVIDER=local` is **not usable with the shipped launchers today**. The browser
 service reads the same `MODEL_PROVIDER` (`run.sh` and docker compose load the same
 `src/backend/.env`), requires a Google vision model and does not support Ollama. With
-`local`, every generation fails at element discovery. Element detection needs
+`local`, browser-service refuses every element discovery call, so no element is found. Element detection needs
 `GEMINI_API_KEY` or Vertex credentials. The gap is tracked in
 [NLRF issue 190](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues/190). The
-variables below apply only if you run the backend with its own `.env`.
+block below shows the backend settings only. In `src/backend/.env` it reaches browser-service too.
 
 ```env
 MODEL_PROVIDER=local
@@ -610,7 +610,7 @@ variables:
 2. **Use secrets management** - For production deployments
 3. **Rotate API keys** - Regularly update keys
 4. **Limit key permissions** - Use least privilege
-5. **Use local models** - For sensitive data
+5. **Mind what leaves your network** - Element discovery sends page content to Gemini or Vertex
 
 ## Troubleshooting Configuration
 

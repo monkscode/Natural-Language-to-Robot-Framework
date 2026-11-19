@@ -18,7 +18,7 @@ Yes! Mark 1 is open source (Apache 2.0 License). You only pay for AI model API c
 - **Ollama**: Not usable with the shipped launchers today. Element discovery needs Gemini or Vertex. See "Can I use Mark 1 offline?"
 
 ### Can I use Mark 1 offline?
-No. A local planner (Ollama) is not usable with the shipped `run.sh` or docker compose today: browser-service reads the same `MODEL_PROVIDER` setting and requires Gemini or Vertex. Element discovery sends the test request text, the page URL, the page's element list, and screenshots when it escalates to vision to Google. See "Fully local (Ollama)" in [CONFIGURATION.md](CONFIGURATION.md) and [browser-service issue 88](https://github.com/monkscode/browser-service/issues/88), which asks whether that can change, and [NLRF issue 190](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues/190), which tracks the shared setting.
+No. A local planner (Ollama) is not usable with the shipped `run.sh` or docker compose today: browser-service reads the same `MODEL_PROVIDER` setting and requires Gemini or Vertex. Element discovery sends Google the test request text, the page URL, the page's element list, and screenshots when it escalates to vision. See "Fully local (Ollama)" in [CONFIGURATION.md](CONFIGURATION.md) and [browser-service issue 88](https://github.com/monkscode/browser-service/issues/88), which asks whether that can change, and [NLRF issue 190](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues/190), which tracks the shared setting.
 
 ## Technical Questions
 
@@ -138,14 +138,13 @@ Yes:
 
 **Ollama**:
 - Not usable with the shipped launchers today. Element discovery still uses the Gemini / Vertex endpoint and its limits.
-- Limited by your hardware
 
 ## Security & Privacy Questions
 
 ### Is my data secure?
 Yes:
 - API keys stored locally in `.env` file
-- Test data processed locally or in your chosen cloud
+- Page content goes to the configured Gemini / Vertex endpoint during element discovery
 - Browser sessions isolated in Docker containers
 - Logs stored locally only
 
