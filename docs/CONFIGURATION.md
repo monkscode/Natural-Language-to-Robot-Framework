@@ -458,7 +458,8 @@ docker run --rm monkscode/nlrf:fastapi-latest python -c "from cryptography.ferne
 ```
 
 **Back it up.** It is the only copy. Lose it or change it, and every stored secret
-becomes unreadable. The Secrets page still lists their names, and every run that names
+becomes unreadable. A lost key must be replaced with a new one first: until then the
+Secrets page answers 503. The page then lists the old names, and every run that names
 one is refused until a member saves it again there.
 
 ### ENVIRONMENT / COOKIE_SECURE
