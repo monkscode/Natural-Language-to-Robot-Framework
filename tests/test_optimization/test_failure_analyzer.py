@@ -237,6 +237,26 @@ class TestOutputXmlParser:
             f"Parser: passing test -> test_status='passed': got '{result['test_status']}'"
         )
 
+    def test_output_xml_over_the_size_limit_is_not_parsed(self, tmp_dir):
+        """Learning runs in the shared API process on every run with a query; a
+        pasted test that logs hundreds of MB must not be parsed there."""
+        from unittest.mock import patch
+        import src.backend.crew_ai.optimization.failure_analyzer as fa
+        xml_path = _write_xml(tmp_dir, PASSING_XML, "too_big.xml")
+        with patch.object(fa, "_MAX_OUTPUT_XML_BYTES", os.path.getsize(xml_path) - 1), \
+             patch.object(fa.ElementTree, "parse") as parse:
+            result = OutputXmlParser().parse(xml_path)
+        parse.assert_not_called()
+        assert result["test_status"] == "error"
+        assert "limit" in result["error_message"]
+
+    def test_output_xml_at_the_size_limit_is_parsed(self, tmp_dir):
+        from unittest.mock import patch
+        import src.backend.crew_ai.optimization.failure_analyzer as fa
+        xml_path = _write_xml(tmp_dir, PASSING_XML, "at_limit.xml")
+        with patch.object(fa, "_MAX_OUTPUT_XML_BYTES", os.path.getsize(xml_path)):
+            assert OutputXmlParser().parse(xml_path)["test_status"] == "passed"
+
     def test_passing_test_no_error_message(self, tmp_dir):
         """Verify passing test has no error_message."""
         parser = OutputXmlParser()

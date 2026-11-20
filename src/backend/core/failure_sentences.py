@@ -34,6 +34,7 @@ from collections.abc import Iterator
 from xml.etree import ElementTree
 
 from src.backend.crew_ai.optimization.failure_analyzer import (
+    _MAX_OUTPUT_XML_BYTES,
     FailureClassifier,
     _first_uncaught_failure,
     _status,
@@ -42,11 +43,6 @@ from src.backend.crew_ai.optimization.failure_analyzer import (
 logger = logging.getLogger(__name__)
 
 _classifier = FailureClassifier()
-
-# A pasted test can log hundreds of MB, and this parse runs in the shared API
-# process at several times the file size. Stored runs measured 2026-11-20: 380
-# files, max 11,748 bytes — 20 MB leaves room for any real run.
-_MAX_OUTPUT_XML_BYTES = 20 * 1024 * 1024
 
 
 def _placeholder_never_resolved() -> str:
