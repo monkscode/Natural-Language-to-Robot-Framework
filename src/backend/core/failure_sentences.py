@@ -29,6 +29,7 @@ the caught-failure helpers _status, _first_uncaught_failure),
 xml.etree.ElementTree.
 """
 import logging
+import os
 from collections.abc import Iterator
 from xml.etree import ElementTree
 
@@ -41,6 +42,11 @@ from src.backend.crew_ai.optimization.failure_analyzer import (
 logger = logging.getLogger(__name__)
 
 _classifier = FailureClassifier()
+
+# A pasted test can log hundreds of MB, and this parse runs in the shared API
+# process at several times the file size. Stored runs measured 2026-11-20: 380
+# files, max 11,748 bytes — 20 MB leaves room for any real run.
+_MAX_OUTPUT_XML_BYTES = 20 * 1024 * 1024
 
 
 def _placeholder_never_resolved() -> str:
@@ -340,12 +346,18 @@ def first_failure_message(output_xml_path: str | None) -> str | None:
     onto no test in the raw file (every test stays PASS), so the first failed
     suite-level teardown keyword's text is the reason (Ruling R14).
 
-    None when there is no path, the file cannot be read or parsed, or nothing
-    failed. Never a parser error string: that would be stored as the reason.
+    None when there is no path, the file cannot be read or parsed, is larger
+    than _MAX_OUTPUT_XML_BYTES, or nothing failed. Never a parser error string:
+    that would be stored as the reason.
     """
     if not output_xml_path:
         return None
     try:
+        size = os.path.getsize(output_xml_path)
+        if size > _MAX_OUTPUT_XML_BYTES:
+            logger.warning("output.xml is %d bytes, over the %d-byte limit — no failure reason read",
+                           size, _MAX_OUTPUT_XML_BYTES)
+            return None
         root = ElementTree.parse(output_xml_path).getroot()
     except (OSError, ElementTree.ParseError) as e:
         logger.warning("Could not read output.xml for a failure reason: %s", e)
