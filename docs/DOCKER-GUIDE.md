@@ -276,7 +276,7 @@ Read the output — it will tell you exactly what's wrong. Common causes:
 |---|---|
 | `FileNotFoundError` or `env file not found` | You haven't created `src/backend/.env` yet — run `cp src/backend/.env.example src/backend/.env` |
 | `401` / `403` / `API key invalid` | Your `GEMINI_API_KEY` in `src/backend/.env` is wrong or empty |
-| `address already in use` on port 5000 or 4999 | Another app is using that port — stop it, or edit the port mapping in `docker-compose.yml` |
+| `address already in use` on port 5000 | Another app is using that port — stop it, or edit the port mapping in `docker-compose.yml` (the browser service publishes no host port: it has no login, so only containers on `nlrf-network` reach it) |
 
 ### "Browser service is still starting" (after 2+ minutes)
 
