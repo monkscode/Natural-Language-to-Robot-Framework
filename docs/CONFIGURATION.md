@@ -449,16 +449,17 @@ SECRETS_ENCRYPTION_KEY=<44-character Fernet key>
 ```
 
 Unset or malformed, the app still starts and logs one warning. The Secrets page then
-answers 503, and a request or test that names a secret is refused. Only fastapi reads
-the key: `docker-compose.yml` blanks it for runner-exec and browser-service. Generate
-one with:
+answers 503, and a request or test that names a secret is refused. Only fastapi uses
+the key (under Compose, `docker-compose.yml` also blanks it for runner-exec and
+browser-service). Generate one with:
 
 ```bash
 docker run --rm monkscode/nlrf:fastapi-latest python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 **Back it up.** It is the only copy. Lose it or change it, and every stored secret
-becomes unreadable. Members must then add each one again on the Secrets page.
+becomes unreadable. The Secrets page still lists their names, and every run that names
+one is refused until a member saves it again there.
 
 ### ENVIRONMENT / COOKIE_SECURE
 
