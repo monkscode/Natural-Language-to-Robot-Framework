@@ -51,6 +51,12 @@ from src.backend.crew_ai.optimization.execution_memory import CodeStructureExtra
 
 logger = logging.getLogger(__name__)
 
+# Both output.xml readers in the shared API process (this parser, for learning,
+# and failure_sentences.first_failure_message) refuse a file above this size: a
+# pasted test can log hundreds of MB, and ElementTree holds several times the
+# file in memory. Stored runs measured 2026-11-20: 380 files, max 11,748 bytes.
+_MAX_OUTPUT_XML_BYTES = 20 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Data Classes
@@ -154,6 +160,12 @@ class OutputXmlParser:
         - test_elapsed_ms: int
         """
         try:
+            size = os.path.getsize(output_xml_path)
+            if size > _MAX_OUTPUT_XML_BYTES:
+                logger.warning("[LEARNING] output.xml is %d bytes, over the %d-byte limit — not parsed",
+                               size, _MAX_OUTPUT_XML_BYTES)
+                return {"test_status": "error",
+                        "error_message": f"output.xml is {size} bytes, over the {_MAX_OUTPUT_XML_BYTES}-byte parse limit"}
             tree = ElementTree.parse(output_xml_path)
             root = tree.getroot()
 
