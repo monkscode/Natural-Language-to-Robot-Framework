@@ -50,7 +50,7 @@ _STRINGS = re.compile(
 _JS_HEX = re.compile(r"\\(\\|x([0-9a-fA-F]{2}))")
 _TEXT_SUFFIXES = {".txt", ".log"}
 # A test writes into its own run folder, so it can plant (or keep growing) a file of any size; the
-# scrub never reads more than this from one file, nor expands its compressed log.html text past it
+# scrub never reads more than one byte past this from one file, nor expands its compressed text past it
 # (docker_service's output.xml readers use it too). The API process has its own copy of the limit:
 # failure_analyzer._MAX_OUTPUT_XML_BYTES.
 MAX_REPORT_FILE_BYTES = 20 * 1024 * 1024
@@ -176,8 +176,8 @@ def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
     cannot be scrubbed does not stop the others: after all are done, ``ScrubError`` names it.
     A symlink, or a path that resolves outside ``run_dir`` (a test container can plant one), is
     skipped: never read, never written, neither changed nor failed. A report file holding more than
-    ``MAX_REPORT_FILE_BYTES`` is read no further than that: ``ScrubError`` names it, so the caller
-    deletes it.
+    ``MAX_REPORT_FILE_BYTES`` is read no further than one byte past that: ``ScrubError`` names it,
+    so the caller deletes it.
     """
     values = [v for v in values if v]
     if not values:
