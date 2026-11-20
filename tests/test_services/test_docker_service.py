@@ -363,17 +363,27 @@ def test_outer_error_scrubs_once_a_container_started_and_masks_the_text(tmp_path
     assert _MARK not in caplog.text
 
 
+@pytest.mark.parametrize("env", [None, {"NLRF_SECRET_PW": _MARK}], ids=["plain", "secrets"])
 @pytest.mark.parametrize("over", [True, False])
-def test_an_output_xml_over_the_size_limit_is_never_parsed_and_the_exit_code_decides(tmp_path, over):
+def test_an_output_xml_over_the_size_limit_is_never_parsed_and_never_green(tmp_path, over, env):
     # A test controls output.xml's size; parsing a multi-GB file whole would take the shared runner down.
-    # Exit code 0 against an output.xml that says FAIL shows which of the two decided.
+    # Exit code 0 (an all-skipped run gives it too) against an output.xml that says FAIL: over the limit
+    # the run is an error, never green (TODO row 28), even after the scrub deleted the file; at the
+    # limit the parsed file decides.
+    from src.backend.core import secret_scrub
     size = len(_OUTPUT_XML.encode())
-    with patch.object(docker_service, "MAX_REPORT_FILE_BYTES", size - 1 if over else size), \
+    limit = size - 1 if over else size
+    with patch.object(docker_service, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(secret_scrub, "MAX_REPORT_FILE_BYTES", limit), \
          patch.object(docker_service.ET, "parse", wraps=docker_service.ET.parse) as parse:
-        out, _ = _secret_run(tmp_path, env=None, scrub=MagicMock(), wait=lambda *a, **k: {"StatusCode": 0})
-    assert out["test_status"] == ("passed" if over else "failed")
-    assert parse.called is not over  # neither the verdict nor the log extractor parsed it
-    assert ("over the" in out["result"]["logs"]) is over
+        out, _ = _secret_run(
+            tmp_path, env=env, scrub=secret_scrub.scrub_run_dir, wait=lambda *a, **k: {"StatusCode": 0})
+    if over:
+        assert isinstance(out, RuntimeError)
+        assert "over the" in str(out)
+        assert not parse.called  # neither the verdict, the log extractor nor the scrub parsed it
+    else:
+        assert out["test_status"] == "failed"
 
 
 def test_system_error_text_masks_the_startup_logs(tmp_path, caplog):

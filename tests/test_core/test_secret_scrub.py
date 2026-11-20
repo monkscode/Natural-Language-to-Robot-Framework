@@ -210,7 +210,8 @@ def test_a_report_file_over_the_size_limit_is_never_read_and_is_reported(tmp_pat
         with pytest.raises(ScrubError) as err:
             scrub_run_dir(tmp_path, [MARK])
     assert err.value.files == [name]
-    assert name not in read and "small.log" in read
+    assert name not in read
+    assert "small.log" in read
     assert MARK in (tmp_path / name).read_text(encoding="utf-8")  # left for the caller to delete
     assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
 
