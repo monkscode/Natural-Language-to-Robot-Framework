@@ -386,6 +386,23 @@ def test_an_output_xml_over_the_size_limit_is_never_parsed_and_never_green(tmp_p
         assert out["test_status"] == "failed"
 
 
+def test_an_output_xml_the_scrub_grows_past_the_limit_is_never_parsed(tmp_path):
+    # Masking can grow the file: a one-character secret becomes "***" ("boom" -> "b******m"), so a
+    # file at the limit before the scrub can be over it after; the verdict re-measures.
+    from src.backend.core import secret_scrub
+    limit = len(_OUTPUT_XML.encode())
+    with patch.object(docker_service, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(secret_scrub, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(docker_service.ET, "parse", wraps=docker_service.ET.parse) as parse:
+        out, _ = _secret_run(
+            tmp_path, env={"NLRF_SECRET_PW": "o"}, scrub=secret_scrub.scrub_run_dir,
+            wait=lambda *a, **k: {"StatusCode": 0})
+    assert (tmp_path / "r1" / "output.xml").stat().st_size > limit  # the scrub grew it
+    assert isinstance(out, RuntimeError)
+    assert "over the" in str(out)
+    assert not parse.called
+
+
 def test_system_error_text_masks_the_startup_logs(tmp_path, caplog):
     out, _ = _secret_run(
         tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(return_value=[]),

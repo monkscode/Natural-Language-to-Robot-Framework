@@ -549,6 +549,8 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
 
         # Mask org-secret values in the run folder BEFORE anything reads output.xml.
         _scrub_secret_values(run_id, secret_values)
+        # Measured again: masking can grow it (a one-character secret becomes "***").
+        xml_too_big = xml_too_big or _over_size_limit(output_xml_path)
 
         log_html_path = os.path.join(ROBOT_TESTS_DIR, run_id, "log.html")
         report_html_path = os.path.join(ROBOT_TESTS_DIR, run_id, "report.html")
