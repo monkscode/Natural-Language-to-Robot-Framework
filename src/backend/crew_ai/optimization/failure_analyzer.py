@@ -35,7 +35,8 @@ Caught failures: OutputXmlParser reports the first FAIL keyword that is not
                   _is_caught_try_branch and _first_uncaught_failure live here
                   and core/failure_sentences.py imports them, so there is one
                   copy of that rule.
-Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor.
+Depends on: execution_memory.py (DAY_01) for CodeStructureExtractor;
+            core/secret_redaction.py (OutputXmlParser masks typed values).
 """
 
 import os
@@ -45,9 +46,16 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from xml.etree import ElementTree
 
+from src.backend.core.secret_redaction import redact_secrets
 from src.backend.crew_ai.optimization.execution_memory import CodeStructureExtractor
 
 logger = logging.getLogger(__name__)
+
+# Both output.xml readers in the shared API process (this parser, for learning,
+# and failure_sentences.first_failure_message) refuse a file above this size: a
+# pasted test can log hundreds of MB, and ElementTree holds several times the
+# file in memory. Stored runs measured 2026-11-20: 380 files, max 11,748 bytes.
+_MAX_OUTPUT_XML_BYTES = 20 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +160,12 @@ class OutputXmlParser:
         - test_elapsed_ms: int
         """
         try:
+            size = os.path.getsize(output_xml_path)
+            if size > _MAX_OUTPUT_XML_BYTES:
+                logger.warning("[LEARNING] output.xml is %d bytes, over the %d-byte limit — not parsed",
+                               size, _MAX_OUTPUT_XML_BYTES)
+                return {"test_status": "error",
+                        "error_message": f"output.xml is {size} bytes, over the {_MAX_OUTPUT_XML_BYTES}-byte parse limit"}
             tree = ElementTree.parse(output_xml_path)
             root = tree.getroot()
 
@@ -196,7 +210,7 @@ class OutputXmlParser:
                 "keyword_chain": keyword_chain,
                 "failed_keyword": failed_kw.name if failed_kw else None,
                 "failed_keyword_args": failed_keyword_args,
-                "error_message": error_message,
+                "error_message": redact_secrets(error_message),
                 "test_elapsed_ms": test_elapsed_ms,
             }
 

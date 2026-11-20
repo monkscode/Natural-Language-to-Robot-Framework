@@ -439,6 +439,29 @@ Running outside Compose (plain `docker run`, Kubernetes, more than one replica)
 without persisting `/app/data` puts the generated secret on a throwaway layer, so
 each restart and each replica signs with a different key. Set it explicitly there.
 
+### SECRETS_ENCRYPTION_KEY
+
+Fernet key that encrypts the org secrets stored on the **Secrets** page: the values a
+test request names as `{{NAME}}`.
+
+```env
+SECRETS_ENCRYPTION_KEY=<44-character Fernet key>
+```
+
+Unset or malformed, the app still starts and logs one warning. The Secrets page then
+answers 503, and a request or test that names a secret is refused. Only fastapi uses
+the key (under Compose, `docker-compose.yml` also blanks it for runner-exec and
+browser-service). Generate one with:
+
+```bash
+docker run --rm monkscode/nlrf:fastapi-latest python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+**Back it up.** It is the only copy. Lose it or change it, and every stored secret
+becomes unreadable. A lost key must be replaced with a new one first: until then the
+Secrets page answers 503. The page then lists the old names, and every run that names
+one is refused until a member saves it again there.
+
 ### ENVIRONMENT / COOKIE_SECURE
 
 ```env
@@ -528,9 +551,13 @@ Start it without the overlay: `docker compose up -d`
 
 ### Fully local (Ollama)
 
-`local` drives the backend LLM only. The browser service requires a Google vision
-model and does **not** support Ollama, so element detection still needs
-`GEMINI_API_KEY` or Vertex credentials.
+`MODEL_PROVIDER=local` is **not usable with the shipped launchers today**. The browser
+service reads the same `MODEL_PROVIDER` (`run.sh` and docker compose load the same
+`src/backend/.env`), requires a Google vision model and does not support Ollama. With
+`local`, browser-service refuses every element discovery call, so no element is found. Element detection needs
+`GEMINI_API_KEY` or Vertex credentials. The gap is tracked in
+[NLRF issue 190](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues/190). The
+block below shows the backend settings only. In `src/backend/.env` it reaches browser-service too.
 
 ```env
 MODEL_PROVIDER=local
@@ -606,7 +633,7 @@ variables:
 2. **Use secrets management** - For production deployments
 3. **Rotate API keys** - Regularly update keys
 4. **Limit key permissions** - Use least privilege
-5. **Use local models** - For sensitive data
+5. **Mind what leaves your network** - Element discovery sends page content to Gemini or Vertex
 
 ## Troubleshooting Configuration
 

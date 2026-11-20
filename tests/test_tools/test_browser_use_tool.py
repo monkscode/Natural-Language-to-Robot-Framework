@@ -241,6 +241,20 @@ class TestLocatorMappingFoundEntries:
         mapping = _run_mapping(tool, [result])
         assert "came_back" not in mapping["elem_1"]
 
+    def test_evidence_none_forwarded_on_a_not_found_entry(self, tool):
+        """bs #72: a call that named no element is refused with evidence 'none';
+        the mapping carries it so the Generate page can word it."""
+        result = _not_found("elem_1")
+        result["evidence"] = "none"
+        mapping = _run_mapping(tool, [result])
+        assert mapping["elem_1"]["found"] is False
+        assert mapping["elem_1"]["evidence"] == "none"
+
+    def test_evidence_key_absent_without_the_marker(self, tool):
+        mapping = _run_mapping(tool, [_not_found("elem_1"), _found("elem_2", "id=password")])
+        assert "evidence" not in mapping["elem_1"]
+        assert "evidence" not in mapping["elem_2"]
+
     def test_found_entry_includes_all_standard_fields(self, tool):
         """A found entry must carry best_locator, all_locators, validation,
         element_info, and found=True alongside the TomSelect fields."""
@@ -390,3 +404,38 @@ class TestPollInstrumentation:
         assert _merge_phase_timings(None, submit_s=0.05, poll_wait_s=4.37) == {
             "submit_s": 0.05, "poll_wait_s": 4.37,
         }
+
+
+# ─── #131 Part 2: the secrets map rides beside the steps ─────────────────────
+
+_MADE_UP = "x-made-up-1"
+
+
+def _posted_payload(tool, elements, **run_kwargs):
+    """Drive _run() and return the json= payload of the POST /workflow call."""
+    results = [_found("elem_1", "id=pw")]
+    with patch.object(BatchBrowserUseTool, "_health_check_with_retry", return_value=True), \
+         patch("tools.browser_use_tool.requests.post", return_value=_mock_post_202()) as post, \
+         patch.object(BrowserUseAPI, "query_task_status", return_value=_completed_response(results)):
+        tool._run(elements=elements, url="https://example.com", **run_kwargs)
+    return post.call_args.kwargs["json"]
+
+
+class TestSecretsMap:
+
+    def test_map_is_sent_beside_the_steps_unchanged(self, tool):
+        elements = [{"id": "elem_1", "description": "password", "action": "input", "value": "{{PW}}"}]
+        payload = _posted_payload(tool, elements, secrets={"PW": _MADE_UP})
+        assert payload["secrets"] == {"PW": _MADE_UP}
+        assert payload["elements"] == elements
+
+    @pytest.mark.parametrize("secrets", [None, {}])
+    def test_no_map_means_no_secrets_key(self, tool, secrets):
+        payload = _posted_payload(tool, [{"id": "elem_1"}], secrets=secrets)
+        assert "secrets" not in payload
+
+    def test_no_log_record_holds_the_value(self, tool, caplog):
+        with caplog.at_level("DEBUG"):
+            _posted_payload(tool, [{"id": "elem_1", "value": "{{PW}}"}], secrets={"PW": _MADE_UP})
+        assert caplog.records  # something was captured, so the next line cannot pass vacuously
+        assert _MADE_UP not in caplog.text

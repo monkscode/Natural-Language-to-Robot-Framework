@@ -24,7 +24,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install minimal build dependencies for robotframework
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir --upgrade "pip>=26.2.2" "uv>=0.13.4"
 
 # Install Robot Framework libraries (needed for libdoc generation)
 # These will NOT be in the final image - we only extract the JSON docs.
@@ -67,7 +67,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ARG INSTALL_S3=false
 
 # Install UV package manager
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir --upgrade "pip>=26.2.2" "uv>=0.13.4"
 
 # Install build dependencies (gcc, g++ needed for compiling Python packages)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -120,6 +120,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ca-certificates \
     gosu && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /usr/share/doc/* /usr/share/man/* /tmp/*
+
+# pip / uv floors = the eMudhra CA fix (2026-10-20): older versions trust the compromised
+# emSign ECC Root CA - G3, and python:3.12 images still bundle pip 25.0.1. The runtime
+# stage starts from a fresh base, so its pip needs the same upgrade.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2.2"
 
 # Copy installed Python packages from builder stage
 COPY --from=builder /build/install /usr/local

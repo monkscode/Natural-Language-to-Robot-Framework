@@ -23,16 +23,26 @@ The module has three jobs, all pure Python:
 No LLM, no network — the tool is injected as a plain callable.
 """
 
-import pytest
+import logging
+from unittest.mock import Mock, patch
 
+import pytest
+import structlog
+
+from src.backend.crew_ai import element_identification
 from src.backend.crew_ai.element_identification import (
+    _default_run_tool,
+    _fetch_locator_mapping,
     action_for_keyword,
     build_elements,
     change_waits_from,
     extract_plan_url,
     identify_elements,
     merge_locators,
+    not_found_lines,
+    not_found_notice,
     rewrite_form_description,
+    secret_fields,
     step_needs_locator,
 )
 
@@ -660,6 +670,55 @@ class TestBuildElements:
         assert elements == []
         assert step_element_ids == {}
 
+    # ── #162: a wait / hover / count / upload reads no value ────────────────
+
+    @pytest.mark.parametrize("keyword", [
+        "Wait For Elements State", "Wait Until Element Is Visible", "Hover",
+        "Get Element Count", "Upload File By Selector", "Upload File",
+        "Get Element States",  # a state check returns state flags, never text
+    ])
+    def test_a_locate_only_step_is_flagged(self, keyword):
+        elements, _ = build_elements([OPEN, _step(keyword, description="Dashboard heading")])
+        assert elements == [{
+            "id": "elem_1",
+            "description": "Dashboard heading",
+            "action": "get_text",  # unchanged: browser-service's prompts stay byte-identical
+            "locate_only": True,
+        }]
+
+    @pytest.mark.parametrize("keyword", [
+        "Get Text", "Get Texts", "Get Selected Options", "Get Attribute", "Get Classes",
+        "Get Elements", "Some Unknown Keyword",
+        "Wait Until Element Contains", "Wait For Condition", "Wait Until Keyword Succeeds",
+        "Hover And Get Text", "Upload And Get Text", "Get Element Count And Text",
+        "Click", "Fill Text", "Select Options By", "Press Keys",
+    ])
+    def test_a_step_that_reads_or_acts_is_not_flagged(self, keyword):
+        elements, _ = build_elements([OPEN, _step(keyword, description="status message", value="x")])
+        assert "locate_only" not in elements[0]
+
+    @pytest.mark.parametrize("other", ["Get Text", "Get Attribute", "Click", "Fill Text"])
+    @pytest.mark.parametrize("wait_first", [True, False])
+    @pytest.mark.parametrize("wait", ["Wait For Elements State", "Get Element States"])
+    def test_the_flag_needs_every_step_of_the_element_to_be_locate_only(self, wait, other, wait_first):
+        """"is displayed" + named words plans a wait AND a Get Text on one element: that element is read."""
+        pair = [
+            _step(wait, description="status message", value="visible"),
+            _step(other, description="status message", value="x"),
+        ]
+        elements, _ = build_elements([OPEN, *(pair if wait_first else reversed(pair))])
+        assert len(elements) == 1
+        assert "locate_only" not in elements[0]
+
+    def test_two_locate_only_steps_keep_the_flag(self):
+        steps = [
+            OPEN,
+            _step("Hover", description="Products menu"),
+            _step("Wait For Elements State", description="Products menu", value="visible"),
+        ]
+        elements, _ = build_elements(steps)
+        assert elements[0]["locate_only"] is True
+
 
 # ─── merge: stapling the full contract (port checklist #8) ───────────────────
 
@@ -1167,11 +1226,211 @@ class TestStageCompletionMessages:
                                  "elem_2": {"found": False}},
              "summary": {}},
         )
-        assert "1 of 2" in self._final_message(events)
+        final = self._final_message(events)
+        assert "1 of 2" in final
+        assert "placeholders" not in final
 
     def test_no_elements_needed_message(self):
         events = self._events_for([OPEN, CLOSE], {"status": "success"})
         assert "No page elements needed" in self._final_message(events)
+
+
+# ─── the not-found list (warn at generation) ─────────────────────────────────
+
+class TestNotFound:
+
+    @staticmethod
+    def _run(steps, response, query="q"):
+        calls = []
+
+        def run_tool(elements, url, user_query):
+            calls.append(elements)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        events = []
+        result = identify_elements(steps, query, run_tool=run_tool,
+                                   on_progress=lambda p, m: events.append((p, m)))
+        return result, calls, events
+
+    @staticmethod
+    def _ok(mapping):
+        return {"status": "success", "locator_mapping": mapping, "summary": {}}
+
+    SEARCH = _step("Input Text", description="search box", value="x")
+
+    def test_all_found_gives_empty_list(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH], self._ok({"elem_1": _mapping_entry(locator="name=q")}))
+        assert result["not_found"] == []
+
+    def test_record_not_found_is_not_found(self):
+        result, _, _ = self._run([OPEN, self.SEARCH], self._ok({"elem_1": {"found": False}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_record_without_locator_is_not_found(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH], self._ok({"elem_1": {"found": True, "best_locator": ""}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_evidence_none_is_nothing_checked(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH],
+            self._ok({"elem_1": {"found": False, "evidence": "none"}}))
+        assert result["not_found"] == [{"cause": "nothing_checked", "description": "search box"}]
+
+    def test_not_found_without_the_marker_stays_not_found(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH],
+            self._ok({"elem_1": {"found": False, "error": "Element not found"}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_crash_shaped_answer_is_not_checked(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH], {"status": "success", "locator_mapping": {}})
+        assert result["not_found"] == [{"cause": "not_checked", "description": "search box"}]
+
+    def test_tool_error_and_raise_are_not_checked(self):
+        for response in ({"status": "error"}, RuntimeError("down")):
+            result, _, _ = self._run([OPEN, self.SEARCH], response)
+            assert result["not_found"] == [
+                {"cause": "not_checked", "description": "search box"}]
+
+    def test_no_url_is_no_url_and_tool_not_called(self):
+        result, calls, _ = self._run(
+            [_step("Click", description="login button")], self._ok({}), query="login")
+        assert calls == []
+        assert result["not_found"] == [{"cause": "no_url", "description": "login button"}]
+
+    def test_no_description_step_is_named_and_counted(self):
+        result, _, events = self._run(
+            [OPEN, _step("Click", description="")], self._ok({}))
+        assert result["not_found"] == [{"cause": "no_description", "keyword": "Click"}]
+        assert [m for p, m in events if p == 60] == ["⚠️ Identified 0 of 1 elements"]
+
+    def test_folded_steps_give_one_entry(self):
+        result, _, _ = self._run(
+            [OPEN, self.SEARCH, _step("Press Keys", description="search box", value="Enter")],
+            self._ok({"elem_1": {"found": False}}))
+        assert result["not_found"] == [{"cause": "not_found", "description": "search box"}]
+
+    def test_step_without_locator_gives_no_entry(self):
+        result, _, _ = self._run([OPEN, CLOSE], self._ok({}))
+        assert result["not_found"] == []
+
+    def test_not_found_never_enters_the_steps(self):
+        import json
+        result, _, _ = self._run([OPEN, self.SEARCH], self._ok({"elem_1": {"found": False}}))
+        assert result["not_found"]
+        assert "cause" not in json.dumps({"steps": result["steps"]})
+        plan = [OPEN, self.SEARCH]
+        _, ids = build_elements(plan)
+        assert ids == {1: "elem_1"}
+        assert result["steps"] == merge_locators(plan, ids, {"elem_1": {"found": False}})
+
+
+class TestNotFoundCopy:
+
+    TITLE_ONE = "Delivered — 1 element was not found while this test was generated"
+    FOOTER = "You can still edit the code or run the test."
+
+    def test_lines_cd038b6b(self):
+        lines = not_found_lines(
+            [{"cause": "not_found", "description": "main heading on the page"}])
+        assert lines == [
+            self.TITLE_ONE,
+            ("“main heading on the page” — not found on the page, so the test has no working "
+             "locator for it and will most likely fail at that step. If the web address is "
+             "right and the element is on the page, describe it more specifically and "
+             "generate again."),
+            self.FOOTER,
+        ]
+
+    def test_lines_group_by_cause_in_order(self):
+        lines = not_found_lines([
+            {"cause": "no_description", "keyword": "Click"},
+            {"cause": "no_url", "description": "c"},
+            {"cause": "not_checked", "description": "a"},
+            {"cause": "no_description", "keyword": "Click"},
+            {"cause": "not_checked", "description": "b"},
+        ])
+        assert lines[0] == "Delivered — 5 elements were not found while this test was generated"
+        assert lines[1] == (
+            "“a”, “b” — the page could not be checked just now, so no locator was found "
+            "for them. Generate the test again in a minute.")
+        assert lines[2] == (
+            "“c” — not checked: your description has no web address, so no page was "
+            "opened. Add the page's address (for example https://example.com) and "
+            "generate again.")
+        assert lines[3] == (
+            "2 steps do not name an element (“Click”). Describe each element in your "
+            "test description and generate again.")
+        assert lines[4] == self.FOOTER
+        assert len(lines) == 5
+
+    def test_lines_several_not_found_and_one_no_description(self):
+        lines = not_found_lines([
+            {"cause": "not_found", "description": "a"},
+            {"cause": "not_found", "description": "b"},
+            {"cause": "no_description", "keyword": "Get Text"},
+        ])
+        assert lines[1] == (
+            "“a”, “b” — not found on the page, so the test has no working locator for them "
+            "and will most likely fail at those steps. If the web address is right and the "
+            "elements are on the page, describe them more specifically and generate again.")
+        assert lines[2] == (
+            "A “Get Text” step does not name an element. Describe the element in your test "
+            "description and generate again.")
+
+    def test_lines_nothing_checked_singular_and_plural(self):
+        one = not_found_lines([{"cause": "nothing_checked", "description": "a"}])
+        assert one == [
+            self.TITLE_ONE,
+            ("“a” — not found: the browser AI could not point at it on the page, so nothing "
+             "was checked and the test has no working locator for it. If the element is on "
+             "the page, describe it more specifically and generate again."),
+            self.FOOTER,
+        ]
+        several = not_found_lines([
+            {"cause": "nothing_checked", "description": "a"},
+            {"cause": "nothing_checked", "description": "b"},
+        ])
+        assert several[1] == (
+            "“a”, “b” — not found: the browser AI could not point at them on the page, so "
+            "nothing was checked and the test has no working locator for them. If the "
+            "elements are on the page, describe them more specifically and generate again.")
+
+    def test_lines_mixed_not_found_and_nothing_checked_in_order(self):
+        lines = not_found_lines([
+            {"cause": "no_description", "keyword": "Click"},
+            {"cause": "no_url", "description": "d"},
+            {"cause": "not_checked", "description": "c"},
+            {"cause": "nothing_checked", "description": "b"},
+            {"cause": "not_found", "description": "a"},
+        ])
+        assert lines[0] == "Delivered — 5 elements were not found while this test was generated"
+        assert lines[1].startswith("“a” — not found on the page,")
+        assert lines[2].startswith("“b” — not found: the browser AI could not point at it")
+        assert lines[3].startswith("“c” — the page could not be checked just now")
+        assert lines[4].startswith("“d” — not checked: your description has no web address")
+        assert lines[5].startswith("A “Click” step does not name an element")
+        assert lines[6] == self.FOOTER
+        two = not_found_lines([
+            {"cause": "not_found", "description": "a"},
+            {"cause": "nothing_checked", "description": "b"},
+        ])
+        assert two[0] == "Delivered — 2 elements were not found while this test was generated"
+        assert len(two) == 4
+
+    def test_lines_empty(self):
+        assert not_found_lines([]) == []
+
+    def test_notice_singular_and_plural(self):
+        assert not_found_notice(1) == (
+            "1 element was not found while generating — details in Generation Logs below")
+        assert not_found_notice(3) == (
+            "3 elements were not found while generating — details in Generation Logs below")
 
 
 # ─── orphan navigation rendering ─────────────────────────────────────────────
@@ -1636,3 +1895,235 @@ def test_both_refusal_reasons_at_once_log_one_warning(caplog):
     with caplog.at_level("WARNING", logger=_EI_LOGGER):
         assert change_waits_from(steps, ids, mapping) == []
     assert _refusals(caplog) == [_CAME_BACK_MESSAGE.format(id="elem_2")]
+
+
+# ─── org secrets: the map goes beside the steps to browser-service (#131 Part 2) ──
+
+_MARKER = "pw_marker_131"
+_SECRETS = "src.backend.auth.secrets"
+
+
+@pytest.fixture
+def signed_in():
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(user_id="user-1")
+    yield
+    structlog.contextvars.clear_contextvars()
+
+
+def _run(elements, response, store=None, org="org-1"):
+    """Call _fetch_locator_mapping with a recording runner and a patched store."""
+    sent = []
+    kwargs = []
+
+    def runner(els, url, query, **kw):
+        sent.append(els)
+        kwargs.append(kw)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    with patch(f"{_SECRETS}.org_of", return_value=org) as org_of, \
+            patch(f"{_SECRETS}.get_values", return_value=store or {}) as get_values:
+        out = _fetch_locator_mapping(elements, "https://x.test", "q", runner)
+    return out, sent, org_of, get_values, kwargs
+
+
+def _pw_elements():
+    return [{"id": "elem_1", "description": "password", "action": "input", "value": "{{PW}}"}]
+
+
+def test_secret_map_goes_beside_the_steps_and_the_answer_is_swapped_back(signed_in):
+    elements = _pw_elements()
+    response = {"status": "success", "locator_mapping": {"elem_1": {
+        "found": True, "best_locator": f"css=input[value='{_MARKER}']",
+        "all_locators": [{"locator": f"text={_MARKER}"}]}}}
+    out, sent, _, get_values, kwargs = _run(elements, response, {"PW": _MARKER})
+    assert sent[0] is elements  # the step keeps its name
+    assert sent[0][0]["value"] == "{{PW}}"
+    assert kwargs == [{"secrets": {"PW": _MARKER}}]
+    assert _MARKER not in repr(sent)
+    get_values.assert_called_once_with("org-1", {"PW"})
+    assert out["elem_1"]["best_locator"] == "css=input[value='{{PW}}']"
+    assert out["elem_1"]["all_locators"] == [{"locator": "text={{PW}}"}]
+    assert _MARKER not in repr(out)
+
+
+def test_name_in_braces_with_spaces_and_lower_case_is_a_secret(signed_in):
+    elements = [{"id": "e", "value": "{{ pw }}"}]
+    _, sent, _, get_values, kwargs = _run(elements, {"status": "success"}, {"PW": _MARKER})
+    assert sent[0][0]["value"] == "{{ pw }}"
+    assert kwargs == [{"secrets": {"PW": _MARKER}}]
+    get_values.assert_called_once_with("org-1", {"PW"})
+
+
+def test_value_that_only_contains_braces_is_left_alone(signed_in):
+    elements = [{"id": "e", "value": "x{{PW}}"}, {"id": "f", "value": "{{PW}}{{PW}}"}]
+    _, sent, org_of, get_values, kwargs = _run(elements, {"status": "success"}, {"PW": _MARKER})
+    assert sent[0] == elements
+    assert kwargs == [{}]
+    org_of.assert_not_called()
+    get_values.assert_not_called()
+
+
+def test_no_user_means_no_lookup_and_elements_unchanged():
+    structlog.contextvars.clear_contextvars()
+    elements = _pw_elements()
+    with patch(f"{_SECRETS}.org_of", return_value=None) as org_of, \
+            patch(f"{_SECRETS}.get_values") as get_values:
+        sent = []
+        _fetch_locator_mapping(elements, "u", "q", lambda e, u, q: sent.append(e) or {})
+    org_of.assert_called_once_with(None)
+    get_values.assert_not_called()
+    assert sent[0] == elements
+
+
+def test_user_without_org_means_no_lookup(signed_in):
+    elements = _pw_elements()
+    _, sent, _, get_values, kwargs = _run(elements, {}, org=None)
+    get_values.assert_not_called()
+    assert sent[0] == elements
+    assert kwargs == [{}]
+
+
+def test_a_plain_query_never_touches_the_store(signed_in):
+    elements = [{"id": "e", "description": "search", "value": "shoes"}]
+    _, sent, org_of, get_values, kwargs = _run(elements, {"status": "success"})
+    org_of.assert_not_called()
+    get_values.assert_not_called()
+    assert sent[0] is elements
+    assert kwargs == [{}]
+
+
+def test_name_the_store_no_longer_holds_is_left_out_of_the_map(signed_in):
+    elements = _pw_elements() + [{"id": "elem_2", "value": "{{OTHER}}"}]
+    _, sent, _, _, kwargs = _run(elements, {"status": "success"}, {"OTHER": _MARKER})
+    assert [e["value"] for e in sent[0]] == ["{{PW}}", "{{OTHER}}"]
+    assert kwargs == [{"secrets": {"OTHER": _MARKER}}]
+
+
+def test_get_values_errors_propagate(signed_in):
+    from src.backend.auth.secrets import SecretsUnavailable
+    with patch(f"{_SECRETS}.org_of", return_value="org-1"), \
+            patch(f"{_SECRETS}.get_values", side_effect=SecretsUnavailable("not set up")):
+        runner_calls = []
+        with pytest.raises(SecretsUnavailable):
+            _fetch_locator_mapping(
+                _pw_elements(), "u", "q", lambda e, u, q: runner_calls.append(e) or {})
+    assert runner_calls == []
+
+
+def test_an_unreadable_stored_value_stops_with_a_sentence_not_a_blank_error(signed_in):
+    from cryptography.fernet import InvalidToken
+    with patch(f"{_SECRETS}.org_of", return_value="org-1"), \
+            patch(f"{_SECRETS}.get_values", side_effect=InvalidToken()):
+        runner_calls = []
+        with pytest.raises(RuntimeError, match="Add them again on the Secrets page") as err:
+            _fetch_locator_mapping(
+                _pw_elements(), "u", "q", lambda e, u, q: runner_calls.append(e) or {})
+    assert "SECRETS_ENCRYPTION_KEY" in str(err.value)
+    assert err.value.__cause__ is None and err.value.__suppress_context__ is True
+    assert runner_calls == []
+
+
+def test_swap_back_reaches_dict_keys_nested_values_and_a_non_success_response(signed_in):
+    response = {
+        "status": "error", "message": f"typed {_MARKER}",
+        "locator_mapping": {f"k_{_MARKER}": {"nested": [{"s": f"a {_MARKER} b"}, (f"{_MARKER}",)],
+                                              "n": 3, "none": None}},
+    }
+    out = _run(_pw_elements(), response, {"PW": _MARKER})[0]
+    assert out == {"k_{{PW}}": {"nested": [{"s": "a {{PW}} b"}, ("{{PW}}",)], "n": 3, "none": None}}
+
+
+def test_the_whole_response_is_swapped_before_the_status_warning(signed_in, caplog):
+    response = {"status": f"bad {_MARKER}", "locator_mapping": {}}
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _run(_pw_elements(), response, {"PW": _MARKER})
+    assert _MARKER not in caplog.text
+    assert "bad {{PW}}" in caplog.text
+
+
+def test_longest_value_first_nothing_half_swapped(signed_in):
+    elements = [{"id": "a", "value": "{{SHORT}}"}, {"id": "b", "value": "{{LONG}}"}]
+    response = {"status": "success", "locator_mapping": {"x": {"s": "abcd1234 and abcd"}}}
+    out = _run(elements, response, {"SHORT": "abcd", "LONG": "abcd1234"})[0]
+    assert out == {"x": {"s": "{{LONG}} and {{SHORT}}"}}
+
+
+def test_runner_exception_with_a_value_logs_type_and_masked_text_without_traceback(signed_in, caplog):
+    with caplog.at_level(logging.ERROR, logger="src.backend.crew_ai.element_identification"):
+        out = _run(_pw_elements(), RuntimeError(f"bad request value={_MARKER}"), {"PW": _MARKER})[0]
+    assert out == {}
+    assert _MARKER not in caplog.text
+    assert "RuntimeError" in caplog.text and "***" in caplog.text
+    assert all(r.exc_info is None for r in caplog.records)
+    assert "Traceback" not in caplog.text
+
+
+def test_runner_exception_without_secrets_keeps_the_traceback_log(caplog):
+    structlog.contextvars.clear_contextvars()
+    with caplog.at_level(logging.ERROR, logger="src.backend.crew_ai.element_identification"):
+        out = _fetch_locator_mapping(
+            [{"id": "e", "value": "shoes"}], "u", "q",
+            lambda e, u, q: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert out == {}
+    records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(records) == 1 and records[0].exc_info is not None
+    assert records[0].getMessage().startswith("batch_browser_automation raised — steps fall back")
+
+
+def test_default_run_tool_forwards_the_map():
+    tool = Mock()
+    els = _pw_elements()
+    with patch.object(element_identification, "_batch_tool", tool):
+        _default_run_tool(els, "u", "q", secrets={"PW": "x-made-up-1"})
+        _default_run_tool(els, "u", "q")
+    assert tool._run.call_args_list[0].kwargs == {
+        "elements": els, "url": "u", "user_query": "q", "secrets": {"PW": "x-made-up-1"}}
+    assert tool._run.call_args_list[1].kwargs == {
+        "elements": els, "url": "u", "user_query": "q", "secrets": None}
+
+
+# ─── #166: the plan's typing steps on found fields, kept beside the steps ────
+
+def _merged_input(keyword, value, locator="id=p", found=True):
+    step = {"step_description": "s", "keyword": keyword, "element_description": "field", "value": value,
+            "found": found}
+    if locator is not None:
+        step["locator"] = locator
+    return step
+
+
+def test_secret_fields_list_every_typing_step_on_a_found_field_in_plan_order():
+    merged = [OPEN, _merged_input("Fill Text", "standard_user", "id=user-name"),
+              _merged_input("Input Text", "{{ sauce_password }}", "input[placeholder='Password']"),
+              _merged_input("Click", None, "id=login-button"), CLOSE]
+    assert secret_fields(merged) == (
+        ("id=user-name", None), ("input[placeholder='Password']", "SAUCE_PASSWORD"))
+
+
+def test_secret_fields_are_empty_without_a_secret_typing_step():
+    assert secret_fields([OPEN, _merged_input("Fill Text", "standard_user")]) == ()
+    assert secret_fields([]) == ()
+
+
+@pytest.mark.parametrize("step", [
+    _merged_input("Fill Text", "{{PW}}", locator=None, found=False),
+    _merged_input("Fill Text", "pre-{{PW}}"),
+    _merged_input("Press Keys", "{{PW}}"),
+    _merged_input("Get Text", "{{PW}}"),
+], ids=["not found", "inside longer text", "press keys", "a read"])
+def test_a_step_that_is_not_an_exact_secret_typed_into_a_found_field_gives_no_field(step):
+    assert secret_fields([OPEN, step]) == ()
+
+
+def test_identify_elements_returns_the_fields_beside_the_steps():
+    structlog.contextvars.clear_contextvars()  # no user: the stored value is never looked up
+    steps = [OPEN, _step("Fill Text", description="password field", value="{{PW}}"), CLOSE]
+    result = identify_elements(
+        steps, "type {{PW}} on https://example.com",
+        run_tool=lambda e, u, q: {"status": "success",
+                                  "locator_mapping": {"elem_1": _mapping_entry(locator="id=password")}})
+    assert result["secret_fields"] == (("id=password", "PW"),)
+    assert result["steps"][1]["value"] == "{{PW}}"  # the steps themselves are unchanged

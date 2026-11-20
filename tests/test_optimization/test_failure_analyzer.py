@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from src.backend.core.failure_sentences import first_failure_message
+from src.backend.core.secret_redaction import redact_secrets
 from src.backend.crew_ai.optimization.failure_analyzer import (
     KeywordResult,
     FailureAnalysis,
@@ -236,6 +237,26 @@ class TestOutputXmlParser:
             f"Parser: passing test -> test_status='passed': got '{result['test_status']}'"
         )
 
+    def test_output_xml_over_the_size_limit_is_not_parsed(self, tmp_dir):
+        """Learning runs in the shared API process on every run with a query; a
+        pasted test that logs hundreds of MB must not be parsed there."""
+        from unittest.mock import patch
+        import src.backend.crew_ai.optimization.failure_analyzer as fa
+        xml_path = _write_xml(tmp_dir, PASSING_XML, "too_big.xml")
+        with patch.object(fa, "_MAX_OUTPUT_XML_BYTES", os.path.getsize(xml_path) - 1), \
+             patch.object(fa.ElementTree, "parse") as parse:
+            result = OutputXmlParser().parse(xml_path)
+        parse.assert_not_called()
+        assert result["test_status"] == "error"
+        assert "limit" in result["error_message"]
+
+    def test_output_xml_at_the_size_limit_is_parsed(self, tmp_dir):
+        from unittest.mock import patch
+        import src.backend.crew_ai.optimization.failure_analyzer as fa
+        xml_path = _write_xml(tmp_dir, PASSING_XML, "at_limit.xml")
+        with patch.object(fa, "_MAX_OUTPUT_XML_BYTES", os.path.getsize(xml_path)):
+            assert OutputXmlParser().parse(xml_path)["test_status"] == "passed"
+
     def test_passing_test_no_error_message(self, tmp_dir):
         """Verify passing test has no error_message."""
         parser = OutputXmlParser()
@@ -363,6 +384,16 @@ class TestOutputXmlParser:
             f"msg='{(result.get('error_message') or '')[:80]}...'"
         )
 
+    def test_error_message_masks_a_typed_value(self, tmp_dir):
+        """A failed Fill Text quotes the typed value; learning must store ***."""
+        xml = FAILING_XML_KEYWORD_NOT_FOUND.replace(
+            "No keyword with name 'Input Text' found.",
+            'Error: fill("pw_marker_131") failed',
+        )
+        result = OutputXmlParser().parse(_write_xml(tmp_dir, xml, "typed_value.xml"))
+        assert "pw_marker_131" not in (result["error_message"] or "")
+        assert 'fill("***")' in result["error_message"]
+
 
 # ---------------------------------------------------------------------------
 # Test: OutputXmlParser reports the first UNCAUGHT failure (F1, Task 9)
@@ -429,7 +460,11 @@ class TestOutputXmlParserUncaughtFailure:
         result = OutputXmlParser().parse(str(_RF_FIXTURES / name))
         expected = _PINS[name]
         for key in ("test_status", "failed_keyword", "failed_keyword_args", "error_message"):
-            assert result[key] == expected[key], f"{name}: {key} moved"
+            want = expected[key]
+            if key == "error_message":
+                # The pins predate the redaction (#131): the only allowed move is a mask.
+                want = redact_secrets(want)
+            assert result[key] == want, f"{name}: {key} moved"
 
     @pytest.mark.parametrize("name", sorted(_CAUGHT_THEN_REAL))
     def test_caught_failure_gives_way_to_the_real_one(self, name):

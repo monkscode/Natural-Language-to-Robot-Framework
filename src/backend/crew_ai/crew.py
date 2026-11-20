@@ -25,7 +25,7 @@ class RunCrewResult(NamedTuple):
     A NamedTuple rather than a plain tuple so callers can read fields by name
     while every existing positional access keeps working. Members 0-4 are in
     their original order for exactly that reason; the additions are appended
-    rather than inserted (change_waits is one more appended member).
+    rather than inserted (change_waits, not_found and secret_fields are more appended members).
 
     shared_llm sits last despite being the more useful handle: llm_monitor is
     index 4 in released code and in test assertions, and reordering to put the
@@ -41,6 +41,8 @@ class RunCrewResult(NamedTuple):
     shared_llm: Any                # the CleanedLLMWrapper itself, for get_workflow_usage()
     guardrail_attempts: dict       # the main crew's RobotTasks counter (assembly_output)
     change_waits: tuple = ()       # F1: ({"read_locator", "action_locator"}, ...) — kept beside the steps
+    not_found: tuple = ()          # elements without a working locator, with the cause — kept beside the steps
+    secret_fields: tuple = ()      # #166: ((locator, NAME or None), ...) per plan typing step — kept beside the steps
 
 # CrewAI log file path and rotation settings
 CREWAI_LOG_FILE = "logs/crewai.log.txt"  # CrewAI appends .txt to paths not ending in .json/.txt
@@ -200,7 +202,10 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     """
     # Load library context based on configuration
     from src.backend.core.config import settings
-    from src.backend.crew_ai.library_context import get_library_context
+    from src.backend.crew_ai.library_context import (
+        assembler_base_context,
+        get_library_context,
+    )
 
     logger.info(f"🔧 Loading library context for: {settings.ROBOT_LIBRARY}")
     library_context = get_library_context(settings.ROBOT_LIBRARY)
@@ -330,8 +335,9 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 org_id=org_id,
             )
             
-            # Calculate baseline context size (full context)
-            baseline_context = library_context.code_assembly_context
+            # Baseline = the text the assembler gets without learned context
+            # (owner, 2026-10-16).
+            baseline_context = assembler_base_context(library_context)
             baseline_context_tokens = count_tokens(baseline_context, token_model)
             
             # Optimized context for the assembler; hints for BOTH agents.
@@ -422,7 +428,7 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize optimization system: {e}")
-            logger.warning("⚠️ Falling back to baseline behavior (full context)")
+            logger.warning("⚠️ Falling back to baseline behavior (base library text, no learned context)")
             assembler_context = None
             smart_provider = None
             optimization_metrics = None
@@ -577,6 +583,8 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
                 agents.llm._monitor, task_callback.stage_metrics, agents.llm,
                 dict(tasks.guardrail_attempts),
                 tuple(identification.get("change_waits") or ()),
+                tuple(identification.get("not_found") or ()),
+                tuple(identification.get("secret_fields") or ()),
             )
 
         except Exception as e:

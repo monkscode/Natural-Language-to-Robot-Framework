@@ -585,6 +585,7 @@ function TimelineResult({ result, copied, onCopy }: Readonly<{
  *  nothing is claimed about those. */
 const REASON_WORDS: Record<string, string> = {
   edited: 'description edited',
+  code_edited: 'code edited',
   regenerated: 'regenerated',
 }
 

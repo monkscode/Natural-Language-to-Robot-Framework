@@ -29,10 +29,12 @@ the caught-failure helpers _status, _first_uncaught_failure),
 xml.etree.ElementTree.
 """
 import logging
+import os
 from collections.abc import Iterator
 from xml.etree import ElementTree
 
 from src.backend.crew_ai.optimization.failure_analyzer import (
+    _MAX_OUTPUT_XML_BYTES,
     FailureClassifier,
     _first_uncaught_failure,
     _status,
@@ -61,9 +63,12 @@ def _page_load_timeout() -> str:
 
 def _element_never_resolved() -> str:
     return (
+        # A 503, bot-block page or login wall does not fail Playwright's goto,
+        # so the next locator times out and lands here.
         "The locator for this element never matched anything on the page. The "
-        "element may not exist, or the page may have changed since the test was "
-        "written."
+        "element may not exist, the page may have changed since the test was "
+        "written, or the site showed a block page, a login wall or an error "
+        "page instead."
     )
 
 
@@ -340,12 +345,18 @@ def first_failure_message(output_xml_path: str | None) -> str | None:
     onto no test in the raw file (every test stays PASS), so the first failed
     suite-level teardown keyword's text is the reason (Ruling R14).
 
-    None when there is no path, the file cannot be read or parsed, or nothing
-    failed. Never a parser error string: that would be stored as the reason.
+    None when there is no path, the file cannot be read or parsed, is larger
+    than _MAX_OUTPUT_XML_BYTES, or nothing failed. Never a parser error string:
+    that would be stored as the reason.
     """
     if not output_xml_path:
         return None
     try:
+        size = os.path.getsize(output_xml_path)
+        if size > _MAX_OUTPUT_XML_BYTES:
+            logger.warning("output.xml is %d bytes, over the %d-byte limit — no failure reason read",
+                           size, _MAX_OUTPUT_XML_BYTES)
+            return None
         root = ElementTree.parse(output_xml_path).getroot()
     except (OSError, ElementTree.ParseError) as e:
         logger.warning("Could not read output.xml for a failure reason: %s", e)

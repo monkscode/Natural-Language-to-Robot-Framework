@@ -21,6 +21,7 @@ from src.backend.crew_ai.llm_provider_routing import PROVIDER_PREFIXES
 # require_user/require_admin enforce JWT (and the admin role) per route.
 from src.backend.auth.jwt_utils import require_user, require_admin, is_validated_admin
 from src.backend.auth.ownership import caller_can_access, hint_mutation_verdict
+from src.backend.auth.secrets import require_query_secrets
 from src.backend.core.run_registry import get_run_registry
 
 router = APIRouter()
@@ -49,6 +50,7 @@ async def generate_test_only(query: Query, user: dict | None = Depends(require_u
     user_query = query.query
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided")
+    await asyncio.to_thread(require_query_secrets, user_query, user)
 
     model_provider = settings.MODEL_PROVIDER
     model_name = settings.LOCAL_MODEL if model_provider == "local" else settings.ONLINE_MODEL
@@ -303,6 +305,7 @@ async def generate_and_run_streaming(query: Query, user: dict | None = Depends(r
     user_query = query.query
     if not user_query:
         raise HTTPException(status_code=400, detail="Query not provided")
+    await asyncio.to_thread(require_query_secrets, user_query, user)
 
     model_provider = settings.MODEL_PROVIDER
     model_name = settings.LOCAL_MODEL if model_provider == "local" else settings.ONLINE_MODEL

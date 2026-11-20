@@ -30,6 +30,7 @@ from unittest.mock import MagicMock, patch
 
 from src.backend.crew_ai.prompts.components import PromptComponents
 from src.backend.crew_ai.library_context import BrowserLibraryContext
+from src.backend.crew_ai.library_context.base import assembler_base_context
 
 
 def _module_source(module) -> str:
@@ -176,9 +177,12 @@ class TestAssemblerBackstory:
         assert "Any text before *** Settings ***" not in backstory
 
     def test_still_carries_library_knowledge(self):
-        """code_assembly_context stays in the backstory (system) — the
-        description's duplicate copy is the one that goes (F1)."""
-        assert "BROWSER LIBRARY CODE STRUCTURE" in self._backstory()
+        """The base text (intro + core_rules) reaches the system prompt on
+        both learning paths (owner, 2026-10-16); the code-structure text no
+        longer does on the main call — only the repair call sends it."""
+        backstory = self._backstory()
+        assert "**BROWSER LIBRARY CORE RULES:**" in backstory
+        assert "BROWSER LIBRARY CODE STRUCTURE" not in backstory
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -196,8 +200,8 @@ class TestAssemblerDescription:
         assert "MANDATORY STRUCTURE" not in desc
 
     def test_viewport_block_not_duplicated(self):
-        """The viewport rule lives ONCE, in code_assembly_context (system).
-        The description's dedicated viewport block (~13 repetitions of the
+        """The viewport rule lives ONCE, in the system prompt (the main call
+        gets it through core_rules). The description's dedicated viewport block (~13 repetitions of the
         rule across the request) goes."""
         desc = _capture_assemble_description()
         assert "--- VIEWPORT CONFIGURATION" not in desc
@@ -451,12 +455,15 @@ class TestGetSelectedOptionsReturnShape:
         assert "==" in body
 
     def test_guidance_is_not_in_the_always_on_context(self):
-        """library_context is the assembler's always-on system prompt. This fact
-        costs tokens only on dropdown runs, matching the Task 24R F1/F2 dedup that
-        moved the Tom Select recipe out of that context and into this block."""
+        """The main call's always-on text is the base text (core_rules); the repair
+        call's is code_assembly_context. This fact costs tokens only on dropdown
+        runs, matching the Task 24R F1/F2 dedup that moved the Tom Select recipe
+        out of those texts and into this block."""
         from src.backend.crew_ai.library_context import get_library_context
 
-        assert "Get Selected Options" not in get_library_context("browser").code_assembly_context
+        lc = get_library_context("browser")
+        assert "Get Selected Options" not in lc.code_assembly_context
+        assert "Get Selected Options" not in assembler_base_context(lc)
 
 
 class TestWrongLibraryGhosts:
@@ -520,15 +527,21 @@ class TestCodeAssemblyContextSlimming:
 
     def test_tom_select_lives_only_in_dropdown_block(self):
         """The Tom Select JS recipe appeared ~8x per assembler request via
-        the double-shipped context. It belongs to DROPDOWN_HANDLING."""
-        cac = BrowserLibraryContext().code_assembly_context
-        assert "TOM SELECT" not in cac
-        assert "tomselect" not in cac
+        the double-shipped context. It belongs to DROPDOWN_HANDLING. Pinned on
+        both texts: the main call's base text and the repair call's
+        code_assembly_context."""
+        lc = BrowserLibraryContext()
+        for text in (lc.code_assembly_context, assembler_base_context(lc)):
+            assert "TOM SELECT" not in text
+            assert "tomselect" not in text
         assert "tomselect" in PromptComponents.DROPDOWN_HANDLING
 
     def test_keyword_reference_keeps_common_keywords(self):
         cac = BrowserLibraryContext().code_assembly_context
         assert "Common keywords:" in cac
         assert "keyword_search" not in cac
+
+    def test_base_text_has_no_keyword_search_tool_reference(self):
+        assert "keyword_search" not in assembler_base_context(BrowserLibraryContext())
     # NOTE: the viewport=None pin (q03 fix) lives in test_tasks_viewport.py,
-    # retargeted to code_assembly_context — the rule's one remaining home.
+    # on both the base text and code_assembly_context.

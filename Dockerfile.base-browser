@@ -11,7 +11,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 
-RUN pip install --no-cache-dir uv
+# Floors = the eMudhra CA fix (2026-10-20): older pip / uv trust the compromised
+# emSign ECC Root CA - G3. python:3.12 images still bundle pip 25.0.1.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2.2" "uv>=0.13.4"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \

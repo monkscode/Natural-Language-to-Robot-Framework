@@ -17,11 +17,14 @@ suite_teardown_failure.xml). No XML here is hand-written.
 Referenced by: none (test module).
 Depends on: src/backend/core/failure_sentences.py, pytest.
 """
+import os
 from pathlib import Path
+from unittest.mock import patch
 from xml.etree import ElementTree
 
 import pytest
 
+import src.backend.core.failure_sentences as fs
 from src.backend.core.failure_sentences import (
     _strip_rf_header,
     failure_category,
@@ -200,6 +203,18 @@ def test_click_intercepted_sentence_says_blocked_the_action_not_the_click():
     )
 
 
+def test_never_resolved_sentence_names_a_blocked_or_error_page():
+    """Playwright's goto does not fail on a 503, a bot-block page
+    or a login wall, so the next locator times out and this sentence is what
+    the user reads — it must name that cause too."""
+    assert failure_sentence(NEVER_RESOLVED) == (
+        "The locator for this element never matched anything on the page. The "
+        "element may not exist, the page may have changed since the test was "
+        "written, or the site showed a block page, a login wall or an error "
+        "page instead."
+    )
+
+
 def test_element_not_visible_sentence_does_not_claim_covered():
     """M4: a covered element is a different class (click_intercepted); this
     sentence's markers (not visible / resolved to hidden / outside the
@@ -293,6 +308,22 @@ def _timeout(action: str, selector: str) -> str:
 def test_a_single_failing_test_returns_its_full_multi_line_message():
     """All lines, not the first: the placeholder token lives in the call log."""
     assert first_failure_message(_xml("single_failure")) == _timeout("click", "#submit")
+
+
+def test_an_output_xml_over_the_size_limit_is_not_parsed():
+    """A pasted test can log hundreds of MB; the shared API must not parse that
+    in memory. Above the limit: no reason (None), never a parse."""
+    path = _xml("single_failure")
+    with patch.object(fs, "_MAX_OUTPUT_XML_BYTES", os.path.getsize(path) - 1), \
+         patch.object(fs.ElementTree, "parse") as parse:
+        assert first_failure_message(path) is None
+    parse.assert_not_called()
+
+
+def test_an_output_xml_at_the_size_limit_is_still_read():
+    path = _xml("single_failure")
+    with patch.object(fs, "_MAX_OUTPUT_XML_BYTES", os.path.getsize(path)):
+        assert first_failure_message(path) == _timeout("click", "#submit")
 
 
 def test_the_first_failing_test_is_read_not_the_first_test():

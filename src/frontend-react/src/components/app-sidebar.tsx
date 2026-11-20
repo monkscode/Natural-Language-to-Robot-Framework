@@ -40,6 +40,7 @@ import {
   Folder,
   ShieldCheck,
   Users,
+  KeyRound,
 } from 'lucide-react'
 import { useAuth } from '@/auth/AuthContext'
 import { gateAllowed, type GateFlags } from '@/auth/pageGates'
@@ -85,6 +86,7 @@ export const NAV_PLATFORM: NavItem[] = [
 // compares every nav entry's gate against the PAGES entry for the same
 // path, and a table it cannot see is a table that can drift.
 export const NAV_WORKSPACE: NavItem[] = [
+  { title: 'Secrets', url: '/secrets', icon: KeyRound, admin: false },
   { title: 'Settings', url: '/settings', icon: Settings, admin: true },
 ]
 

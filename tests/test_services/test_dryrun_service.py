@@ -28,6 +28,35 @@ import pytest
 import src.backend.services.dryrun_service as ds
 from src.backend.services import dryrun_service
 
+# bench/runs/a909c8eb-74bb-4088-b9ec-bee0c4bae0ca/artifacts/test.robot (q06 r2, baseline): a row loop over
+# `Get Elements` whose check runs zero times when nothing matches.
+Q06_CODE = """*** Settings ***
+Library    Browser    timeout=30s
+Library    BuiltIn
+Library    Collections
+
+*** Variables ***
+${browser}    chromium
+${headless}    True
+${url}    https://demoqa.com/webtables
+${search_box_locator}    id=searchBox
+${table_rows_locator}    tbody tr
+
+*** Test Cases ***
+Verify Web Table Search
+    [Documentation]    Navigate to DemoQA webtables, search for Cierra, and verify rows
+    New Browser    ${browser}    headless=${headless}
+    New Context    viewport={'width': 1920, 'height': 1080}
+    New Page    ${url}
+    Fill Text    ${search_box_locator}    Cierra
+    @{elements}=    Get Elements    ${table_rows_locator}
+    FOR    ${element}    IN    @{elements}
+        ${text}=    Get Text    ${element}
+        Exit For Loop If    len($text.strip()) == 0
+        Should Contain    ${text}    Cierra
+    END
+    Close Browser"""
+
 
 # ---------------------------------------------------------------------------
 # output.xml fixtures (mirror the S1 spike structures)
@@ -273,7 +302,7 @@ class TestValidateAndRepair:
              patch.object(ds, "repair_robot_code",
                           side_effect=lambda rid, code, errs, *a, **k: (MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+                          side_effect=lambda out, *_fields, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
@@ -328,6 +357,28 @@ class TestValidateAndRepair:
             out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
         assert out["dryrun_status"] == "failed"
         assert out["code"] == "code"  # unchanged — repair never produced new code
+        assert "message" not in out  # an unrecognised crash gets no provider sentence
+
+    def test_rate_limited_repair_still_delivers_and_says_rate_limited(self):
+        # A 429 in the repair call is the provider's, not the test's: the code
+        # still ships as failed, and the gate's message carries the same
+        # sentence a 429 elsewhere in the run would get.
+        import litellm
+        from src.backend.core.provider_errors import friendly_setup_error
+        err = litellm.RateLimitError(message='VertexAIException - {"error": {"code": 429}}',
+                                     llm_provider="vertex_ai", model="gemini-3.8-flash")
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=err):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code", "vertex", "m", None)
+        assert out["dryrun_status"] == "failed"
+        assert out["code"] == "code"
+        assert out["dryrun_errors"] == "bad kw"
+        expected = friendly_setup_error(err, "vertex")
+        assert expected and "429" in expected  # the rule matched: a real sentence, not None
+        assert out["message"] == expected
 
     def test_dryrun_infra_error_midloop_degrades_to_unverified(self):
         with patch.object(ds, "settings", self._settings()), \
@@ -426,7 +477,7 @@ class TestGateCounters:
              patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
              patch.object(ds, "repair_robot_code", side_effect=self._repair()), \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+                          side_effect=lambda out, *_fields, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
@@ -463,7 +514,7 @@ class TestGateCounters:
              patch.object(ds, "repair_robot_code",
                           side_effect=self._repair(guardrails={"repair_output": 2})), \
              patch.object(ds, "extract_and_normalize_robot_code",
-                          side_effect=lambda out, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
+                          side_effect=lambda out, *_fields, _c=[0]: f"code-v{(_c.__setitem__(0, _c[0]+1) or _c[0])}"):
             mock_rc.ensure_image.return_value = {"status": "ready"}
             mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
             out = ds.validate_and_repair("rid", "code-v0", "gemini", "m", None)
@@ -527,6 +578,35 @@ class TestExtractAndNormalize:
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert "\n" in out and "\\n" not in out
 
+    def test_escaped_code_with_a_trailing_real_newline_is_normalised(self):
+        """Edge whitespace is not structure: one escaped line plus a final real
+        newline still has no executable test until the `\\n` are converted."""
+        raw = "*** Settings ***\\nLibrary    Browser\\n*** Test Cases ***\\nT\\n    Log    hi\n"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "\\n" not in out and out.count("\n") >= 4
+
+    def test_escaped_code_with_a_leading_real_newline_is_normalised(self):
+        raw = "\n*** Settings ***\\nLibrary    Browser\\n*** Test Cases ***\\nT\\n    Log    hi"
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "\\n" not in out and out.count("\n") >= 4
+
+    def test_robot_newline_escape_in_a_multiline_code_is_kept(self):
+        """a930d718: `SEPARATOR=\\n` in a normal multi-line test is a Robot escape;
+        turning it into a real line break made `robot --dryrun` fail."""
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    ${t}=    Catenate    SEPARATOR=\\n    a    b\n"
+               "    Log    ${t}")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "SEPARATOR=\\n    a    b" in out
+        assert out.count("\n") == raw.count("\n")
+
+    def test_robot_tab_escape_in_a_multiline_code_is_kept(self):
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    Log    a\\tb")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "a\\tb" in out and "\t" not in out
+        assert out.count("\n") == raw.count("\n")
+
     def test_redundant_css_prefix_is_stripped_by_the_pipeline(self):
         """The strip is only worth anything if it is actually wired in here.
 
@@ -557,6 +637,24 @@ class TestExtractAndNormalize:
         assert "css=#searchBox" in out
         assert "css=input[id=foo]" in out
         assert "css=[data-x=y]" in out
+
+    _TYPED_READ = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+                   "    Fill Text    id=pw    {value}\n"
+                   "    ${{typed}}=    Get Attribute    id=pw    value\n"
+                   "    Should Be Equal    ${{typed}}    x")
+
+    def test_secret_placeholder_is_not_read_back_through_get_property(self):
+        """#131: the typed-value rewrite runs before the secret rewrite, so it must refuse a `{{NAME}}` file."""
+        raw = self._TYPED_READ.format(value="{{PW}}")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Fill Secret    id=pw    %NLRF_SECRET_PW" in out
+        assert "Get Property" not in out
+
+    def test_literal_typed_value_is_still_read_through_get_property(self):
+        raw = self._TYPED_READ.format(value="hunter2")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert "Get Property" in out
+        assert "Fill Secret" not in out
 
     def test_multiple_settings_blocks_uses_last(self):
         raw = ("*** Settings ***\nLibrary    OldLib\n\n"
@@ -741,7 +839,12 @@ class TestExtractAndNormalize:
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
         ("rewrite_text_checks_whole_word", _Q08_RAW,
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
-    ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises"])
+        ("rewrite_empty_loop_checks", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+        ("rewrite_secret_fills", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+    ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises",
+            "empty loop rewrite raises", "secret fill rewrite raises"])
     def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
             self, caplog, failing, raw, still_rewritten):
         with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),
@@ -753,6 +856,39 @@ class TestExtractAndNormalize:
         assert [r.getMessage() for r in warnings] == [
             f"{failing} failed; code left unchanged by it (non-blocking)"]
         assert warnings[0].exc_info is not None
+
+    def test_a_row_loop_gets_the_empty_guard_on_every_round(self):
+        guard = ("    Should Not Be Empty    ${elements}    "
+                 "msg=No matching element was found, so nothing was checked\n")
+        out = ds.extract_and_normalize_robot_code(self._task_output(pydantic=Q06_CODE))
+        assert out.count(guard) == 1
+        assert "    @{elements}=    Get Elements    ${table_rows_locator}\n" + guard in out
+        assert "Library    Browser    timeout=30s" in out
+        # a repair round passes the same cleanup again and must change nothing
+        assert ds.extract_and_normalize_robot_code(self._task_output(pydantic=out)) == out
+
+    _SECRET_RAW = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+                   "    Fill Text    id=user-name    standard_user\n"
+                   "    Fill Text    id=password    {{SAUCE_PASSWORD}}")
+
+    def test_a_typed_placeholder_becomes_a_secret_fill_on_every_round(self):
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=self._SECRET_RAW))
+        assert "    Fill Secret    id=password    %NLRF_SECRET_SAUCE_PASSWORD" in out
+        assert "{{" not in out
+        assert "    Fill Text    id=user-name    standard_user\n" in out
+        assert ds.extract_and_normalize_robot_code(self._task_output(pydantic=out)) == out
+
+    def test_the_secret_rewrite_runs_last_in_the_chain(self):
+        calls = []
+
+        def spy(name):
+            return lambda code: calls.append(name) or code
+
+        names = ("rewrite_select_text_reads", "rewrite_typed_value_reads", "rewrite_text_checks_whole_word",
+                 "rewrite_empty_loop_checks", "rewrite_secret_fills")
+        with patch.multiple(ds, **{n: spy(n) for n in names}):
+            ds.extract_and_normalize_robot_code(self._task_output(raw=self._SECRET_RAW))
+        assert calls == list(names)
 
     def test_selenium_suite_untouched(self):
         raw = "*** Settings ***\nLibrary    SeleniumLibrary\n*** Test Cases ***\nT\n    Log    hi"
@@ -947,6 +1083,63 @@ class TestRepairLlmIsHandedTheTestWithoutThePair:
         assert out["code"].count(_CW_WAIT) == 1
 
 
+_SF_CODE = (
+    "*** Settings ***\nLibrary    Browser\n\n"
+    "*** Variables ***\n${pw}    guess\n\n"
+    "*** Test Cases ***\nLogin\n"
+    "    New Page    https://x.test\n"
+    "    Fill Text    id=password    ${pw}\n"
+    "    Close Browser\n"
+)
+_SF_FIELDS = (("id=password", "PW"),)
+_SF_LINE = "    Fill Secret    id=password    %NLRF_SECRET_PW\n"
+
+
+class TestSecretFieldsReachEveryExtraction:
+    """#166: the plan's secret fields rewrite the generated test and every repaired one."""
+
+    @staticmethod
+    def _task_output(raw):
+        out = MagicMock()
+        out.pydantic = None
+        out.json_dict = None
+        out.raw = raw
+        return out
+
+    def test_the_extraction_types_the_field_as_the_secret(self):
+        out = ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE), _SF_FIELDS)
+        assert _SF_LINE in out
+        assert "guess" not in out
+
+    def test_without_fields_the_extraction_is_today(self):
+        out = ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE))
+        assert "    Fill Text    id=password    ${pw}\n" in out
+        assert "guess" in out
+        assert ds.extract_and_normalize_robot_code(self._task_output(_SF_CODE), ()) == out
+
+    def _gate(self, repaired_raw, **kwargs):
+        s = MagicMock(DRYRUN_ENABLED=True, MAX_DRYRUN_FIXES=2, DRYRUN_TIMEOUT=120)
+        with patch.object(ds, "settings", s), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(self._task_output(repaired_raw), {"llm_calls": 1, "cost": 0.001}, {})):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = [{"passed": False, "errors": "bad kw", "exit_code": 1},
+                                          {"passed": True, "errors": "", "exit_code": 0}]
+            return ds.validate_and_repair("rid", "broken", "gemini", "m", None, **kwargs)
+
+    def test_a_repair_that_guesses_the_value_again_is_linked_again(self):
+        out = self._gate(_SF_CODE, secret_fields=_SF_FIELDS)
+        assert out["dryrun_status"] == "passed"
+        assert _SF_LINE in out["code"]
+        assert "guess" not in out["code"]
+
+    def test_a_repair_without_fields_is_extracted_as_today(self):
+        for kwargs in ({}, {"secret_fields": ()}):
+            out = self._gate(_SF_CODE, **kwargs)
+            assert "guess" in out["code"], kwargs
+
+
 class TestChangeWaitsSurviveTheCleanup:
     """A repair round normalizes code that already holds the pair."""
 
@@ -1087,3 +1280,40 @@ def test_dryrun_container_mounts_only_the_runs_dryrun_directory(tmp_path):
     # Asserting the config dict alone passes even when the two paths disagree.
     mount_source = next(iter(captured["volumes"]))
     assert os.path.exists(os.path.join(mount_source, "dryrun.robot"))
+
+
+class TestRepairLlmIsHandedThePlaceholderNotTheEnvName:
+    """The repair LLM sees `{{NAME}}`; the gate checks, and the run returns, the `%NLRF_SECRET_NAME` form."""
+
+    _FAIL = {"passed": False, "errors": "bad kw", "exit_code": 1}
+    _PASS = {"passed": True, "errors": "", "exit_code": 0}
+    _PLACEHOLDER = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+                    "    Fill Text    id=password    {{SAUCE_PASSWORD}}\n    Close Browser\n")
+    _SECRET = _PLACEHOLDER.replace("Fill Text    id=password    {{SAUCE_PASSWORD}}",
+                                   "Fill Secret    id=password    %NLRF_SECRET_SAUCE_PASSWORD")
+
+    def _run(self, code, repaired, dryruns):
+        s = MagicMock()
+        s.DRYRUN_ENABLED = True
+        s.MAX_DRYRUN_FIXES = 2
+        s.DRYRUN_TIMEOUT = 120
+        with patch.object(ds, "settings", s), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code",
+                          return_value=(MagicMock(), {"llm_calls": 1, "cost": 0.001}, {})) as mock_repair, \
+             patch.object(ds, "extract_and_normalize_robot_code", return_value=repaired):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.side_effect = dryruns
+            out = ds.validate_and_repair("rid", code, "gemini", "m", None)
+        return out, mock_rc, mock_repair
+
+    def test_the_repair_gets_the_placeholder_and_the_dryrun_the_env_name(self):
+        out, mock_rc, mock_repair = self._run(self._SECRET, self._SECRET + "\n", [self._FAIL, self._PASS])
+        assert mock_rc.dryrun.call_args_list[0].args[1] == self._SECRET
+        assert mock_repair.call_args.args[1] == self._PLACEHOLDER
+        assert "%NLRF_SECRET_" not in mock_repair.call_args.args[1]
+        assert out["dryrun_status"] == "passed"
+
+    def test_code_without_an_env_name_is_handed_over_unchanged(self):
+        _, _, mock_repair = self._run(self._PLACEHOLDER, self._PLACEHOLDER + "\n", [self._FAIL, self._PASS])
+        assert mock_repair.call_args.args[1] == self._PLACEHOLDER
