@@ -109,12 +109,14 @@ services:
   browser-service:
     image: ${BROWSER_SERVICE_IMAGE_TAG:-monkscode/nlrf:browser-service-latest}
     container_name: nlrf-browser-service
-    # No published port, on purpose: this service has no login, and on Docker
-    # Desktop a test container reaches host-loopback ports through
-    # host.docker.internal (measured 2026-11-20: a default-bridge container got
-    # 200 from :4999/tasks), so any pasted test could list and read other users'
-    # discovery tasks and start new ones. fastapi reaches it as
-    # http://browser-service:4999 over nlrf-network. Health from the host:
+    # No published port, on purpose: this service has no login. Measured
+    # 2026-11-20 on Docker Desktop: a test container (default bridge) got 200
+    # from :4999/tasks through host.docker.internal AND through this
+    # container's nlrf-network IP — publishing a port opens both; an
+    # unpublished port answered neither. So a published port let any pasted
+    # test list and read other users' discovery tasks and start new ones.
+    # fastapi reaches it as http://browser-service:4999 over nlrf-network.
+    # Health from the host:
     # `docker inspect --format '{{.State.Health.Status}}' nlrf-browser-service`.
     volumes:
       # Shared logs directory
