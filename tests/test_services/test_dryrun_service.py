@@ -357,6 +357,28 @@ class TestValidateAndRepair:
             out = ds.validate_and_repair("rid", "code", "gemini", "m", None)
         assert out["dryrun_status"] == "failed"
         assert out["code"] == "code"  # unchanged — repair never produced new code
+        assert "message" not in out  # an unrecognised crash gets no provider sentence
+
+    def test_rate_limited_repair_still_delivers_and_says_rate_limited(self):
+        # A 429 in the repair call is the provider's, not the test's: the code
+        # still ships as failed, and the gate's message carries the same
+        # sentence a 429 elsewhere in the run would get.
+        import litellm
+        from src.backend.core.provider_errors import friendly_setup_error
+        err = litellm.RateLimitError(message='VertexAIException - {"error": {"code": 429}}',
+                                     llm_provider="vertex_ai", model="gemini-3.8-flash")
+        with patch.object(ds, "settings", self._settings(max_fixes=2)), \
+             patch("src.backend.services.dryrun_service.runner_exec_client") as mock_rc, \
+             patch.object(ds, "repair_robot_code", side_effect=err):
+            mock_rc.ensure_image.return_value = {"status": "ready"}
+            mock_rc.dryrun.return_value = {"passed": False, "errors": "bad kw", "exit_code": 1}
+            out = ds.validate_and_repair("rid", "code", "vertex", "m", None)
+        assert out["dryrun_status"] == "failed"
+        assert out["code"] == "code"
+        assert out["dryrun_errors"] == "bad kw"
+        expected = friendly_setup_error(err, "vertex")
+        assert expected and "429" in expected  # the rule matched: a real sentence, not None
+        assert out["message"] == expected
 
     def test_dryrun_infra_error_midloop_degrades_to_unverified(self):
         with patch.object(ds, "settings", self._settings()), \

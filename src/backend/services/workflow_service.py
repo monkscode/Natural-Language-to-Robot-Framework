@@ -1050,7 +1050,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # produced no output.xml) and only the gate knows which; it records
             # that in `message`, and dryrun_errors cannot carry it because only
             # the 'failed' exit sets that key. Without this the client had
-            # nothing to show and had to assert one hard-coded cause.
+            # nothing to show and had to assert one hard-coded cause. A 'failed'
+            # gate carries `message` too when the provider refused a repair call.
             if gate.get("message"):
                 complete_event["dryrun_message"] = redact_secrets(gate["message"])
         yield complete_event

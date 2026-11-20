@@ -61,6 +61,7 @@ from src.backend.crew_ai.robot_code_normalizer import (
     strip_redundant_css_prefix,
 )
 from src.backend.core.artifact_store import get_artifact_store, make_shared_dir
+from src.backend.core.provider_errors import friendly_provider_error, friendly_setup_error
 from src.backend.services.docker_service import (
     IMAGE_TAG,
     normalize_docker_mount_source,
@@ -596,6 +597,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
         {"code": <possibly-repaired code>,
          "dryrun_status": "passed" | "failed" | "unverified" | "skipped",
          "dryrun_errors": <str, only when failed>,
+         "message": <str, only when unverified (why), or failed after the provider
+                     refused a repair call (its setup, rate-limit or no-answer sentence)>,
          "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>,
          "dryrun_attempts": <int, dryruns invoked>,
          "dryrun_repairs": <int, repair rounds invoked>,
@@ -664,6 +667,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
 
     code = robot_code
     last_result = None
+    provider_hint = None
     try:
         for attempt in range(settings.MAX_DRYRUN_FIXES + 1):
             # Advance the bar to 88 on the first verify only; re-verifies after a
@@ -707,6 +711,9 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                         "🔬 DRYRUN: repair attempt failed — stopping (non-blocking): %s",
                         e, exc_info=True,
                     )
+                    # A 429 / 503 / timeout here is the provider's, not the test's:
+                    # the same sentence the workflow gives it, carried as the gate's message.
+                    provider_hint = friendly_setup_error(e, model_provider) or friendly_provider_error(e)
                     break
                 finally:
                     # finally, not the success path: a repair that raised still
@@ -732,4 +739,5 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
 
     # Loop exhausted (or broke early) without a pass → failed, but STILL delivered.
     return _result(code=code, dryrun_status="failed",
-                   dryrun_errors=last_result["errors"] if last_result else "")
+                   dryrun_errors=last_result["errors"] if last_result else "",
+                   **({"message": provider_hint} if provider_hint else {}))
