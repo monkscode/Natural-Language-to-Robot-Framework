@@ -439,6 +439,27 @@ Running outside Compose (plain `docker run`, Kubernetes, more than one replica)
 without persisting `/app/data` puts the generated secret on a throwaway layer, so
 each restart and each replica signs with a different key. Set it explicitly there.
 
+### SECRETS_ENCRYPTION_KEY
+
+Fernet key that encrypts the org secrets stored on the **Secrets** page: the values a
+test request names as `{{NAME}}`.
+
+```env
+SECRETS_ENCRYPTION_KEY=<44-character Fernet key>
+```
+
+Unset or malformed, the app still starts and logs one warning. The Secrets page then
+answers 503, and a request or test that names a secret is refused. Only fastapi reads
+the key: `docker-compose.yml` blanks it for runner-exec and browser-service. Generate
+one with:
+
+```bash
+docker run --rm monkscode/nlrf:fastapi-latest python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+**Back it up.** It is the only copy. Lose it or change it, and every stored secret
+becomes unreadable. Members must then add each one again on the Secrets page.
+
 ### ENVIRONMENT / COOKIE_SECURE
 
 ```env
