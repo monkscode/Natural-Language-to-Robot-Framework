@@ -1,6 +1,7 @@
 """Task 6 of #131: a secret's value is masked in a finished run's report folder."""
 
 import base64
+import io
 import json
 import logging
 import os
@@ -188,32 +189,37 @@ def test_one_unscrubbable_file_does_not_stop_the_others(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["big.xml", "big.html", "big.log"])
-def test_a_report_file_over_the_size_limit_is_never_read_and_is_reported(tmp_path, name):
+def test_a_report_file_over_the_size_limit_is_reported_unchanged(tmp_path, name):
     # A test writes into its own output folder: a multi-GB file read whole would take the runner down.
     (tmp_path / name).write_text(MARK + "x" * 100, encoding="utf-8")
     (tmp_path / "small.log").write_text(MARK, encoding="utf-8")
     limit = (tmp_path / "small.log").stat().st_size  # a file exactly at the limit is still scrubbed
-    read = []
-    real_read_bytes, real_parse = Path.read_bytes, ET.parse
-
-    def track_read(path):
-        read.append(Path(path).name)
-        return real_read_bytes(path)
-
-    def track_parse(source, *args, **kwargs):
-        read.append(Path(source).name)
-        return real_parse(source, *args, **kwargs)
-
-    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", limit), \
-         patch.object(Path, "read_bytes", track_read), \
-         patch("src.backend.core.secret_scrub.ET.parse", track_parse):
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", limit):
         with pytest.raises(ScrubError) as err:
             scrub_run_dir(tmp_path, [MARK])
     assert err.value.files == [name]
-    assert name not in read
-    assert "small.log" in read
     assert MARK in (tmp_path / name).read_text(encoding="utf-8")  # left for the caller to delete
     assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
+
+
+def test_a_file_that_keeps_growing_is_read_once_and_never_past_the_limit(tmp_path):
+    # A size check taken first proves nothing about a container Docker failed to stop: it can keep
+    # writing. The one read asks for limit + 1 bytes; an endless file stands in for the growing one.
+    (tmp_path / "grow.log").write_text("x", encoding="utf-8")
+    asked = []
+
+    class Endless(io.BytesIO):
+        def read(self, size=-1):
+            assert size >= 0, "an unbounded read"
+            asked.append(size)
+            return b"x" * size
+
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", 10), \
+         patch("src.backend.core.secret_scrub.open", lambda *a, **k: Endless(), create=True):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == ["grow.log"]
+    assert asked == [11]
 
 
 @pytest.mark.parametrize("entries", [["0" * 5000], ["0" * 600, "0" * 600]], ids=["one", "together"])

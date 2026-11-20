@@ -381,7 +381,7 @@ def test_an_output_xml_over_the_size_limit_is_never_parsed_and_never_green(tmp_p
     if over:
         assert isinstance(out, RuntimeError)
         assert "over the" in str(out)
-        assert not parse.called  # neither the verdict, the log extractor nor the scrub parsed it
+        assert not parse.called  # neither the verdict nor the log extractor parsed it
     else:
         assert out["test_status"] == "failed"
 
