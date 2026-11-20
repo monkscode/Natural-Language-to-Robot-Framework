@@ -1395,6 +1395,10 @@ async def sweep_abandoned_runs_forever() -> None:
 # loop holds tasks weakly, so an unreferenced one can be collected mid-run.
 _detached_jobs: set[asyncio.Task] = set()
 _JOB_DONE = object()
+# A quiet relay sends an SSE comment this often. A proxy in front of the API
+# cuts a stream that sends nothing (AWS ALB 60 s, Cloudflare 100 s idle), and a
+# test run is silent for as long as it runs. Every client skips non-data lines.
+_RELAY_HEARTBEAT_S = 15
 
 
 async def _pump_job(job, events: asyncio.Queue, reader_gone: asyncio.Event, name: str) -> None:
@@ -1440,7 +1444,16 @@ def _detached(job_fn):
         _detached_jobs.add(task)
         task.add_done_callback(_detached_jobs.discard)
         try:
-            while (item := await events.get()) is not _JOB_DONE:
+            while True:
+                try:
+                    # A timed-out get() leaves the queue untouched: an item is
+                    # only taken when get() returns.
+                    item = await asyncio.wait_for(events.get(), _RELAY_HEARTBEAT_S)
+                except TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is _JOB_DONE:
+                    break
                 if isinstance(item, Exception):
                     raise item
                 yield item
