@@ -215,7 +215,7 @@ def test_a_file_that_keeps_growing_is_read_once_and_never_past_the_limit(tmp_pat
             return b"x" * size
 
     with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", 10), \
-         patch("src.backend.core.secret_scrub.open", lambda *a, **k: Endless(), create=True):
+         patch("src.backend.core.secret_scrub.open", return_value=Endless(), create=True):
         with pytest.raises(ScrubError) as err:
             scrub_run_dir(tmp_path, [MARK])
     assert err.value.files == ["grow.log"]

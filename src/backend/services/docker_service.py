@@ -542,14 +542,14 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             logging.error(
                 f"❌ DOCKER SERVICE: Failed to remove container {container_name}: {_m(str(e))}")
 
+        # Use Robot Framework output files instead of Docker container logs
+        output_xml_path = os.path.join(ROBOT_TESTS_DIR, run_id, "output.xml")
         # Measured before the scrub, which deletes an over-limit output.xml without reading it.
-        xml_too_big = _over_size_limit(os.path.join(ROBOT_TESTS_DIR, run_id, "output.xml"))
+        xml_too_big = _over_size_limit(output_xml_path)
 
         # Mask org-secret values in the run folder BEFORE anything reads output.xml.
         _scrub_secret_values(run_id, secret_values)
 
-        # Use Robot Framework output files instead of Docker container logs
-        output_xml_path = os.path.join(ROBOT_TESTS_DIR, run_id, "output.xml")
         log_html_path = os.path.join(ROBOT_TESTS_DIR, run_id, "log.html")
         report_html_path = os.path.join(ROBOT_TESTS_DIR, run_id, "report.html")
 
