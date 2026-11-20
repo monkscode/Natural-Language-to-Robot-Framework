@@ -363,6 +363,19 @@ def test_outer_error_scrubs_once_a_container_started_and_masks_the_text(tmp_path
     assert _MARK not in caplog.text
 
 
+@pytest.mark.parametrize("over", [True, False])
+def test_an_output_xml_over_the_size_limit_is_never_parsed_and_the_exit_code_decides(tmp_path, over):
+    # A test controls output.xml's size; parsing a multi-GB file whole would take the shared runner down.
+    # Exit code 0 against an output.xml that says FAIL shows which of the two decided.
+    size = len(_OUTPUT_XML.encode())
+    with patch.object(docker_service, "MAX_REPORT_FILE_BYTES", size - 1 if over else size), \
+         patch.object(docker_service.ET, "parse", wraps=docker_service.ET.parse) as parse:
+        out, _ = _secret_run(tmp_path, env=None, scrub=MagicMock(), wait=lambda *a, **k: {"StatusCode": 0})
+    assert out["test_status"] == ("passed" if over else "failed")
+    assert parse.called is not over  # neither the verdict nor the log extractor parsed it
+    assert ("over the" in out["result"]["logs"]) is over
+
+
 def test_system_error_text_masks_the_startup_logs(tmp_path, caplog):
     out, _ = _secret_run(
         tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(return_value=[]),

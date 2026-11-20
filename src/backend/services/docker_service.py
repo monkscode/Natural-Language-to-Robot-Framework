@@ -45,7 +45,9 @@ DOCKERFILE_PATH = os.path.join(os.path.dirname(
 # resolution below stays here — that is an execution concern, not storage.
 from src.backend.core.artifact_store import STAGING_ROOT
 from src.backend.core.config import settings
-from src.backend.core.secret_scrub import ScrubError, is_inside, mask_values, scrub_run_dir
+from src.backend.core.secret_scrub import (
+    MAX_REPORT_FILE_BYTES, ScrubError, is_inside, mask_values, scrub_run_dir,
+)
 ROBOT_TESTS_DIR = str(STAGING_ROOT)
 
 # Docker-in-Docker Support: When running inside a Docker container, we need to use
@@ -310,6 +312,18 @@ def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, 
             raise
 
 
+def _over_size_limit(path: str) -> int | None:
+    """The file's size when it is over MAX_REPORT_FILE_BYTES, else None (also when it is missing).
+
+    The test controls output.xml's size; ElementTree holds several times the file in memory.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    return size if size > MAX_REPORT_FILE_BYTES else None
+
+
 def _scrub_secret_values(run_id: str, values: list[str]) -> None:
     """Mask org-secret values in the run folder; anything that cannot be masked is deleted.
 
@@ -553,7 +567,10 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         # Check test results from Robot Framework output files
         logging.info(
             f"🔍 DOCKER SERVICE: Analyzing test results from Robot Framework files")
-        if os.path.exists(output_xml_path):
+        if (too_big := _over_size_limit(output_xml_path)) is not None:
+            logging.warning(
+                f"⚠️  DOCKER SERVICE: output.xml is {too_big} bytes, over the {MAX_REPORT_FILE_BYTES}-byte limit — not parsed")
+        elif os.path.exists(output_xml_path):
             logging.info(
                 f"✅ DOCKER SERVICE: Found output.xml file, parsing test results")
             try:
@@ -736,7 +753,11 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
     logs.append("=" * 50)
 
     # Try to extract information from output.xml
-    if os.path.exists(output_xml_path):
+    if (too_big := _over_size_limit(output_xml_path)) is not None:
+        logging.warning(
+            f"⚠️  LOG EXTRACTOR: output.xml is {too_big} bytes, over the {MAX_REPORT_FILE_BYTES}-byte limit — not parsed")
+        logs.append(f"output.xml is {too_big} bytes, over the {MAX_REPORT_FILE_BYTES}-byte limit, so it was not read")
+    elif os.path.exists(output_xml_path):
         logging.info(
             f"✅ LOG EXTRACTOR: Found output.xml file, parsing XML content")
         try:

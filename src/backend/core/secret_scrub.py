@@ -50,8 +50,8 @@ _STRINGS = re.compile(
 _JS_HEX = re.compile(r"\\(\\|x([0-9a-fA-F]{2}))")
 _TEXT_SUFFIXES = {".txt", ".log"}
 # A test writes into its own run folder, so it can plant a file of any size; the runner never reads
-# one above this whole. The API process has its own copy of the limit:
-# failure_analyzer._MAX_OUTPUT_XML_BYTES.
+# one above this whole (docker_service's output.xml readers use it too). The API process has its
+# own copy of the limit: failure_analyzer._MAX_OUTPUT_XML_BYTES.
 MAX_REPORT_FILE_BYTES = 20 * 1024 * 1024
 # RF-generated output.xml attributes: masking them (e.g. a value "FAIL" or "1234") breaks result parsing.
 _XML_BOOKKEEPING = frozenset({
