@@ -79,8 +79,9 @@ COLD_START_END = "✅ Browser session started successfully"
 CLEANUP_START = "🧹 Starting browser cleanup..."
 CLEANUP_END = "🧹 Cleanup complete"
 
-# Read timeout must outlast the silent Docker-execution phase (no SSE bytes
-# while robot runs in the container).
+# The relay sends ": heartbeat" every 15 s while robot runs in the container,
+# so this read timeout fires only if the server stops sending altogether (the
+# server itself gives up on execute after 1800 + 60 s, runner_exec/client.py).
 CONNECT_TIMEOUT_S = 10
 READ_TIMEOUT_S = 1800
 METRICS_ROW_RETRIES = 10
@@ -376,8 +377,8 @@ def queue_partial_detach(workflow_id: str | None, pending: list) -> None:
     which dies mid-flight is still attributable to an id. A generation-phase
     failure is therefore detachable too, where it used to leak (see the
     no-id branch below, which is now reachable only if the stream dies before
-    the very first chunk). The realistic read-timeout window is still the
-    EXECUTION phase — the long Docker one.
+    the very first chunk). The longest wait is still the EXECUTION phase — the
+    long Docker one — though heartbeats now keep the read open through it.
 
     That is not detached here either. The stream dying is not the
     RUN dying: at that moment the server is still blocked in
