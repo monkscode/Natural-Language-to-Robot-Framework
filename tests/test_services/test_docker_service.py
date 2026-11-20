@@ -363,6 +363,47 @@ def test_outer_error_scrubs_once_a_container_started_and_masks_the_text(tmp_path
     assert _MARK not in caplog.text
 
 
+@pytest.mark.parametrize("env", [None, {"NLRF_SECRET_PW": _MARK}], ids=["plain", "secrets"])
+@pytest.mark.parametrize("over", [True, False])
+def test_an_output_xml_over_the_size_limit_is_never_parsed_and_never_green(tmp_path, over, env):
+    # A test controls output.xml's size; parsing a multi-GB file whole would take the shared runner down.
+    # Exit code 0 (an all-skipped run gives it too) against an output.xml that says FAIL: over the limit
+    # the run is an error, never green (TODO row 28), even after the scrub deleted the file; at the
+    # limit the parsed file decides.
+    from src.backend.core import secret_scrub
+    size = len(_OUTPUT_XML.encode())
+    limit = size - 1 if over else size
+    with patch.object(docker_service, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(secret_scrub, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(docker_service.ET, "parse", wraps=docker_service.ET.parse) as parse:
+        out, _ = _secret_run(
+            tmp_path, env=env, scrub=secret_scrub.scrub_run_dir, wait=lambda *a, **k: {"StatusCode": 0})
+    if over:
+        assert isinstance(out, RuntimeError)
+        assert "over the" in str(out)
+        assert not parse.called  # neither the verdict nor the log extractor parsed it
+    else:
+        assert out["test_status"] == "failed"
+
+
+def test_an_output_xml_the_scrub_grows_past_the_limit_is_never_parsed(tmp_path):
+    # Masking can grow the file: a one-character secret becomes "***" ("All Tests" -> "***ll Tests"),
+    # so a file exactly at the limit before the scrub is over it after; the verdict re-measures. (The
+    # error path's second scrub then deletes the grown file, so its size is not asserted here; "A"
+    # is absent from the error text, which is masked too.)
+    from src.backend.core import secret_scrub
+    limit = len(_OUTPUT_XML.encode())
+    with patch.object(docker_service, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(secret_scrub, "MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(docker_service.ET, "parse", wraps=docker_service.ET.parse) as parse:
+        out, _ = _secret_run(
+            tmp_path, env={"NLRF_SECRET_PW": "A"}, scrub=secret_scrub.scrub_run_dir,
+            wait=lambda *a, **k: {"StatusCode": 0})
+    assert isinstance(out, RuntimeError)
+    assert "over the" in str(out)
+    assert not parse.called
+
+
 def test_system_error_text_masks_the_startup_logs(tmp_path, caplog):
     out, _ = _secret_run(
         tmp_path, env={"NLRF_SECRET_PW": _MARK}, scrub=MagicMock(return_value=[]),

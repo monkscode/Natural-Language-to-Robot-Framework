@@ -95,7 +95,7 @@ export default function SecretsPage() {
         <CardHeader className="pb-4">
           <CardTitle className="text-sm">Secrets</CardTitle>
           <CardDescription className="text-xs">
-            Passwords and keys your tests type. Values are encrypted and never shown again.
+            Passwords and keys your tests type. Values are encrypted and never shown on this page again.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -108,6 +108,10 @@ export default function SecretsPage() {
           </p>
           <p className="text-xs text-muted-foreground">
             Every member of your organization can use, replace and delete these.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            A member who runs a test that uses a secret can read its value through that test, so
+            store only what every member may know.
           </p>
           {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
           {notice && <p role="status" className="text-xs">{notice}</p>}

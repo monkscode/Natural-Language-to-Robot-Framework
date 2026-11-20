@@ -1,6 +1,7 @@
 """Task 6 of #131: a secret's value is masked in a finished run's report folder."""
 
 import base64
+import io
 import json
 import logging
 import os
@@ -185,6 +186,53 @@ def test_one_unscrubbable_file_does_not_stop_the_others(tmp_path):
     assert "log.html" in str(err.value) and MARK not in str(err.value)
     assert MARK not in (tmp_path / "output.xml").read_text(encoding="utf-8")
     assert MARK not in (tmp_path / "playwright-log.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["big.xml", "big.html", "big.log"])
+def test_a_report_file_over_the_size_limit_is_reported_unchanged(tmp_path, name):
+    # A test writes into its own output folder: a multi-GB file read whole would take the runner down.
+    (tmp_path / name).write_text(MARK + "x" * 100, encoding="utf-8")
+    (tmp_path / "small.log").write_text(MARK, encoding="utf-8")
+    limit = (tmp_path / "small.log").stat().st_size  # a file exactly at the limit is still scrubbed
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", limit):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == [name]
+    assert MARK in (tmp_path / name).read_text(encoding="utf-8")  # left for the caller to delete
+    assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
+
+
+def test_a_file_that_keeps_growing_is_read_once_and_never_past_the_limit(tmp_path):
+    # A size check taken first proves nothing about a container Docker failed to stop: it can keep
+    # writing. The one read asks for limit + 1 bytes; an endless file stands in for the growing one.
+    (tmp_path / "grow.log").write_text("x", encoding="utf-8")
+    asked = []
+
+    class Endless(io.BytesIO):
+        def read(self, size=-1):
+            assert size >= 0, "an unbounded read"
+            asked.append(size)
+            return b"x" * size
+
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", 10), \
+         patch("src.backend.core.secret_scrub.open", return_value=Endless(), create=True):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == ["grow.log"]
+    assert asked == [11]
+
+
+@pytest.mark.parametrize("entries", [["0" * 5000], ["0" * 600, "0" * 600]], ids=["one", "together"])
+def test_compressed_entries_that_expand_past_the_limit_fail_the_file(tmp_path, entries):
+    # A small log.html can hold a zlib bomb (deflate reaches ~1000:1), one entry or many.
+    (tmp_path / "evil.html").write_text(_html(["*"] + [_z(e) for e in entries]), encoding="utf-8")
+    (tmp_path / "small.log").write_text(MARK, encoding="utf-8")
+    assert (tmp_path / "evil.html").stat().st_size < 1000  # passes the file-size check
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", 1000):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == ["evil.html"]
+    assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
 
 
 def test_returned_names_are_relative_paths(tmp_path):

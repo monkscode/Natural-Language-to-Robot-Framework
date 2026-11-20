@@ -45,7 +45,9 @@ DOCKERFILE_PATH = os.path.join(os.path.dirname(
 # resolution below stays here — that is an execution concern, not storage.
 from src.backend.core.artifact_store import STAGING_ROOT
 from src.backend.core.config import settings
-from src.backend.core.secret_scrub import ScrubError, is_inside, mask_values, scrub_run_dir
+from src.backend.core.secret_scrub import (
+    MAX_REPORT_FILE_BYTES, ScrubError, is_inside, mask_values, scrub_run_dir,
+)
 ROBOT_TESTS_DIR = str(STAGING_ROOT)
 
 # Docker-in-Docker Support: When running inside a Docker container, we need to use
@@ -310,6 +312,18 @@ def build_image(client: docker.DockerClient) -> Generator[dict[str, Any], None, 
             raise
 
 
+def _over_size_limit(path: str) -> int | None:
+    """The file's size when it is over MAX_REPORT_FILE_BYTES, else None (also when it is missing).
+
+    The test controls output.xml's size; ElementTree holds several times the file in memory.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    return size if size > MAX_REPORT_FILE_BYTES else None
+
+
 def _scrub_secret_values(run_id: str, values: list[str]) -> None:
     """Mask org-secret values in the run folder; anything that cannot be masked is deleted.
 
@@ -528,11 +542,16 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
             logging.error(
                 f"❌ DOCKER SERVICE: Failed to remove container {container_name}: {_m(str(e))}")
 
-        # Mask org-secret values in the run folder BEFORE anything reads output.xml.
-        _scrub_secret_values(run_id, secret_values)
-
         # Use Robot Framework output files instead of Docker container logs
         output_xml_path = os.path.join(ROBOT_TESTS_DIR, run_id, "output.xml")
+        # Measured before the scrub, which deletes an over-limit output.xml without reading it.
+        xml_too_big = _over_size_limit(output_xml_path)
+
+        # Mask org-secret values in the run folder BEFORE anything reads output.xml.
+        _scrub_secret_values(run_id, secret_values)
+        # Measured again: masking can grow it (a one-character secret becomes "***").
+        xml_too_big = xml_too_big or _over_size_limit(output_xml_path)
+
         log_html_path = os.path.join(ROBOT_TESTS_DIR, run_id, "log.html")
         report_html_path = os.path.join(ROBOT_TESTS_DIR, run_id, "report.html")
 
@@ -553,7 +572,13 @@ def run_test_in_container(client: docker.DockerClient, run_id: str, test_filenam
         # Check test results from Robot Framework output files
         logging.info(
             f"🔍 DOCKER SERVICE: Analyzing test results from Robot Framework files")
-        if os.path.exists(output_xml_path):
+        if xml_too_big is not None:
+            # Never green on the exit code alone: 0 also means every test was skipped, and a run
+            # that verified nothing must not show as passed.
+            raise RuntimeError(
+                f"output.xml is {xml_too_big:,} bytes, over the {MAX_REPORT_FILE_BYTES // (1024 * 1024)} MB "
+                "limit, so the test result was not read. Make the test log less, then run it again.")
+        elif os.path.exists(output_xml_path):
             logging.info(
                 f"✅ DOCKER SERVICE: Found output.xml file, parsing test results")
             try:
@@ -736,7 +761,11 @@ def _extract_robot_framework_logs(output_xml_path: str, log_html_path: str, exit
     logs.append("=" * 50)
 
     # Try to extract information from output.xml
-    if os.path.exists(output_xml_path):
+    if (too_big := _over_size_limit(output_xml_path)) is not None:
+        logging.warning(
+            f"⚠️  LOG EXTRACTOR: output.xml is {too_big} bytes, over the {MAX_REPORT_FILE_BYTES}-byte limit — not parsed")
+        logs.append(f"output.xml is {too_big} bytes, over the {MAX_REPORT_FILE_BYTES}-byte limit, so it was not read")
+    elif os.path.exists(output_xml_path):
         logging.info(
             f"✅ LOG EXTRACTOR: Found output.xml file, parsing XML content")
         try:

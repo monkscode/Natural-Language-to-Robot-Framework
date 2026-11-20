@@ -49,6 +49,11 @@ _STRINGS = re.compile(
 # A JS \xNN escape (JSON has none); the pair form skips an escaped backslash before an x.
 _JS_HEX = re.compile(r"\\(\\|x([0-9a-fA-F]{2}))")
 _TEXT_SUFFIXES = {".txt", ".log"}
+# A test writes into its own run folder, so it can plant (or keep growing) a file of any size; the
+# scrub never reads more than one byte past this from one file, nor expands its compressed text past it
+# (docker_service's output.xml readers use it too). The API process has its own copy of the limit:
+# failure_analyzer._MAX_OUTPUT_XML_BYTES.
+MAX_REPORT_FILE_BYTES = 20 * 1024 * 1024
 # RF-generated output.xml attributes: masking them (e.g. a value "FAIL" or "1234") breaks result parsing.
 _XML_BOOKKEEPING = frozenset({
     "status", "start", "elapsed", "time", "level", "id", "line",
@@ -88,7 +93,18 @@ def _js_unescape_hex(array_js: str) -> str:
     return _JS_HEX.sub(lambda m: m.group(0) if m.group(2) is None else "\\u00" + m.group(2), array_js)
 
 
-def _scrub_strings_array(array_js: str, values: list[str]) -> str:
+def _inflate(entry: str, budget: list[int]) -> str:
+    """One compressed entry's text, charged to its file's budget. ValueError past the budget (a
+    zlib bomb: deflate reaches ~1000:1) or on a cut-short stream; the file then fails closed."""
+    inflater = zlib.decompressobj()
+    raw = inflater.decompress(base64.b64decode(entry), budget[0] + 1)  # max_length 0 means no limit
+    if not inflater.eof or len(raw) > budget[0]:
+        raise ValueError("compressed text over the size limit, or cut short")
+    budget[0] -= len(raw)
+    return raw.decode("utf-8")
+
+
+def _scrub_strings_array(array_js: str, values: list[str], budget: list[int]) -> str:
     """The array with every entry masked; the input itself when nothing changed."""
     entries = json.loads(_js_unescape_hex(array_js))
     out = []
@@ -96,7 +112,7 @@ def _scrub_strings_array(array_js: str, values: list[str]) -> str:
         if entry.startswith("*"):
             out.append("*" + mask_values(entry[1:], values))
             continue
-        text = zlib.decompress(base64.b64decode(entry)).decode("utf-8")
+        text = _inflate(entry, budget)
         masked = mask_values(text, values)
         out.append(entry if masked == text else base64.b64encode(zlib.compress(masked.encode("utf-8"), 9)).decode("ascii"))
     if out == entries:
@@ -107,12 +123,23 @@ def _scrub_strings_array(array_js: str, values: list[str]) -> str:
 
 
 def _scrub_html(src: str, values: list[str]) -> str:
-    return _STRINGS.sub(lambda m: m.group(1) + _scrub_strings_array(m.group(2), values) + m.group(3), src)
+    budget = [MAX_REPORT_FILE_BYTES]  # what all of this file's compressed entries may expand to, together
+    return _STRINGS.sub(lambda m: m.group(1) + _scrub_strings_array(m.group(2), values, budget) + m.group(3), src)
+
+
+def _read_bounded(path: Path) -> bytes:
+    """The file's bytes from ONE read of at most MAX_REPORT_FILE_BYTES + 1; ValueError when it holds
+    more. One read, not a size check first: a container Docker failed to stop can still be writing."""
+    with open(path, "rb") as f:
+        data = f.read(MAX_REPORT_FILE_BYTES + 1)
+    if len(data) > MAX_REPORT_FILE_BYTES:
+        raise ValueError("report file over the size limit")
+    return data
 
 
 def _scrub_xml(path: Path, values: list[str]) -> bool:
     try:
-        tree = ET.parse(path)
+        tree = ET.ElementTree(ET.fromstring(_read_bounded(path)))
     except ET.ParseError:
         return _scrub_text(path, values)
     dirty = False
@@ -134,7 +161,7 @@ def _scrub_xml(path: Path, values: list[str]) -> bool:
 
 
 def _scrub_text(path: Path, values: list[str], fn=mask_values) -> bool:
-    src = path.read_bytes().decode("utf-8", errors="replace")
+    src = _read_bounded(path).decode("utf-8", errors="replace")
     out = fn(src, values)
     if out == src:
         return False
@@ -148,7 +175,9 @@ def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
     Images and other binary files are left alone. Nothing is logged but file names. A file that
     cannot be scrubbed does not stop the others: after all are done, ``ScrubError`` names it.
     A symlink, or a path that resolves outside ``run_dir`` (a test container can plant one), is
-    skipped: never read, never written, neither changed nor failed.
+    skipped: never read, never written, neither changed nor failed. A report file holding more than
+    ``MAX_REPORT_FILE_BYTES`` is read no further than one byte past that: ``ScrubError`` names it,
+    so the caller deletes it.
     """
     values = [v for v in values if v]
     if not values:
