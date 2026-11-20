@@ -597,6 +597,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
         {"code": <possibly-repaired code>,
          "dryrun_status": "passed" | "failed" | "unverified" | "skipped",
          "dryrun_errors": <str, only when failed>,
+         "message": <str, only when unverified (why), or failed after the provider
+                     refused a repair call (its rate-limit / no-answer sentence)>,
          "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>,
          "dryrun_attempts": <int, dryruns invoked>,
          "dryrun_repairs": <int, repair rounds invoked>,
