@@ -62,7 +62,7 @@ def _page_load_timeout() -> str:
 def _element_never_resolved() -> str:
     return (
         # A 503, bot-block page or login wall does not fail Playwright's goto,
-        # so the next locator times out and lands here (TODO row 39).
+        # so the next locator times out and lands here.
         "The locator for this element never matched anything on the page. The "
         "element may not exist, the page may have changed since the test was "
         "written, or the site showed a block page, a login wall or an error "

@@ -201,7 +201,7 @@ def test_click_intercepted_sentence_says_blocked_the_action_not_the_click():
 
 
 def test_never_resolved_sentence_names_a_blocked_or_error_page():
-    """TODO row 39: Playwright's goto does not fail on a 503, a bot-block page
+    """Playwright's goto does not fail on a 503, a bot-block page
     or a login wall, so the next locator times out and this sentence is what
     the user reads — it must name that cause too."""
     assert failure_sentence(NEVER_RESOLVED) == (
