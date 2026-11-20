@@ -215,6 +215,19 @@ def test_a_report_file_over_the_size_limit_is_never_read_and_is_reported(tmp_pat
     assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
 
 
+@pytest.mark.parametrize("entries", [["0" * 5000], ["0" * 600, "0" * 600]], ids=["one", "together"])
+def test_compressed_entries_that_expand_past_the_limit_fail_the_file(tmp_path, entries):
+    # A small log.html can hold a zlib bomb (deflate reaches ~1000:1), one entry or many.
+    (tmp_path / "evil.html").write_text(_html(["*"] + [_z(e) for e in entries]), encoding="utf-8")
+    (tmp_path / "small.log").write_text(MARK, encoding="utf-8")
+    assert (tmp_path / "evil.html").stat().st_size < 1000  # passes the file-size check
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", 1000):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == ["evil.html"]
+    assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
+
+
 def test_returned_names_are_relative_paths(tmp_path):
     (tmp_path / "dryrun").mkdir()
     (tmp_path / "dryrun" / "playwright-log.txt").write_text(MARK, encoding="utf-8")
