@@ -75,7 +75,7 @@ describe('SecretsPage — list and copy', () => {
     expect(await screen.findByText('SAUCE_PASSWORD')).toBeInTheDocument()
     expect(screen.getByText('Secrets')).toBeInTheDocument()
     expect(screen.getByText(
-      'Passwords and keys your tests type. Values are encrypted and never shown again.',
+      'Passwords and keys your tests type. Values are encrypted and never shown on this page again.',
     )).toBeInTheDocument()
     expect(screen.getByText(/Write \{\{NAME\}\} in a test request/)).toBeInTheDocument()
     expect(screen.getByText(/The AI that writes your test sees only the name; the test reads the value when it runs\./)).toBeInTheDocument()
@@ -84,6 +84,10 @@ describe('SecretsPage — list and copy', () => {
     expect(screen.queryByText(/never sees the value/)).not.toBeInTheDocument()
     expect(screen.getByText('Every member of your organization can use, replace and delete these.'))
       .toBeInTheDocument()
+    // A test can read a value it is given (log it reversed, send it to a URL); masking cannot stop that.
+    expect(screen.getByText(
+      'A member who runs a test that uses a secret can read its value through that test, so store only what every member may know.',
+    )).toBeInTheDocument()
     expect(screen.getByText(
       'Upload a .env file — one NAME=value per line. Names you already have are replaced.',
     )).toBeInTheDocument()
