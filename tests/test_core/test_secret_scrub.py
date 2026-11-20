@@ -187,6 +187,34 @@ def test_one_unscrubbable_file_does_not_stop_the_others(tmp_path):
     assert MARK not in (tmp_path / "playwright-log.txt").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("name", ["big.xml", "big.html", "big.log"])
+def test_a_report_file_over_the_size_limit_is_never_read_and_is_reported(tmp_path, name):
+    # A test writes into its own output folder: a multi-GB file read whole would take the runner down.
+    (tmp_path / name).write_text(MARK + "x" * 100, encoding="utf-8")
+    (tmp_path / "small.log").write_text(MARK, encoding="utf-8")
+    limit = (tmp_path / "small.log").stat().st_size  # a file exactly at the limit is still scrubbed
+    read = []
+    real_read_bytes, real_parse = Path.read_bytes, ET.parse
+
+    def track_read(path):
+        read.append(Path(path).name)
+        return real_read_bytes(path)
+
+    def track_parse(source, *args, **kwargs):
+        read.append(Path(source).name)
+        return real_parse(source, *args, **kwargs)
+
+    with patch("src.backend.core.secret_scrub.MAX_REPORT_FILE_BYTES", limit), \
+         patch.object(Path, "read_bytes", track_read), \
+         patch("src.backend.core.secret_scrub.ET.parse", track_parse):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(tmp_path, [MARK])
+    assert err.value.files == [name]
+    assert name not in read and "small.log" in read
+    assert MARK in (tmp_path / name).read_text(encoding="utf-8")  # left for the caller to delete
+    assert (tmp_path / "small.log").read_text(encoding="utf-8") == "***"
+
+
 def test_returned_names_are_relative_paths(tmp_path):
     (tmp_path / "dryrun").mkdir()
     (tmp_path / "dryrun" / "playwright-log.txt").write_text(MARK, encoding="utf-8")

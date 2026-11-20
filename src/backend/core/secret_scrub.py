@@ -49,6 +49,10 @@ _STRINGS = re.compile(
 # A JS \xNN escape (JSON has none); the pair form skips an escaped backslash before an x.
 _JS_HEX = re.compile(r"\\(\\|x([0-9a-fA-F]{2}))")
 _TEXT_SUFFIXES = {".txt", ".log"}
+# A test writes into its own run folder, so it can plant a file of any size; the runner never reads
+# one above this whole. The API process has its own copy of the limit:
+# failure_analyzer._MAX_OUTPUT_XML_BYTES.
+MAX_REPORT_FILE_BYTES = 20 * 1024 * 1024
 # RF-generated output.xml attributes: masking them (e.g. a value "FAIL" or "1234") breaks result parsing.
 _XML_BOOKKEEPING = frozenset({
     "status", "start", "elapsed", "time", "level", "id", "line",
@@ -148,7 +152,8 @@ def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
     Images and other binary files are left alone. Nothing is logged but file names. A file that
     cannot be scrubbed does not stop the others: after all are done, ``ScrubError`` names it.
     A symlink, or a path that resolves outside ``run_dir`` (a test container can plant one), is
-    skipped: never read, never written, neither changed nor failed.
+    skipped: never read, never written, neither changed nor failed. A report file larger than
+    ``MAX_REPORT_FILE_BYTES`` is never read: ``ScrubError`` names it, so the caller deletes it.
     """
     values = [v for v in values if v]
     if not values:
@@ -162,6 +167,9 @@ def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
         suffix = path.suffix.lower()
         name = path.relative_to(root).as_posix()
         try:
+            if suffix in (".xml", ".html", *_TEXT_SUFFIXES) and path.stat().st_size > MAX_REPORT_FILE_BYTES:
+                failed.append(name)  # too big to read whole: it keeps any value, so it fails closed
+                continue
             if suffix == ".xml":
                 did = _scrub_xml(path, values)
             elif suffix == ".html":
