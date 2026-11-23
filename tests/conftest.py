@@ -70,6 +70,41 @@ os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 SESSION_LOG_DIR = Path(tempfile.mkdtemp(prefix="nlrf_test_logs_"))
 os.environ["LOG_DIR"] = str(SESSION_LOG_DIR)
 
+# A readable cl100k_base tokenizer for litellm, set before anything imports litellm.
+# litellm/litellm_core_utils/default_encoding.py reads CUSTOM_TIKTOKEN_CACHE_DIR ONCE,
+# at import, and loads cl100k_base right there; litellm.main triggers that import on
+# the first gemini / vertex completion. tiktoken checks the bundled file's sha256
+# and on a mismatch DELETES it from the venv and downloads it from
+# openaipublic.blob.core.windows.net (the network guard refuses that, so the call
+# fails with APIConnectionError). litellm 1.105.3's win_amd64 wheel ships that file
+# with CRLF line endings, so the hash fails on Windows; an LF-normalised copy in a
+# session temp dir passes, and on a valid file (Linux CI) the copy is byte-identical.
+# Pinned here, not in a fixture: a per-test patch only works for the test that
+# happens to trigger the first import.
+def _pin_valid_tiktoken_cache() -> None:
+    import atexit
+    import hashlib
+    import importlib.util
+    import shutil
+
+    spec = importlib.util.find_spec("litellm")  # locates it without importing it
+    if spec is None or not spec.submodule_search_locations:
+        return
+    # tiktoken names its cache file by the sha1 of the URL it would download
+    key = hashlib.sha1(
+        b"https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    ).hexdigest()
+    bundled = Path(spec.submodule_search_locations[0]) / "litellm_core_utils" / "tokenizers" / key
+    if not bundled.is_file():
+        return
+    cache_dir = Path(tempfile.mkdtemp(prefix="nlrf_test_tiktoken_"))
+    (cache_dir / key).write_bytes(bundled.read_bytes().replace(b"\r\n", b"\n"))
+    os.environ["CUSTOM_TIKTOKEN_CACHE_DIR"] = str(cache_dir)
+    atexit.register(shutil.rmtree, cache_dir, ignore_errors=True)
+
+
+_pin_valid_tiktoken_cache()
+
 # Installs the staging/runner guard's audit hook now, before any test code can
 # write or connect; see tests/isolation_guard.py. It imports no src.backend, so
 # it is safe ahead of the Postgres redirect below.

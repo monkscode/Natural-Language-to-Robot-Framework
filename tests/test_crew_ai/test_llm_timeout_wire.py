@@ -24,31 +24,7 @@ BASE_S = 0.5  # tries at 0.5 s, 1 s, 2 s
 
 
 @pytest.fixture
-def valid_tokenizer(tmp_path):
-    """Give litellm a readable cl100k_base tokenizer without touching the network.
-
-    litellm.main._complete_vertex_ai_beta passes `encoding=_get_encoding()` to the
-    provider on EVERY gemini / vertex_ai call, so the first one loads tiktoken's
-    cl100k_base. tiktoken checks the bundled file's sha256 and, on a mismatch,
-    downloads it from openaipublic.blob.core.windows.net (the netguard refuses
-    that). litellm's Windows wheel ships that file with CRLF line endings, so the
-    hash fails there; the Linux wheel (Docker image, CI) is valid and this copy
-    is then byte-identical. The tokenizer is litellm's own and unavoidable, so
-    the test supplies a valid copy through litellm's CUSTOM_TIKTOKEN_CACHE_DIR.
-    """
-    import hashlib
-    from pathlib import Path
-
-    url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
-    key = hashlib.sha1(url.encode()).hexdigest()  # tiktoken's cache file name
-    bundled = Path(litellm.__file__).parent / "litellm_core_utils" / "tokenizers" / key
-    (tmp_path / key).write_bytes(bundled.read_bytes().replace(b"\r\n", b"\n"))
-    with patch.dict(os.environ, {"CUSTOM_TIKTOKEN_CACHE_DIR": str(tmp_path)}):
-        yield
-
-
-@pytest.fixture
-def hung_server(valid_tokenizer):
+def hung_server():
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen(16)
