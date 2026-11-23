@@ -2228,8 +2228,11 @@ def remove_change_waits(robot_code: str) -> str:
 
 _SECRET_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
 _SECRET_ENV_ARG_RE = re.compile(r"%NLRF_SECRET_([A-Z][A-Z0-9_]{0,63})")
-# `%{NLRF_SECRET_NAME}`, what bs's swap hands the LLM; not after `$ @ &` or `%`, same guard as the leftover rule
-_SECRET_BRACED_RE = re.compile(r"(?<![$@&%])%\{" + _SECRET_ENV_ARG_RE.pattern[1:] + r"\}")
+# Shared guard of the mask and the leftover rule (they must agree, or the round trip loses a reference): not after
+# `$ @ &` or `%`, nor `{`, where Robot's `${{expr}}` / `${{{x}}}` is inline Python.
+_SECRET_SIGIL_GUARD = r"(?<![$@&%{])"
+# `%{NLRF_SECRET_NAME}`, what bs's swap hands the LLM
+_SECRET_BRACED_RE = re.compile(_SECRET_SIGIL_GUARD + r"%\{" + _SECRET_ENV_ARG_RE.pattern[1:] + r"\}")
 _SECRET_ENV_MARK = "%NLRF_SECRET_"
 _SECRET_FROM_TEXT = {"fill text": "Fill Secret", "type text": "Type Secret"}
 _TEXT_FROM_SECRET = {"fill secret": "Fill Text", "type secret": "Type Text"}
@@ -2276,8 +2279,8 @@ def _secret_placeholder_cell(value: str) -> str | None:
 
 # #166: when the LLM did not keep `{{NAME}}`, the field the plan typed it into decides.
 _SECRET_TYPING = {**_SECRET_FROM_TEXT, "fill secret": "Fill Secret", "type secret": "Type Secret"}
-# Every other `{{NAME}}`; not after `$ @ &` or `%`, where Robot's `${{expr}}` is inline Python.
-_SECRET_LEFTOVER_RE = re.compile(r"(?<![$@&%])" + _SECRET_PLACEHOLDER_RE.pattern)
+# Every other `{{NAME}}`, under the same guard as the mask above.
+_SECRET_LEFTOVER_RE = re.compile(_SECRET_SIGIL_GUARD + _SECRET_PLACEHOLDER_RE.pattern)
 
 
 def rewrite_secret_fills(robot_code: str) -> str:

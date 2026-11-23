@@ -868,11 +868,13 @@ def _fetch_locator_mapping(
         response = {}
     response = _swap_values_back(response, name_of_value, elements)
     if response.get("status") != "success":
-        # status is not swapped, so a value in it is masked here
+        # status is not swapped, so a value in it is masked here: a str BEFORE repr (repr escapes a `'` the mask has no form for)
+        status = response.get("status")
+        shown = repr(mask_values(status, name_of_value)) if isinstance(status, str) else mask_values(repr(status), name_of_value)
         logger.warning(
             "batch_browser_automation returned status=%s — steps fall back "
             "to the found:false placeholder path (no retry by design)",
-            mask_values(repr(response.get("status")), name_of_value),
+            shown,
         )
     return response.get("locator_mapping") or {}
 

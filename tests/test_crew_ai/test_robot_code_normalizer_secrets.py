@@ -116,6 +116,19 @@ class TestRewrite:
         code = _suite(line)
         assert rewrite_secret_fills(code) == code
 
+    @pytest.mark.parametrize("line", ["Log    ${{{True}}}", "Log    ${{{x}}}", "Log    {%{NLRF_SECRET_A}}"])
+    def test_a_brace_before_the_pair_is_untouched_and_the_round_trip_is_exact(self, line):
+        # `${{{x}}}` is inline Python on the set {x}; `{%{NLRF_SECRET_A}}` is a reference the mask must give back as it was
+        code = _suite(line)
+        assert rewrite_secret_fills(code) == code
+
+    def test_an_ordinary_placeholder_beside_a_brace_guarded_line_is_still_replaced(self):
+        code = _suite("Log    ${{{True}}}", "Fill Text    id=email    {{PW}}x")
+        out = rewrite_secret_fills(code)
+        assert "    Log    ${{{True}}}\n" in out
+        assert "%{NLRF_SECRET_PW}x\n" in out
+        assert rewrite_secret_fills(out) == out
+
     def test_an_existing_reference_is_untouched(self):
         code = _suite("Should Contain    ${t}    %{NLRF_SECRET_USER}")
         assert rewrite_secret_fills(code) == code

@@ -2049,6 +2049,21 @@ def test_the_status_warning_is_masked_and_carries_no_value(signed_in, caplog):
     assert "status='bad ***'" in caplog.text
 
 
+def test_a_status_holding_both_quote_kinds_never_logs_the_value_in_an_escaped_form(signed_in, caplog):
+    value = "pw'marker"  # repr writes this as pw\'marker inside a status that also holds a double quote
+    response = {"status": f'said "hi" {value}', "locator_mapping": {}}
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _run(_pw_elements(), response, {"PW": value})
+    assert "marker" not in caplog.text
+    assert "***" in caplog.text
+
+
+def test_a_none_status_keeps_its_plain_log_form_with_secrets_present(signed_in, caplog):
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _run(_pw_elements(), {"status": None, "locator_mapping": {}}, {"PW": _MARKER})
+    assert "status=None " in caplog.text
+
+
 def test_the_status_warning_without_secrets_logs_the_status_as_before(caplog):
     structlog.contextvars.clear_contextvars()
     with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
