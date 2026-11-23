@@ -681,8 +681,10 @@ pyyaml==6.0.4
     #   crewai
     #   huggingface-hub
     #   litellm
-qdrant-client==1.14.3
-    # via crewai
+qdrant-client==1.20.0 ; sys_platform == 'never'
+    # via
+    #   --override uv-overrides.txt
+    #   crewai
 referencing==0.37.0
     # via
     #   jsonschema

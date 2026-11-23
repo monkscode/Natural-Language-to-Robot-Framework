@@ -27,7 +27,7 @@ dependencies = [
     "docker",
     # litellm is pinned to crewai 1.15.44's own [litellm] extra pin. A litellm bump can
     # change Vertex parameter mapping per model family — assert on the wire, not the name.
-    # lancedb/pyarrow are left out via uv-overrides.txt: every `uv pip compile`
+    # lancedb/pyarrow/qdrant-client are left out via uv-overrides.txt: every `uv pip compile`
     # AND every install from the compiled file must pass `--overrides uv-overrides.txt`
     # (uv ignores [tool.uv] override-dependencies).
     "crewai==1.15.44",
