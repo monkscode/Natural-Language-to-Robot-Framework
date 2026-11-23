@@ -2300,7 +2300,7 @@ def rewrite_secret_fills(robot_code: str) -> str:
         logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
     swapped = _SECRET_LEFTOVER_RE.sub(lambda m: "%{NLRF_SECRET_" + m.group(1).upper() + "}", out)
     if swapped != out:
-        logger.info("Secret fill normalizer: remaining placeholder(s) became NLRF_SECRET_NAME references"
+        logger.info("Secret fill normalizer: remaining placeholder(s) became NLRF_SECRET_NAME references "
                     "(signal: secret-reference-rewritten)")
     return swapped
 

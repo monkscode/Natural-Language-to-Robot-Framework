@@ -700,8 +700,9 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     # The repair LLM is handed the test WITHOUT the two change-wait
                     # lines (it would edit, copy or "fix" them); the pair goes back
                     # below. Only when marks exist: no marks, no pair of ours.
-                    # It also sees `{{NAME}}`, never the `%NLRF_SECRET_NAME` env name (#131);
-                    # the rewrite in extract_and_normalize_robot_code puts it back.
+                    # Typed secrets reach it as `{{NAME}}`; a `%{NLRF_SECRET_NAME}` reference elsewhere
+                    # (check lines, Variables rows, locators) it sees as is. Only names, never values (#131);
+                    # the rewrite in extract_and_normalize_robot_code puts the typing form back.
                     task_output, attempt_usage, attempt_guardrails = repair_robot_code(
                         run_id,
                         restore_secret_placeholders(remove_change_waits(code) if change_waits else code),

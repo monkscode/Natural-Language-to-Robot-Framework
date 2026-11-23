@@ -7,6 +7,7 @@ the field the plan typed it into decides: the test's typing step on that field b
 """
 
 import logging
+import re
 
 import pytest
 
@@ -420,3 +421,37 @@ class TestTypedSecretNames:
         code = _suite("Fill Text    id=a    %NLRF_SECRET_A", "Fill Secret    id=b    %{NLRF_SECRET_B}",
                       "Fill Secret    id=c    $c", "Log    %NLRF_SECRET_D", variables="${c}    %NLRF_SECRET_C")
         assert typed_secret_names(code) == set()
+
+
+# The new rules through the REAL chain (stress scenarios): extract_and_normalize_robot_code, as generation and repair run it.
+_LOGIN_ROWS = ["${u}    id=user-name", "${p}    input[placeholder='Password']", "${b}    id=login-button"]
+_LOGIN_BODY = ["Fill Text    ${u}    {{USER}}", "Fill Text    ${p}    {{PW}}", "Click    ${b}"]
+_FIELDS = (("id=user-name", "USER"), ("input[placeholder='Password']", "PW"))
+_CHAIN = [
+    pytest.param(['${m}    text="Signed in as %{NLRF_SECRET_USER}"'], ["Click    ${m}"], _FIELDS, ["USER", "PW"], id="S03 echo locator"),
+    pytest.param(["${h}    #user-menu"], ["${shown}=    Get Text    ${h}", "Should Contain    ${shown}    {{USER}}"],
+                 _FIELDS, ["USER", "PW"], id="S04 check line"),
+    pytest.param(["${e}    #email"], ["Fill Text    ${e}    {{USER}}@acme.io"], (("id=user-name", None), _FIELDS[1]),
+                 ["USER", "PW"], id="S06 typed text with a suffix"),  # the suffixed line stays Fill Text + a reference
+    pytest.param(["${p3}    #pin"], ["Fill Secret    ${p3}    {{PW}}"], _FIELDS, ["USER", "PW", "PW"], id="S15 Fill Secret"),
+    pytest.param(["${q}    #q", "${userval}    {{USER}}"], ["FOR    ${i}    IN RANGE    2", "    Fill Text    ${q}    ${userval}", "END"],
+                 _FIELDS, ["USER", "PW"], id="S16 loop typing a variable"),
+]
+
+
+@pytest.mark.parametrize("rows, body, fields, typed", _CHAIN)
+def test_the_real_chain_swaps_every_leftover_and_is_stable(rows, body, fields, typed):
+    from unittest.mock import MagicMock
+
+    from src.backend.services.dryrun_service import extract_and_normalize_robot_code
+
+    code = (_HEAD + "*** Variables ***\n" + "\n".join(_LOGIN_ROWS + rows) + "\n\n*** Test Cases ***\nScenario\n"
+            "    New Browser    chromium    headless=True\n    New Page    https://app.example/login\n"
+            + "".join(f"    {line}\n" for line in _LOGIN_BODY + body))
+    out_task = MagicMock(pydantic=MagicMock(code=code), json_dict=None, raw=None)
+    out = extract_and_normalize_robot_code(out_task, fields)
+    assert "{{" not in out
+    typing = [line for line in out.splitlines() if re.search(r"(Fill|Type) Secret", line)]
+    assert [line.split("%NLRF_SECRET_")[1] for line in typing] == typed and all("%{" not in line for line in typing)
+    again = extract_and_normalize_robot_code(MagicMock(pydantic=MagicMock(code=out), json_dict=None, raw=None), fields)
+    assert again == out
