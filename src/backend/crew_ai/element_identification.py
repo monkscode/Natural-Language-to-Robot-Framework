@@ -748,23 +748,80 @@ def _secret_values(elements: list[dict[str, Any]]) -> dict[str, str]:
     return dict(stored)
 
 
-def _swap_values_back(node: Any, name_of_value: dict[str, str]) -> Any:
-    """`node` with every stored value, in every string at any depth (dict keys too), replaced by
-    its `{{NAME}}`; longest value first, in ONE pass, so nothing is half-swapped or swapped twice."""
-    if not name_of_value:
-        return node
-    pattern = re.compile("|".join(re.escape(v) for v in sorted(name_of_value, key=len, reverse=True)))
+_QUOTED = re.compile(r'"[^"]*"|\'[^\']*\'')
 
-    def swap(item: Any) -> Any:
-        if isinstance(item, str):
-            return pattern.sub(lambda m: name_of_value[m.group(0)], item)
-        if isinstance(item, dict):
-            return {swap(k): swap(v) for k, v in item.items()}
-        if isinstance(item, (list, tuple)):
-            return type(item)(swap(v) for v in item)
-        return item
 
-    return swap(node)
+def _swap_text(text: str, kind: str, name_of_value: dict[str, str]) -> str:
+    """`text` with each stored value, longest first and in ONE pass, written as `%{NLRF_SECRET_NAME}`.
+    kind "locator": the value as a whole word (no letter, digit or `_` beside it, case-sensitive) inside a
+    quoted part, or the entire text after `id=` / `text=` / `css=#` / `#`. kind "words": a whole word
+    anywhere (a description, never code). kind "token": a whole space-separated token (a class, an id)."""
+    alt = "|".join(re.escape(v) for v in sorted(name_of_value, key=len, reverse=True))
+
+    def ref(match: re.Match[str]) -> str:
+        return "%{NLRF_SECRET_" + name_of_value[match.group(0)][2:-2] + "}"
+
+    word = re.compile(rf"(?<!\w)(?:{alt})(?!\w)")
+    if kind == "token":
+        return re.sub(rf"(?<!\S)(?:{alt})(?!\S)", ref, text)
+    if kind == "words":
+        return word.sub(ref, text)
+    whole = re.fullmatch(rf"(id=|text=|css=#|#)({alt})", text)
+    if whole:
+        return whole.group(1) + ref(re.match(alt, whole.group(2)))
+    return _QUOTED.sub(lambda quoted: word.sub(ref, quoted.group(0)), text)
+
+
+def _swap_entry(entry: dict[str, Any], name_of_value: dict[str, str]) -> dict[str, Any]:
+    """A copy of one found entry with the fields browser-service may echo a typed value into swapped
+    (`_swap_values_back`); keys and every other field, bs vocabulary included, stay as sent."""
+    out = dict(entry)
+
+    def swap(container: dict[str, Any], key: str, kind: str) -> None:
+        if isinstance(container.get(key), str):
+            container[key] = _swap_text(container[key], kind, name_of_value)
+
+    swap(out, "best_locator", "locator")
+    swap(out, "select_id", "token")
+    if isinstance(out.get("element_info"), dict):
+        out["element_info"] = dict(out["element_info"])
+        swap(out["element_info"], "className", "token")
+        swap(out["element_info"], "parentClassName", "token")
+    if isinstance(out.get("all_locators"), list):
+        out["all_locators"] = [dict(item) if isinstance(item, dict) else item for item in out["all_locators"]]
+        for item in out["all_locators"]:
+            if isinstance(item, dict):
+                swap(item, "locator", "locator")
+                swap(item, "strategy", "words")
+    return out
+
+
+def _swap_values_back(
+    response: dict[str, Any], name_of_value: dict[str, str], elements: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """`response` with the stored values browser-service echoed into a FOUND entry's locators, strategy
+    text, classes and select id written as `%{NLRF_SECRET_NAME}` (whole word only; see `_swap_text`).
+    Never dict keys, bs vocabulary (status, element_type, ...), not-found entries, or the element that
+    types that NAME (plan value exactly `{{NAME}}`; `link_secret_fields` owns its field). Entries that
+    change are copies; every other top-level key stays as sent."""
+    mapping = response.get("locator_mapping")
+    if not name_of_value or not isinstance(mapping, dict):
+        return response
+    typed: dict[str, set[str]] = {}
+    for element in elements:
+        value = element.get("value")
+        match = _SECRET_VALUE_RE.fullmatch(value) if isinstance(value, str) else None
+        if match:
+            typed.setdefault(element.get("id"), set()).add("{{" + match.group(1).upper() + "}}")
+    swapped = {}
+    for element_id, entry in mapping.items():
+        if isinstance(entry, dict) and entry.get("found"):
+            own = typed.get(element_id, ())
+            others = {v: ref for v, ref in name_of_value.items() if ref not in own}
+            if others:
+                entry = _swap_entry(entry, others)
+        swapped[element_id] = entry
+    return {**response, "locator_mapping": swapped}
 
 
 def secret_fields(merged: list[dict[str, Any]]) -> tuple[tuple[str, str | None], ...]:
@@ -809,12 +866,13 @@ def _fetch_locator_mapping(
                 "found:false placeholder path (no retry by design)"
             )
         response = {}
-    response = _swap_values_back(response, name_of_value)
+    response = _swap_values_back(response, name_of_value, elements)
     if response.get("status") != "success":
+        # status is not swapped, so a value in it is masked here
         logger.warning(
-            "batch_browser_automation returned status=%r — steps fall back "
+            "batch_browser_automation returned status=%s — steps fall back "
             "to the found:false placeholder path (no retry by design)",
-            response.get("status"),
+            mask_values(repr(response.get("status")), name_of_value),
         )
     return response.get("locator_mapping") or {}
 
