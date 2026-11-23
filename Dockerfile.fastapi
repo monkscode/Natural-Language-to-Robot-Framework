@@ -95,7 +95,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --no-header "$@" \
         --output-file /build/requirements-compiled.txt && \
     uv pip install --prefix=/build/install --no-cache \
-        -r /build/requirements-compiled.txt
+        --overrides /build/uv-overrides.txt -r /build/requirements-compiled.txt
 
 # ============================================================================
 # STAGE 3: Runtime

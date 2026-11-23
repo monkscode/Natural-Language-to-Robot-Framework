@@ -117,7 +117,7 @@ jobs:
           python -m pip install --upgrade pip uv
           uv pip install --system pytest
           uv pip compile pyproject.toml --overrides uv-overrides.txt             --python-platform linux             --python-version 3.12             --output-file /tmp/requirements-ci.txt --quiet
-          uv pip install --system -r /tmp/requirements-ci.txt
+          uv pip install --system --overrides uv-overrides.txt -r /tmp/requirements-ci.txt
 
       # all-MiniLM-L6-v2 is a ~80 MB ONNX download on first use.
       - name: Cache fastembed model

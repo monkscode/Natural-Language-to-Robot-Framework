@@ -151,7 +151,7 @@ BACKEND_REQ="src/backend/requirements.txt"
 # only, stamped it fresh, and left `venv/` permanently without pytest. Anything
 # both branches must guarantee belongs here.
 _install_backend() {
-    uv pip install -r "$BACKEND_REQ" \
+    uv pip install --overrides uv-overrides.txt -r "$BACKEND_REQ" \
         && uv pip install pytest pytest-asyncio pytest-cov
 }
 VENV_STAMP="$VENV_DIR/.requirements-hash"
