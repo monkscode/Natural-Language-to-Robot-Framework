@@ -2305,7 +2305,7 @@ def rewrite_secret_fills(robot_code: str) -> str:
     if out != masked:
         logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
     swapped = _SECRET_LEFTOVER_RE.sub(lambda m: "%{NLRF_SECRET_" + m.group(1).upper() + "}", out)
-    if "{{" in robot_code and swapped != out:  # shortcut: also logs when only masked references went back; log noise only
+    if "{{" in robot_code and swapped != out:  # shortcut: also logs when only masked references went back, upgrade if anything counts this signal
         logger.info("Secret fill normalizer: remaining placeholder(s) became NLRF_SECRET_NAME references "
                     "(signal: secret-reference-rewritten)")
     return swapped
@@ -2437,7 +2437,8 @@ def typed_secret_names(robot_code: str) -> set[str]:
 
 def restore_secret_placeholders(robot_code: str) -> str:
     """The inverse of `rewrite_secret_fills` for our prefix only: `Fill Secret    LOC    %NLRF_SECRET_NAME`
-    -> `Fill Text    LOC    {{NAME}}` (`Type Secret` -> `Type Text`), so the repair LLM never sees the env name.
+    -> `Fill Text    LOC    {{NAME}}` (`Type Secret` -> `Type Text`), so the repair LLM gets
+    typed secrets as `{{NAME}}`. Any other `%{NLRF_SECRET_NAME}` reference reaches it as it is: it carries only the name.
 
     Touches only a `Fill Secret` / `Type Secret` line (with or without `Browser.`) whose second argument is
     exactly `%NLRF_SECRET_<UPPER-CASE NAME>`; a hand-written `Fill Secret … $x` or `%OTHER_ENV` stays. Returns the

@@ -2,7 +2,8 @@
 typed_secret_names (issue #166).
 
 A typed `{{NAME}}` becomes `Fill Secret <loc> %NLRF_SECRET_NAME` (the runner injects that env variable);
-the repair LLM is handed the `{{NAME}}` form back, never the env name. When the LLM did not keep `{{NAME}}`,
+the repair LLM is handed the `{{NAME}}` form back for typed secrets; any other `%{NLRF_SECRET_NAME}` reference
+reaches it as it is (it carries only the name). When the LLM did not keep `{{NAME}}`,
 the field the plan typed it into decides: the test's typing step on that field becomes the same Fill Secret line.
 """
 
@@ -451,19 +452,22 @@ _LOGIN_ROWS = ["${u}    id=user-name", "${p}    input[placeholder='Password']", 
 _LOGIN_BODY = ["Fill Text    ${u}    {{USER}}", "Fill Text    ${p}    {{PW}}", "Click    ${b}"]
 _FIELDS = (("id=user-name", "USER"), ("input[placeholder='Password']", "PW"))
 _CHAIN = [
-    pytest.param(['${m}    text="Signed in as %{NLRF_SECRET_USER}"'], ["Click    ${m}"], _FIELDS, ["USER", "PW"], id="S03 echo locator"),
+    pytest.param(['${m}    text="Signed in as %{NLRF_SECRET_USER}"'], ["Click    ${m}"], _FIELDS, ["USER", "PW"],
+                 '${m}    text="Signed in as %{NLRF_SECRET_USER}"', id="S03 echo locator"),
     pytest.param(["${h}    #user-menu"], ["${shown}=    Get Text    ${h}", "Should Contain    ${shown}    {{USER}}"],
-                 _FIELDS, ["USER", "PW"], id="S04 check line"),
+                 _FIELDS, ["USER", "PW"], "    Should Contain    ${shown}    %{NLRF_SECRET_USER}", id="S04 check line"),
     pytest.param(["${e}    #email"], ["Fill Text    ${e}    {{USER}}@acme.io"], (("id=user-name", None), _FIELDS[1]),
-                 ["USER", "PW"], id="S06 typed text with a suffix"),  # the suffixed line stays Fill Text + a reference
-    pytest.param(["${p3}    #pin"], ["Fill Secret    ${p3}    {{PW}}"], _FIELDS, ["USER", "PW", "PW"], id="S15 Fill Secret"),
+                 ["USER", "PW"], "    Fill Text    ${e}    %{NLRF_SECRET_USER}@acme.io",  # the suffixed line stays Fill Text
+                 id="S06 typed text with a suffix"),
+    pytest.param(["${p3}    #pin"], ["Fill Secret    ${p3}    {{PW}}"], _FIELDS, ["USER", "PW", "PW"],
+                 "    Fill Secret    ${p3}    %NLRF_SECRET_PW", id="S15 Fill Secret"),
     pytest.param(["${q}    #q", "${userval}    {{USER}}"], ["FOR    ${i}    IN RANGE    2", "    Fill Text    ${q}    ${userval}", "END"],
-                 _FIELDS, ["USER", "PW"], id="S16 loop typing a variable"),
+                 _FIELDS, ["USER", "PW"], "${userval}    %{NLRF_SECRET_USER}", id="S16 loop typing a variable"),
 ]
 
 
-@pytest.mark.parametrize("rows, body, fields, typed", _CHAIN)
-def test_the_real_chain_swaps_every_leftover_and_is_stable(rows, body, fields, typed):
+@pytest.mark.parametrize("rows, body, fields, typed, pinned", _CHAIN)
+def test_the_real_chain_swaps_every_leftover_and_is_stable(rows, body, fields, typed, pinned):
     from unittest.mock import MagicMock
 
     from src.backend.services.dryrun_service import extract_and_normalize_robot_code
@@ -474,6 +478,7 @@ def test_the_real_chain_swaps_every_leftover_and_is_stable(rows, body, fields, t
     out_task = MagicMock(pydantic=MagicMock(code=code), json_dict=None, raw=None)
     out = extract_and_normalize_robot_code(out_task, fields)
     assert "{{" not in out
+    assert pinned in out.splitlines()  # the exact reference line survived every rewrite
     typing = [line for line in out.splitlines() if re.search(r"(Fill|Type) Secret", line)]
     assert [line.split("%NLRF_SECRET_")[1] for line in typing] == typed and all("%{" not in line for line in typing)
     again = extract_and_normalize_robot_code(MagicMock(pydantic=MagicMock(code=out), json_dict=None, raw=None), fields)
