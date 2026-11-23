@@ -119,6 +119,29 @@ class TestRewrite:
         code = _suite("Should Contain    ${t}    %{NLRF_SECRET_USER}")
         assert rewrite_secret_fills(code) == code
 
+    @pytest.mark.parametrize("keyword", ["Fill Secret", "Fill Text", "Browser.Type Text"])
+    def test_a_typing_step_holding_the_braced_reference_gets_the_env_form(self, keyword):
+        # no `{{` anywhere: the early return must let a braced typing cell through
+        code = _fill(keyword, "%{NLRF_SECRET_PW}")
+        assert "{{" not in code
+        out = rewrite_secret_fills(code)
+        expected = keyword.replace("Text", "Secret")
+        assert f"    {expected}    id=password    %NLRF_SECRET_PW\n" in out
+        assert "%{" not in out
+        assert rewrite_secret_fills(out) == out
+
+    def test_a_followable_variable_holding_the_braced_reference_gets_the_env_form(self):
+        code = _suite("Fill Text    id=password    ${pw}", variables="${pw}    %{NLRF_SECRET_PW}")
+        out = rewrite_secret_fills(code)
+        assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
+        assert "${pw}    %{NLRF_SECRET_PW}\n" in out  # the row stays a reference
+        assert rewrite_secret_fills(out) == out
+
+    def test_a_braced_reference_outside_a_typing_cell_is_untouched(self):
+        code = _suite("Should Contain    ${t}    %{NLRF_SECRET_USER}", "Fill Text    id=email    %{NLRF_SECRET_USER}@acme.io",
+                      "Click    text=\"Signed in as %{NLRF_SECRET_USER}\"")
+        assert rewrite_secret_fills(code) == code
+
     def test_the_leftover_pass_is_idempotent_and_logs_only_when_it_changes(self, caplog):
         code = _suite("Get Text    id=hdr    ==    {{USER}}")
         with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):

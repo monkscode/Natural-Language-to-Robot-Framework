@@ -2228,6 +2228,8 @@ def remove_change_waits(robot_code: str) -> str:
 
 _SECRET_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
 _SECRET_ENV_ARG_RE = re.compile(r"%NLRF_SECRET_([A-Z][A-Z0-9_]{0,63})")
+# `%{NLRF_SECRET_NAME}`, what bs's swap hands the LLM; not after `$ @ &` or `%`, same guard as the leftover rule
+_SECRET_BRACED_RE = re.compile(r"(?<![$@&%])%\{" + _SECRET_ENV_ARG_RE.pattern[1:] + r"\}")
 _SECRET_ENV_MARK = "%NLRF_SECRET_"
 _SECRET_FROM_TEXT = {"fill text": "Fill Secret", "type text": "Type Secret"}
 _TEXT_FROM_SECRET = {"fill secret": "Fill Text", "type secret": "Type Text"}
@@ -2283,9 +2285,10 @@ def rewrite_secret_fills(robot_code: str) -> str:
     then every other `{{NAME}}` -> `%{NLRF_SECRET_NAME}`.
 
     A typing step's second argument must be, after resolving a whole-cell `${var}` that a *** Variables *** row
-    or a `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces); the
-    name goes upper-case. A step already typed `Fill Secret` / `Type Secret` is read the same way. The library
-    prefix (`Browser.`) is kept. Left alone by the typing pass: a placeholder inside longer text, a `${var}`
+    or a `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces) or
+    exactly one braced reference `%{NLRF_SECRET_NAME}` (Browser refuses that form in Fill Secret, and Fill Text
+    would log the value); the name goes upper-case. A step already typed `Fill Secret` / `Type Secret` is read
+    the same way. The library prefix (`Browser.`) is kept. Left alone by the typing pass: a placeholder inside longer text, a `${var}`
     argument in a test the shared reader cannot follow (a control structure: only a literal placeholder is
     rewritten there), a `[Template]` test, and the whole file when the reader refuses it.
 
@@ -2293,13 +2296,16 @@ def rewrite_secret_fills(robot_code: str) -> str:
     row, a [Documentation] or inside longer text becomes `%{NLRF_SECRET_NAME}`, which Robot resolves from the
     environment. `${{x}}`, `@{{x}}`, `&{{x}}` and `%{{x}}` are not placeholders. Idempotent.
     """
-    if not robot_code or "{{" not in robot_code:
+    if not robot_code or ("{{" not in robot_code and "%{NLRF_SECRET_" not in robot_code):
         return robot_code
-    out = _secret_step_edits(robot_code, _SECRET_TYPING, True, _secret_env_cell)
-    if out != robot_code:
+    # A braced reference reads as a placeholder for the typing pass (the shared reader resolves a cell or a Variables row
+    # holding one only in that form); the leftover pass below puts every one it did not type back.
+    masked = _SECRET_BRACED_RE.sub(lambda m: "{{" + m.group(1) + "}}", robot_code)
+    out = _secret_step_edits(masked, _SECRET_TYPING, True, _secret_env_cell)
+    if out != masked:
         logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
     swapped = _SECRET_LEFTOVER_RE.sub(lambda m: "%{NLRF_SECRET_" + m.group(1).upper() + "}", out)
-    if swapped != out:
+    if "{{" in robot_code and swapped != out:  # shortcut: also logs when only masked references went back; log noise only
         logger.info("Secret fill normalizer: remaining placeholder(s) became NLRF_SECRET_NAME references "
                     "(signal: secret-reference-rewritten)")
     return swapped
