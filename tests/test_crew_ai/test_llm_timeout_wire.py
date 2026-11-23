@@ -24,7 +24,31 @@ BASE_S = 0.5  # tries at 0.5 s, 1 s, 2 s
 
 
 @pytest.fixture
-def hung_server():
+def valid_tokenizer(tmp_path):
+    """Give litellm a readable cl100k_base tokenizer without touching the network.
+
+    litellm.main._complete_vertex_ai_beta passes `encoding=_get_encoding()` to the
+    provider on EVERY gemini / vertex_ai call, so the first one loads tiktoken's
+    cl100k_base. tiktoken checks the bundled file's sha256 and, on a mismatch,
+    downloads it from openaipublic.blob.core.windows.net (the netguard refuses
+    that). litellm's Windows wheel ships that file with CRLF line endings, so the
+    hash fails there; the Linux wheel (Docker image, CI) is valid and this copy
+    is then byte-identical. The tokenizer is litellm's own and unavoidable, so
+    the test supplies a valid copy through litellm's CUSTOM_TIKTOKEN_CACHE_DIR.
+    """
+    import hashlib
+    from pathlib import Path
+
+    url = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+    key = hashlib.sha1(url.encode()).hexdigest()  # tiktoken's cache file name
+    bundled = Path(litellm.__file__).parent / "litellm_core_utils" / "tokenizers" / key
+    (tmp_path / key).write_bytes(bundled.read_bytes().replace(b"\r\n", b"\n"))
+    with patch.dict(os.environ, {"CUSTOM_TIKTOKEN_CACHE_DIR": str(tmp_path)}):
+        yield
+
+
+@pytest.fixture
+def hung_server(valid_tokenizer):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen(16)
@@ -64,10 +88,10 @@ def _settings():
     return patch("src.backend.core.config.settings", s)
 
 
-def _assert_three_growing_tries(llm, accepted):
+def _assert_three_growing_tries(llm, accepted, run=None):
     started = time.monotonic()
     with pytest.raises(litellm.Timeout) as raised:
-        llm.call([{"role": "user", "content": "ping"}])
+        (run or (lambda: llm.call([{"role": "user", "content": "ping"}])))()
     elapsed = time.monotonic() - started
     assert len(accepted) == 3, f"expected one request per try, saw {len(accepted)}"
     assert report_of(raised.value).timed_out_after_s == (0.5, 1.0, 2.0)
@@ -96,6 +120,31 @@ def test_vertex_timeout_cuts_a_hung_request_on_every_try(hung_server):
         llm = get_llm("vertex", "gemini-3.5-flash")
         llm.api_base = base_url
         _assert_three_growing_tries(llm, accepted)
+
+
+def test_timeout_reaches_the_socket_through_a_real_crew_with_output_pydantic(hung_server):
+    """The agent-executor path: crewai maps task.output_pydantic onto response_model
+    and, unless the wrapper strips it, reroutes the call through instructor, which
+    drops our per-try timeout (LiteLLM's 600 s default would then apply). The direct
+    llm.call tests above cannot see that, so this one runs a real Crew."""
+    from crewai import Agent, Crew, Task
+    from pydantic import BaseModel
+
+    from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+    class Reply(BaseModel):
+        code: str
+
+    base_url, accepted = hung_server
+    with _settings():
+        llm = get_llm("gemini", "gemini-3.5-flash", api_key="fake-key", response_format=Reply)
+        llm.api_base = base_url
+        agent = Agent(role="Tester", goal="Reply with JSON.", backstory="You reply with JSON.",
+                      llm=llm, verbose=False, allow_delegation=False)
+        task = Task(description="Reply with a code key.", expected_output="JSON with a code key.",
+                    agent=agent, output_pydantic=Reply)
+        crew = Crew(agents=[agent], tasks=[task], verbose=False)
+        _assert_three_growing_tries(llm, accepted, run=crew.kickoff)
 
 
 def test_local_sends_no_timeout_and_keeps_litellm_retries():
