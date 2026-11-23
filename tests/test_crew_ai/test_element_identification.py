@@ -33,6 +33,7 @@ from src.backend.crew_ai import element_identification
 from src.backend.crew_ai.element_identification import (
     _default_run_tool,
     _fetch_locator_mapping,
+    _swap_values_back,
     action_for_keyword,
     build_elements,
     change_waits_from,
@@ -1934,19 +1935,20 @@ def _pw_elements():
 
 
 def test_secret_map_goes_beside_the_steps_and_the_answer_is_swapped_back(signed_in):
-    elements = _pw_elements()
-    response = {"status": "success", "locator_mapping": {"elem_1": {
-        "found": True, "best_locator": f"css=input[value='{_MARKER}']",
-        "all_locators": [{"locator": f"text={_MARKER}"}]}}}
+    elements = _pw_elements() + [{"id": "elem_2", "description": "echo", "action": "click"}]
+    entry = {"found": True, "best_locator": f"css=input[value='{_MARKER}']",
+             "all_locators": [{"locator": f"text={_MARKER}"}]}
+    response = {"status": "success", "locator_mapping": {"elem_1": entry, "elem_2": dict(entry)}}
     out, sent, _, get_values, kwargs = _run(elements, response, {"PW": _MARKER})
     assert sent[0] is elements  # the step keeps its name
     assert sent[0][0]["value"] == "{{PW}}"
     assert kwargs == [{"secrets": {"PW": _MARKER}}]
     assert _MARKER not in repr(sent)
     get_values.assert_called_once_with("org-1", {"PW"})
-    assert out["elem_1"]["best_locator"] == "css=input[value='{{PW}}']"
-    assert out["elem_1"]["all_locators"] == [{"locator": "text={{PW}}"}]
-    assert _MARKER not in repr(out)
+    assert out["elem_2"]["best_locator"] == "css=input[value='%{NLRF_SECRET_PW}']"
+    assert out["elem_2"]["all_locators"] == [{"locator": "text=%{NLRF_SECRET_PW}"}]
+    assert _MARKER not in repr(out["elem_2"])
+    assert out["elem_1"] == entry  # the typing element is left to link_secret_fields
 
 
 def test_name_in_braces_with_spaces_and_lower_case_is_a_secret(signed_in):
@@ -2026,29 +2028,202 @@ def test_an_unreadable_stored_value_stops_with_a_sentence_not_a_blank_error(sign
     assert runner_calls == []
 
 
-def test_swap_back_reaches_dict_keys_nested_values_and_a_non_success_response(signed_in):
-    response = {
-        "status": "error", "message": f"typed {_MARKER}",
-        "locator_mapping": {f"k_{_MARKER}": {"nested": [{"s": f"a {_MARKER} b"}, (f"{_MARKER}",)],
-                                              "n": 3, "none": None}},
-    }
-    out = _run(_pw_elements(), response, {"PW": _MARKER})[0]
-    assert out == {"k_{{PW}}": {"nested": [{"s": "a {{PW}} b"}, ("{{PW}}",)], "n": 3, "none": None}}
+def test_only_the_field_rules_swap_keys_messages_and_other_strings_stay(signed_in):
+    entry = {"found": True, "best_locator": f"text='{_MARKER}'", "nested": [{"s": f"a {_MARKER} b"}],
+             "element_type": _MARKER, "n": 3, "none": None}
+    response = {"status": "error", "message": f"typed {_MARKER}",
+                "locator_mapping": {f"k_{_MARKER}": entry}}
+    out = _swap_values_back(response, {_MARKER: "{{PW}}"}, [{"id": "elem_9", "value": "{{PW}}"}])
+    assert out["status"] == "error" and out["message"] == f"typed {_MARKER}"
+    swapped = out["locator_mapping"][f"k_{_MARKER}"]  # the key kept the value
+    assert swapped["best_locator"] == "text='%{NLRF_SECRET_PW}'"
+    assert {k: v for k, v in swapped.items() if k != "best_locator"} == {
+        k: v for k, v in entry.items() if k != "best_locator"}  # nothing else changed
 
 
-def test_the_whole_response_is_swapped_before_the_status_warning(signed_in, caplog):
+def test_the_status_warning_is_masked_and_carries_no_value(signed_in, caplog):
     response = {"status": f"bad {_MARKER}", "locator_mapping": {}}
     with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
         _run(_pw_elements(), response, {"PW": _MARKER})
     assert _MARKER not in caplog.text
-    assert "bad {{PW}}" in caplog.text
+    assert "status='bad ***'" in caplog.text
 
 
-def test_longest_value_first_nothing_half_swapped(signed_in):
+def test_a_status_holding_both_quote_kinds_never_logs_the_value_in_an_escaped_form(signed_in, caplog):
+    value = "pw'marker"  # repr writes this as pw\'marker inside a status that also holds a double quote
+    response = {"status": f'said "hi" {value}', "locator_mapping": {}}
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _run(_pw_elements(), response, {"PW": value})
+    assert "marker" not in caplog.text
+    assert "***" in caplog.text
+
+
+def test_a_none_status_keeps_its_plain_log_form_with_secrets_present(signed_in, caplog):
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _run(_pw_elements(), {"status": None, "locator_mapping": {}}, {"PW": _MARKER})
+    assert "status=None " in caplog.text
+
+
+def test_the_status_warning_without_secrets_logs_the_status_as_before(caplog):
+    structlog.contextvars.clear_contextvars()
+    with caplog.at_level(logging.WARNING, logger="src.backend.crew_ai.element_identification"):
+        _fetch_locator_mapping([{"id": "e", "value": "shoes"}], "u", "q",
+                               lambda e, u, q: {"status": "error", "locator_mapping": {}})
+    assert "status='error'" in caplog.text
+
+
+def test_longest_value_first_nothing_half_swapped_in_a_locator(signed_in):
     elements = [{"id": "a", "value": "{{SHORT}}"}, {"id": "b", "value": "{{LONG}}"}]
-    response = {"status": "success", "locator_mapping": {"x": {"s": "abcd1234 and abcd"}}}
+    response = {"status": "success", "locator_mapping": {"x": {
+        "found": True, "best_locator": "text='abcd1234 and abcd'"}}}
     out = _run(elements, response, {"SHORT": "abcd", "LONG": "abcd1234"})[0]
-    assert out == {"x": {"s": "{{LONG}} and {{SHORT}}"}}
+    assert out["x"]["best_locator"] == "text='%{NLRF_SECRET_LONG} and %{NLRF_SECRET_SHORT}'"
+
+
+# ─── #131 row 112: the swap-back is per field and whole word ─────────────────
+
+_REF = "%{NLRF_SECRET_PW}"
+
+
+def _swap(value, entry, name="PW", typed=("elem_1",), eid="elem_2"):
+    """The swapped entry for `eid`; the plan types `{{name}}` into the elements in `typed`."""
+    elements = [{"id": t, "value": "{{" + name + "}}"} for t in typed]
+    response = {"status": "success", "locator_mapping": {eid: entry}}
+    return _swap_values_back(response, {value: "{{" + name + "}}"}, elements)["locator_mapping"][eid]
+
+
+def _found(loc="id=x", **extra):
+    return {"found": True, "best_locator": loc, "element_type": "input",
+            "element_info": {"className": "", "tagName": "input"},
+            "all_locators": [{"type": "css", "locator": loc}], **extra}
+
+
+@pytest.mark.parametrize("value, locator, expected", [
+    ("put", "role=button[name='Please put it in']", f"role=button[name='Please {_REF} it in']"),
+    ("acme-ops", 'text="Signed in as acme-ops"', f'text="Signed in as {_REF}"'),
+    ("qa@acme.io", 'role=button[name="Account: Jane (qa@acme.io)"]',
+     f'role=button[name="Account: Jane ({_REF})"]'),
+    ("O'Brien", 'text="Hello O\'Brien"', f'text="Hello {_REF}"'),
+    ("in", 'text="Log in"', f'text="Log {_REF}"'),
+    ("acme-ops", 'text="Team acme-ops"', f'text="Team {_REF}"'),
+    # the entire value after id= / text= / css=# / #
+    ("jane", "id=jane", f"id={_REF}"),
+    ("jane", "text=jane", f"text={_REF}"),
+    ("jane", "css=#jane", f"css=#{_REF}"),
+    ("jane", "#jane", f"#{_REF}"),
+    ("email", '#newsletter input[name="email"]', f'#newsletter input[name="{_REF}"]'),  # a coincidence
+    # NOT swapped: inside a longer word, another letter case, outside every quote, part of a longer id
+    ("put", "role=button[name='input output']", "role=button[name='input output']"),
+    ("put", "text='Putting'", "text='Putting'"),
+    ("in", 'li:nth-child(1) >> text="Log in" >> input', f'li:nth-child(1) >> text="Log {_REF}" >> input'),
+    ("a", "a[href='/home']", "a[href='/home']"),
+    ("a", "xpath=//div[1]/a", "xpath=//div[1]/a"),
+    ("1", "li:nth-child(1)", "li:nth-child(1)"),
+    ("1", '[title="Edit"] >> nth=1', '[title="Edit"] >> nth=1'),
+    ("acme-ops", 'text="ACME-OPS"', 'text="ACME-OPS"'),  # stated limit: other letter case
+    ("acme-ops", "#avatar-acme-ops", "#avatar-acme-ops"),  # stated limit: unquoted id embeds it
+    ("qa@acme.io", "a[href='/u/qa%40acme.io']", "a[href='/u/qa%40acme.io']"),  # stated limit: encoded
+    ("jane", "id=jane_doe", "id=jane_doe"),
+    ("jane", "id=Jane", "id=Jane"),
+])
+def test_a_locator_swaps_the_value_as_a_whole_word_inside_a_quote_or_as_the_whole_id(value, locator, expected):
+    entry = _found(locator)
+    assert _swap(value, entry)["best_locator"] == expected
+    assert _swap(value, entry)["all_locators"] == [{"type": "css", "locator": expected}]
+
+
+def test_a_value_as_whole_word_swaps_in_every_quoted_part_not_the_unquoted_ones():
+    out = _swap("a", _found("a:has-text('a') >> text=\"a b\" >> a"))
+    assert out["best_locator"] == f"a:has-text('{_REF}') >> text=\"{_REF} b\" >> a"
+
+
+def test_strategy_swaps_the_whole_word_anywhere_but_not_inside_a_word():
+    entry = _found("#nav")
+    entry["all_locators"] = [{"locator": "#nav", "strategy": "Semantic class CSS (.acme-ops)"},
+                             {"locator": "#nav", "strategy": "Semantic class CSS (.acme-opsx)"},
+                             {"locator": "#nav"}]
+    out = _swap("acme-ops", entry)["all_locators"]
+    assert [l.get("strategy") for l in out] == [f"Semantic class CSS (.{_REF})",
+                                                "Semantic class CSS (.acme-opsx)", None]
+    assert [l["locator"] for l in out] == ["#nav"] * 3
+
+
+def test_class_names_and_select_id_swap_only_a_whole_token():
+    entry = _found("#nav", select_id="acme-ops")
+    entry["element_info"] = {"className": "nav-user acme-ops", "parentClassName": "acme-ops-wrap",
+                             "tagName": "acme-ops"}
+    out = _swap("acme-ops", entry)
+    assert out["element_info"] == {"className": f"nav-user {_REF}", "parentClassName": "acme-ops-wrap",
+                                   "tagName": "acme-ops"}
+    assert out["select_id"] == _REF
+    assert _swap("acme-ops", _found("#nav", select_id="acme-ops-2"))["select_id"] == "acme-ops-2"
+
+
+def test_a_not_found_entry_keeps_its_text():
+    entry = {"found": False, "error": f"no element near {_MARKER}", "best_locator": f"id={_MARKER}"}
+    assert _swap(_MARKER, entry) == entry
+
+
+def test_bs_vocabulary_and_other_keys_never_swap():
+    entry = _found("#nav", status=None, stability="stable", reason="input")
+    for value in ("input", "stable", "found", "element_type", "id"):
+        out = _swap(value, entry)
+        assert out["element_type"] == "input" and out["found"] is True
+        assert out["stability"] == "stable" and out["reason"] == "input"
+        assert out["element_info"]["tagName"] == "input"
+        assert set(out) == set(entry)
+
+
+def test_the_typing_element_is_skipped_for_its_own_name_only():
+    other = {"id": "elem_3", "value": "{{USER}}"}
+    entry = _found(f"css=input[value='{_MARKER}']")
+    elements = [{"id": "elem_1", "value": "{{PW}}"}, other]
+    mapping = {"elem_1": entry, "elem_3": entry, "elem_4": entry}
+    out = _swap_values_back({"locator_mapping": mapping}, {_MARKER: "{{PW}}"}, elements)["locator_mapping"]
+    assert out["elem_1"] == entry  # types {{PW}}: skipped
+    assert out["elem_3"]["best_locator"] == f"css=input[value='{_REF}']"  # types {{USER}}: PW swaps
+    assert out["elem_4"]["best_locator"] == f"css=input[value='{_REF}']"
+
+
+def test_the_typing_element_match_reads_braces_and_case_like_the_plan_does():
+    entry = _found(f"id={_MARKER}")
+    out = _swap(_MARKER, entry, typed=())  # nothing typed under this name: swaps
+    assert out["best_locator"] == f"id={_REF}"
+    elements = [{"id": "elem_2", "value": "{{ pw }}"}]
+    response = {"locator_mapping": {"elem_2": entry}}
+    assert _swap_values_back(response, {_MARKER: "{{PW}}"}, elements)["locator_mapping"]["elem_2"] == entry
+
+
+def test_swap_returns_new_entries_and_never_changes_bs_dicts():
+    entry = _found("text='put'")
+    snapshot = repr(entry)
+    response = {"status": "success", "extra": [1], "locator_mapping": {"elem_2": entry}}
+    out = _swap_values_back(response, {"put": "{{PW}}"}, [])
+    assert repr(entry) == snapshot
+    assert out["locator_mapping"]["elem_2"] is not entry
+    assert out["status"] == "success" and out["extra"] == [1]
+
+
+def test_swap_with_nothing_to_swap_or_a_bad_answer_returns_the_response_as_it_is():
+    entry = _found("text='put'")
+    response = {"locator_mapping": {"elem_2": entry}}
+    assert _swap_values_back(response, {}, []) is response
+    assert _swap_values_back({"locator_mapping": None}, {"put": "{{PW}}"}, []) == {"locator_mapping": None}
+    assert _swap_values_back({}, {"put": "{{PW}}"}, []) == {}
+    bad = {"locator_mapping": {"e": "text", "f": None, "g": {"found": True}}}
+    assert _swap_values_back(bad, {"put": "{{PW}}"}, []) == bad
+
+
+@pytest.mark.parametrize("value", ["1", "a", "elem", "found", "status", "locator", "input", "id"])
+def test_a_short_or_common_value_keeps_all_twelve_elements_and_the_answer_shape(value):
+    ids = [f"elem_{n}" for n in range(1, 13)]
+    mapping = {i: _found(f"id=field-{chr(96 + n)}") for n, i in enumerate(ids, 1)}
+    response = {"status": "success", "locator_mapping": mapping}
+    out = _swap_values_back(response, {value: "{{PW}}"}, [{"id": "elem_1", "value": "{{PW}}"}])
+    assert out["status"] == "success"
+    assert list(out["locator_mapping"]) == ids
+    assert sum(1 for i in ids if out["locator_mapping"][i]["found"]) == 12
+    assert all(out["locator_mapping"][i]["element_type"] == "input" for i in ids)
 
 
 def test_runner_exception_with_a_value_logs_type_and_masked_text_without_traceback(signed_in, caplog):

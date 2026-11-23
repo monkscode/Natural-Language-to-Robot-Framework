@@ -2,11 +2,13 @@
 typed_secret_names (issue #166).
 
 A typed `{{NAME}}` becomes `Fill Secret <loc> %NLRF_SECRET_NAME` (the runner injects that env variable);
-the repair LLM is handed the `{{NAME}}` form back, never the env name. When the LLM did not keep `{{NAME}}`,
+the repair LLM is handed the `{{NAME}}` form back for typed secrets; any other `%{NLRF_SECRET_NAME}` reference
+reaches it as it is (it carries only the name). When the LLM did not keep `{{NAME}}`,
 the field the plan typed it into decides: the test's typing step on that field becomes the same Fill Secret line.
 """
 
 import logging
+import re
 
 import pytest
 
@@ -68,20 +70,100 @@ class TestRewrite:
         code = _suite("Fill Text    id=password    ${PW}", variables="${PW}    {{PW}}")
         out = rewrite_secret_fills(code)
         assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
-        assert "${PW}    {{PW}}\n" in out
+        assert "${PW}    %{NLRF_SECRET_PW}\n" in out  # the row itself is a leftover reference
 
     def test_the_browser_prefix_is_kept(self):
         out = rewrite_secret_fills(_fill("Browser.Fill Text", "{{SAUCE_PASSWORD}}"))
         assert "    Browser.Fill Secret    id=password    %NLRF_SECRET_SAUCE_PASSWORD\n" in out
 
-    def test_a_check_line_holding_a_placeholder_is_untouched(self):
+    def test_a_check_line_holding_a_placeholder_becomes_a_reference(self):
         code = _suite("Fill Text    id=user-name    standard_user", "Should Contain    ${msg}    {{X}}")
-        assert rewrite_secret_fills(code) == code
+        assert "    Should Contain    ${msg}    %{NLRF_SECRET_X}\n" in rewrite_secret_fills(code)
 
-    def test_a_placeholder_inside_a_longer_text_is_untouched(self):
-        for value in ("pre-{{X}}", "{{X}}-post", "{{X}} {{Y}}", "{{1X}}", "{{}}", "{{" + "A" * 65 + "}}"):
+    def test_a_placeholder_inside_a_longer_text_becomes_a_reference_in_place(self):
+        out = rewrite_secret_fills(_fill("Fill Text", "pre-{{x}}-post {{ Y }}"))
+        assert "    Fill Text    id=password    pre-%{NLRF_SECRET_X}-post %{NLRF_SECRET_Y}\n" in out
+
+    def test_a_malformed_placeholder_is_untouched(self):
+        for value in ("{{1X}}", "{{}}", "{{" + "A" * 65 + "}}"):
             code = _fill("Fill Text", value)
             assert rewrite_secret_fills(code) == code, value
+
+    def test_url_variables_row_and_documentation_become_references(self):
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${u}    https://x.example/?t={{TOKEN}}\n"
+                "${h}    id=hdr\n\n*** Test Cases ***\nT\n    [Documentation]    Logs in as {{USER}}\n"
+                "    New Page    ${u}\n    Get Text    ${h}    ==    {{USER}}\n")
+        out = rewrite_secret_fills(code)
+        assert "${u}    https://x.example/?t=%{NLRF_SECRET_TOKEN}\n" in out
+        assert "[Documentation]    Logs in as %{NLRF_SECRET_USER}\n" in out
+        assert "    Get Text    ${h}    ==    %{NLRF_SECRET_USER}\n" in out
+        assert "{{" not in out
+
+    def test_fill_secret_the_llm_wrote_with_a_placeholder_gets_the_env_form(self):
+        for kw in ("Fill Secret", "Browser.Type Secret"):
+            out = rewrite_secret_fills(_fill(kw, "{{ pw }}"))
+            assert f"    {kw}    id=password    %NLRF_SECRET_PW\n" in out
+
+    def test_fill_secret_through_a_followable_variable_gets_the_env_form(self):
+        code = _suite("Fill Secret    id=password    ${pw}", variables="${pw}    {{PW}}")
+        out = rewrite_secret_fills(code)
+        assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
+
+    @pytest.mark.parametrize("line", [
+        "Set Variable    ${{True}}", "Should Be True    ${{x}}", "Log    @{{x}}", "Log    &{{x}}", "Log    %{{x}}",
+    ])
+    def test_robot_inline_python_and_sigil_forms_are_untouched(self, line):
+        code = _suite(line)
+        assert rewrite_secret_fills(code) == code
+
+    @pytest.mark.parametrize("line", ["Log    ${{{True}}}", "Log    ${{{x}}}", "Log    {%{NLRF_SECRET_A}}"])
+    def test_a_brace_before_the_pair_is_untouched_and_the_round_trip_is_exact(self, line):
+        # `${{{x}}}` is inline Python on the set {x}; `{%{NLRF_SECRET_A}}` is a reference the mask must give back as it was
+        code = _suite(line)
+        assert rewrite_secret_fills(code) == code
+
+    def test_an_ordinary_placeholder_beside_a_brace_guarded_line_is_still_replaced(self):
+        code = _suite("Log    ${{{True}}}", "Fill Text    id=email    {{PW}}x")
+        out = rewrite_secret_fills(code)
+        assert "    Log    ${{{True}}}\n" in out
+        assert "%{NLRF_SECRET_PW}x\n" in out
+        assert rewrite_secret_fills(out) == out
+
+    def test_an_existing_reference_is_untouched(self):
+        code = _suite("Should Contain    ${t}    %{NLRF_SECRET_USER}")
+        assert rewrite_secret_fills(code) == code
+
+    @pytest.mark.parametrize("keyword", ["Fill Secret", "Fill Text", "Browser.Type Text"])
+    def test_a_typing_step_holding_the_braced_reference_gets_the_env_form(self, keyword):
+        # no `{{` anywhere: the early return must let a braced typing cell through
+        code = _fill(keyword, "%{NLRF_SECRET_PW}")
+        assert "{{" not in code
+        out = rewrite_secret_fills(code)
+        expected = keyword.replace("Text", "Secret")
+        assert f"    {expected}    id=password    %NLRF_SECRET_PW\n" in out
+        assert "%{" not in out
+        assert rewrite_secret_fills(out) == out
+
+    def test_a_followable_variable_holding_the_braced_reference_gets_the_env_form(self):
+        code = _suite("Fill Text    id=password    ${pw}", variables="${pw}    %{NLRF_SECRET_PW}")
+        out = rewrite_secret_fills(code)
+        assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
+        assert "${pw}    %{NLRF_SECRET_PW}\n" in out  # the row stays a reference
+        assert rewrite_secret_fills(out) == out
+
+    def test_a_braced_reference_outside_a_typing_cell_is_untouched(self):
+        code = _suite("Should Contain    ${t}    %{NLRF_SECRET_USER}", "Fill Text    id=email    %{NLRF_SECRET_USER}@acme.io",
+                      "Click    text=\"Signed in as %{NLRF_SECRET_USER}\"")
+        assert rewrite_secret_fills(code) == code
+
+    def test_the_leftover_pass_is_idempotent_and_logs_only_when_it_changes(self, caplog):
+        code = _suite("Get Text    id=hdr    ==    {{USER}}")
+        with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
+            once = rewrite_secret_fills(code)
+            assert "signal: secret-reference-rewritten" in caplog.text
+            caplog.clear()
+            assert rewrite_secret_fills(once) == once
+        assert "secret-reference-rewritten" not in caplog.text
 
     def test_a_64_character_name_is_rewritten(self):
         name = "A" * 64
@@ -98,9 +180,9 @@ class TestRewrite:
         assert rewrite_secret_fills(code) is code
         assert rewrite_secret_fills("") == ""
 
-    def test_an_unreadable_suite_is_returned_unchanged(self):
+    def test_an_unreadable_suite_keeps_its_typing_step_and_gets_only_the_leftover_reference(self):
         code = "*** Test Cases ***\n| T |\n| | Fill Text | id=password | {{X}} |\n"
-        assert rewrite_secret_fills(code) == code
+        assert rewrite_secret_fills(code) == code.replace("{{X}}", "%{NLRF_SECRET_X}")
 
     def test_a_test_with_an_unrelated_if_block_is_still_rewritten(self):
         code = _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    {{PW}}")
@@ -118,11 +200,15 @@ class TestRewrite:
     def test_an_unfollowable_test_with_a_variable_argument_is_left_alone(self):
         code = _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    ${PW}",
                       variables="${PW}    {{PW}}")
-        assert rewrite_secret_fills(code) == code
+        out = rewrite_secret_fills(code)
+        assert "    Fill Text    id=password    ${PW}\n" in out  # the step is not followed: not a Fill Secret
+        assert "${PW}    %{NLRF_SECRET_PW}\n" in out
 
     def test_a_template_test_data_row_is_left_alone(self):
         code = _suite("[Template]    Fill Text", "id=password    {{PW}}", "Fill Text    id=password    {{PW}}")
-        assert rewrite_secret_fills(code) == code
+        out = rewrite_secret_fills(code)
+        assert "Fill Secret" not in out  # data rows are not calls
+        assert "{{" not in out and out.count("%{NLRF_SECRET_PW}") == 2
 
     @pytest.mark.parametrize("code", [
         _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    {{PW}}"),
@@ -372,3 +458,41 @@ class TestTypedSecretNames:
         code = _suite("Fill Text    id=a    %NLRF_SECRET_A", "Fill Secret    id=b    %{NLRF_SECRET_B}",
                       "Fill Secret    id=c    $c", "Log    %NLRF_SECRET_D", variables="${c}    %NLRF_SECRET_C")
         assert typed_secret_names(code) == set()
+
+
+# The new rules through the REAL chain (stress scenarios): extract_and_normalize_robot_code, as generation and repair run it.
+_LOGIN_ROWS = ["${u}    id=user-name", "${p}    input[placeholder='Password']", "${b}    id=login-button"]
+_LOGIN_BODY = ["Fill Text    ${u}    {{USER}}", "Fill Text    ${p}    {{PW}}", "Click    ${b}"]
+_FIELDS = (("id=user-name", "USER"), ("input[placeholder='Password']", "PW"))
+_CHAIN = [
+    pytest.param(['${m}    text="Signed in as %{NLRF_SECRET_USER}"'], ["Click    ${m}"], _FIELDS, ["USER", "PW"],
+                 '${m}    text="Signed in as %{NLRF_SECRET_USER}"', id="S03 echo locator"),
+    pytest.param(["${h}    #user-menu"], ["${shown}=    Get Text    ${h}", "Should Contain    ${shown}    {{USER}}"],
+                 _FIELDS, ["USER", "PW"], "    Should Contain    ${shown}    %{NLRF_SECRET_USER}", id="S04 check line"),
+    pytest.param(["${e}    #email"], ["Fill Text    ${e}    {{USER}}@acme.io"], (("id=user-name", None), _FIELDS[1]),
+                 ["USER", "PW"], "    Fill Text    ${e}    %{NLRF_SECRET_USER}@acme.io",  # the suffixed line stays Fill Text
+                 id="S06 typed text with a suffix"),
+    pytest.param(["${p3}    #pin"], ["Fill Secret    ${p3}    {{PW}}"], _FIELDS, ["USER", "PW", "PW"],
+                 "    Fill Secret    ${p3}    %NLRF_SECRET_PW", id="S15 Fill Secret"),
+    pytest.param(["${q}    #q", "${userval}    {{USER}}"], ["FOR    ${i}    IN RANGE    2", "    Fill Text    ${q}    ${userval}", "END"],
+                 _FIELDS, ["USER", "PW"], "${userval}    %{NLRF_SECRET_USER}", id="S16 loop typing a variable"),
+]
+
+
+@pytest.mark.parametrize("rows, body, fields, typed, pinned", _CHAIN)
+def test_the_real_chain_swaps_every_leftover_and_is_stable(rows, body, fields, typed, pinned):
+    from unittest.mock import MagicMock
+
+    from src.backend.services.dryrun_service import extract_and_normalize_robot_code
+
+    code = (_HEAD + "*** Variables ***\n" + "\n".join(_LOGIN_ROWS + rows) + "\n\n*** Test Cases ***\nScenario\n"
+            "    New Browser    chromium    headless=True\n    New Page    https://app.example/login\n"
+            + "".join(f"    {line}\n" for line in _LOGIN_BODY + body))
+    out_task = MagicMock(pydantic=MagicMock(code=code), json_dict=None, raw=None)
+    out = extract_and_normalize_robot_code(out_task, fields)
+    assert "{{" not in out
+    assert pinned in out.splitlines()  # the exact reference line survived every rewrite
+    typing = [line for line in out.splitlines() if re.search(r"(Fill|Type) Secret", line)]
+    assert [line.split("%NLRF_SECRET_")[1] for line in typing] == typed and all("%{" not in line for line in typing)
+    again = extract_and_normalize_robot_code(MagicMock(pydantic=MagicMock(code=out), json_dict=None, raw=None), fields)
+    assert again == out

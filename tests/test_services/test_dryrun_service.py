@@ -1317,3 +1317,41 @@ class TestRepairLlmIsHandedThePlaceholderNotTheEnvName:
     def test_code_without_an_env_name_is_handed_over_unchanged(self):
         _, _, mock_repair = self._run(self._PLACEHOLDER, self._PLACEHOLDER + "\n", [self._FAIL, self._PASS])
         assert mock_repair.call_args.args[1] == self._PLACEHOLDER
+
+
+def _dryrun_container_config(tmp_path, robot_code):
+    captured = {}
+    client = MagicMock()
+
+    def _capture(**kw):
+        captured.update(kw)
+        raise _Captured()
+    client.containers.run.side_effect = _capture
+    store = MagicMock()
+    store.run_dir.return_value = tmp_path / "r1"
+    with patch.object(ds, "get_artifact_store", return_value=store), \
+         patch.object(ds, "resolve_host_robot_tests_dir", return_value=str(tmp_path)), \
+         patch.object(ds, "normalize_docker_mount_source", side_effect=lambda p: p), \
+         patch.object(ds, "_force_remove_stale_container"):
+        try:
+            ds.run_dryrun_in_container(client, "r1", robot_code)
+        except _Captured:
+            pass
+    return captured
+
+
+def test_dryrun_container_gets_a_placeholder_env_for_each_secret_the_code_names(tmp_path):
+    """Robot resolves %{NAME} in a *** Variables *** row at suite start; the dryrun never reads the store."""
+    code = ("*** Variables ***\n${u}    %{NLRF_SECRET_PW}\n*** Test Cases ***\nT\n"
+            "    Fill Secret    id=p    %NLRF_SECRET_TOKEN\n    Log    %{NLRF_SECRET_PW}\n")
+    cfg = _dryrun_container_config(tmp_path, code)
+    assert cfg["environment"] == {
+        "NLRF_SECRET_PW": ds._DRYRUN_SECRET_PLACEHOLDER,
+        "NLRF_SECRET_TOKEN": ds._DRYRUN_SECRET_PLACEHOLDER,
+    }
+    assert ds._DRYRUN_SECRET_PLACEHOLDER.startswith("nlrf-dryrun-")
+
+
+def test_dryrun_container_has_no_environment_key_when_the_code_names_no_secret(tmp_path):
+    cfg = _dryrun_container_config(tmp_path, "*** Test Cases ***\nT\n    Log    x\n")
+    assert "environment" not in cfg
