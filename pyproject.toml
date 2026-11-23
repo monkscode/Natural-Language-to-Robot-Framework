@@ -17,8 +17,6 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "pydantic-settings",
-    "sse-starlette",
-    "aiohttp",
     "requests",
     # Configuration
     "python-dotenv",
@@ -27,17 +25,14 @@ dependencies = [
     "PyYAML",
     # Docker SDK (robot test execution)
     "docker",
-    # crewai 1.8.1 requires openai<1.84.dev0 (openai 1.83.x only).
-    # litellm 1.75.3 is the last version that accepts openai>=1.68.2 (compatible).
-    # litellm 1.75.4+ bumped to openai>=1.99.5 which crewai 1.8.1 blocks.
-    # The crewai 1.15.10 upgrade is blocked upstream (crewAIInc/crewAI#6774 —
-    # 1.15.x strips null from Optional schema fields); re-attempt after the fix ships.
-    "crewai==1.8.1",
-    "litellm==1.75.3",
+    # litellm is pinned to crewai 1.15.44's own [litellm] extra pin. A litellm bump can
+    # change Vertex parameter mapping per model family — assert on the wire, not the name.
+    # lancedb/pyarrow are left out via uv-overrides.txt: every `uv pip compile` must pass
+    # `--overrides uv-overrides.txt` (uv ignores [tool.uv] override-dependencies).
+    "crewai==1.15.44",
+    "litellm==1.105.3",
     # LLM providers
     "google-auth",
-    # ChromaDB — uses default ONNX embeddings (no pytorch/sentence-transformers)
-    "chromadb",
     # fastembed — standalone ONNX embeddings for the learning vectors on pgvector
     # (Phase 4 slice 6). Like ChromaDB it is onnxruntime-based; NO torch /
     # sentence-transformers (same constraint). We pin all-MiniLM-L6-v2 (384-dim),
@@ -58,7 +53,7 @@ dependencies = [
     # [pool] adds the ConnectionPool used by the auth store.
     "psycopg[binary,pool]",
     # Direct imports of the auth module. Both are otherwise only transitive
-    # (bcrypt via chromadb, PyJWT via crewai) and would vanish the moment those
+    # (bcrypt declared-only, PyJWT via crewai) and would vanish the moment those
     # are removed/upgraded — declare them so auth never depends on that accident.
     # bcrypt is used directly (NOT via passlib, which breaks on bcrypt 5.x).
     "bcrypt>=4.1,<6",

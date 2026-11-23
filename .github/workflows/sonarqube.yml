@@ -57,6 +57,7 @@ jobs:
           python -m pip install --upgrade pip uv
           uv pip install --system pytest pytest-cov
           uv pip compile pyproject.toml \
+            --overrides uv-overrides.txt \
             --python-platform linux \
             --python-version 3.12 \
             --output-file /tmp/requirements-ci.txt --quiet

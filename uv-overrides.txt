@@ -1,0 +1,5 @@
+# lancedb/pyarrow stay out of the install (crewai optional memory backend); every uv pip compile passes --overrides uv-overrides.txt
+lancedb; sys_platform == 'never'
+pyarrow; sys_platform == 'never'
+lance-namespace; sys_platform == 'never'
+lance-namespace-urllib3-client; sys_platform == 'never'
