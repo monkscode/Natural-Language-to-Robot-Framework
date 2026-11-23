@@ -764,6 +764,29 @@ def test_the_tests_surface_withholds_a_platform_admins_address_like_activity(
     assert body["versions"][0]["creator_is_platform_admin"] is True
 
 
+def test_an_admins_edited_run_does_not_unhide_the_version_it_left(client):
+    """An edited Generate run moves its row (the creator's only run) off
+    version 1 onto the code_edited version 2. Version 1 must stay withheld:
+    the flag asks about the creator's runs of this TEST, not of one version."""
+    tok_a, tok_b, _tok_c, org_id = _team_of_three(client)
+    from src.backend.auth.jwt_utils import decode_token
+    uid_a = decode_token(tok_a)["user_id"]
+    email_a = decode_token(tok_a)["email"]
+    admin_test, run_id = _seed_admin_test(
+        uid_a, org_id, email_a, "admin made this")
+    from src.backend.core.run_registry import get_run_registry
+    get_run_registry().record_start(
+        run_id, {"user_id": uid_a, "org_id": org_id, "email": email_a},
+        None, "running", robot_code="*** Tasks ***\nEdited",
+        is_platform_admin=True)
+    _file_into_new_folder(org_id, uid_a, admin_test)
+
+    versions = client.get(f"/api/tests/{admin_test}",
+                          headers=_auth(tok_b)).json()["versions"]
+    assert [v["reason"] for v in versions] == ["code_edited", None]
+    assert [v["created_by_email"] for v in versions] == [None, None]
+
+
 def test_a_platform_admin_still_reads_the_address_the_org_cannot(client):
     """The disjunction _hide_admin_author uses, restated here: this withholds
     an address from callers who do not hold that authority, and is not a
@@ -1445,6 +1468,41 @@ def test_new_test_mode_does_not_require_a_token(client):
         r = _regenerate(client, None, test_id, "x", mode="new_test")
     assert r.status_code == 200, r.text
     assert calls[0]["regenerate_test_id"] is None
+
+
+@pytest.mark.parametrize("mode", ["update", "new_test"])
+def test_versions_refuse_an_unknown_secret_before_generating(client, mode):
+    from unittest.mock import patch
+    from cryptography.fernet import Fernet
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls, \
+         patch("src.backend.auth.secrets.list_names", return_value=[]), \
+         patch("src.backend.auth.secrets.settings.SECRETS_ENCRYPTION_KEY",
+               Fernet.generate_key().decode()):
+        r = _regenerate(client, tok, test_id, "type {{NOPE}} in the box", mode=mode)
+    assert r.status_code == 400, r.text
+    assert "{{NOPE}}" in r.json()["detail"]
+    assert calls == []
+
+
+def test_versions_refuse_a_secret_when_the_key_is_unset(client):
+    from unittest.mock import patch
+    tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls, \
+         patch("src.backend.auth.secrets.settings.SECRETS_ENCRYPTION_KEY", ""):
+        r = _regenerate(client, tok, test_id, "type {{PW}}")
+    assert r.status_code == 400, r.text
+    assert "not set up" in r.json()["detail"]
+    assert calls == []
+
+
+def test_new_test_mode_refuses_a_secret_without_a_signed_in_user(client):
+    _tok, _claims, test_id = _seeded_test_for(client)
+    with _generation_captured() as calls:
+        r = _regenerate(client, None, test_id, "type {{PW}}", mode="new_test")
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Secrets in a request need a signed-in user."
+    assert calls == []
 
 
 def test_versions_audit_the_mode_that_was_asked_for(client, monkeypatch):

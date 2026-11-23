@@ -32,10 +32,13 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies six smaller deterministic rules defined
+The same cleanup step also applies seven smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
 `rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads`,
-`rewrite_typed_value_reads` and `rewrite_text_checks_whole_word`.
+`rewrite_typed_value_reads`, `rewrite_text_checks_whole_word` and `rewrite_empty_loop_checks`.
+The org-secret rules have their own section: `link_secret_fields` (first in that step, #166),
+`rewrite_secret_fills` (last, #131), `restore_secret_placeholders` (for the repair LLM) and
+`typed_secret_names` (the workflow's secret-not-typed signal).
 
 Two further public functions are not part of that cleanup step:
 `insert_change_waits` puts a before-read and a never-failing wait around a read
@@ -49,7 +52,7 @@ Referenced by:
     src.backend.services.dryrun_service.validate_and_repair
         (insert_change_waits after every repair, remove_change_waits before it)
     src.backend.services.workflow_service.run_agentic_workflow
-        (insert_change_waits after generation)
+        (insert_change_waits after generation, typed_secret_names after the gate)
     src.backend.services.workflow_service._stream_docker_execution
         (remove_change_waits for the learning hand-off)
 
@@ -60,6 +63,7 @@ Depends on:
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from src.backend.core.pass_quality import check_pass_quality, norm_locator
@@ -1374,6 +1378,8 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
     environment) in the same call (`Run Keyword    Fill ${EMPTY}Secret    <L>
     ${{chr(36)+'pw'}}`), and a `Secret` passed in from outside the file (a
     `--variable`, a variable file, a library; the runner passes none).
+    A `{{NAME}}` org-secret placeholder anywhere in the file counts too: it
+    becomes Fill Secret after this rewrite runs.
     Idempotent.
     """
     if not robot_code:
@@ -1382,8 +1388,10 @@ def rewrite_typed_value_reads(robot_code: str) -> str:
         return robot_code
     if _BARE_OR_ESCAPED_DOLLAR_RE.search(robot_code) or "%" in robot_code or "\\" in robot_code:
         return robot_code  # a secret form ($name, %NAME) or a Robot escape that builds one: the read would log it
-    if _names_secret_keyword(robot_code):
-        return robot_code  # Fill Secret / Type Secret, whatever its arguments: the read would log the secret
+    if _names_secret_keyword(robot_code) or _SECRET_PLACEHOLDER_RE.search(robot_code):
+        # Fill Secret / Type Secret, whatever its arguments — or a `{{NAME}}` placeholder that the secret rewrite
+        # (last in the chain) turns into Fill Secret: the read would log the secret
+        return robot_code
     suite = _parse_suite(robot_code)
     if suite is None:
         return robot_code
@@ -1586,6 +1594,152 @@ def rewrite_text_checks_whole_word(robot_code: str) -> str:
     return _apply_rewrites(
         robot_code, suite, rewrites, _TEXT_CHECK_GUARD,
         "Text check normalizer", "Should Contain line(s)", f"{_SHOULD_MATCH_REGEXP} (whole words, any letter case)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Empty loops: a FOR over a `Get Elements` list that checks each row's text
+# passes when the list is empty. Runs on the shared suite reader above.
+# ---------------------------------------------------------------------------
+
+# Should Not Be Empty is what it writes; the others are the keywords whose meaning the rule reads.
+_EMPTY_LOOP_GUARD = (
+    "Should Not Be Empty", "Get Elements", "Get Text", "Should Contain", "Exit For Loop If", "Continue For Loop If",
+)
+_EMPTY_LOOP_MESSAGE = "No matching element was found, so nothing was checked"
+# The one blank-row skip accepted; group 1 is the variable it tests.
+_BLANK_ROW_SKIP_RE = re.compile(r"len\(\$(\w+)\.strip\(\)\) == 0")
+# `@{rows}=` / `${rows}=` with a plain name (no type, no attribute, no item, nothing nested).
+_LIST_ASSIGNMENT_RE = re.compile(r"[$@]\{([^${}@&%.\[\]:]+)\}\s*=?")
+_LIST_CELL_RE = re.compile(r"@\{([^{}]+)\}")
+
+
+def _is_marker(step: _Step, marker: str) -> bool:
+    """True when the step is exactly the upper-case Robot marker (`FOR`, `END`): Robot reads no other case."""
+    return step.keyword_idx is not None and step.parts[step.keyword_idx].strip() == marker
+
+
+def _is_text_check(step: _Step, text_var: str) -> bool:
+    """A BuiltIn `Should Contain    ${text}    VALUE [ignore_case=True]` on the variable `text_var`."""
+    if (step.setting or step.continued or step.assigns or step.keyword != "should contain"
+            or step.prefix not in _BUILTIN_PREFIXES or len(step.args) not in (2, 3)
+            or step.args[2:] not in ([], ["ignore_case=True"])):
+        return False
+    target = _SCALAR_CELL_RE.fullmatch(step.args[0])
+    value = step.args[1]
+    return (target is not None and _canon_variable(target.group(1)) == text_var
+            and not ("=" in value and value.split("=", 1)[0] in _SHOULD_CONTAIN_ARGUMENTS))
+
+
+def _empty_loop_line(suite: _Suite, test: _Test, i: int) -> str | None:
+    """The `Get Elements` line of `test.steps[i]` followed by the guard line, or None unless a loop of the
+    accepted shape follows it (see rewrite_empty_loop_checks)."""
+    steps = test.steps
+    get = steps[i]
+    if (get.continued or len(get.assigns) != 1 or get.keyword != "get elements"
+            or get.prefix not in _BROWSER_PREFIXES or len(get.args) != 1
+            or get.args[0].startswith(("@{", "&{")) or i + 1 >= len(steps)):
+        return None
+    assigned = _LIST_ASSIGNMENT_RE.fullmatch(get.parts[_content_cells(get.parts)[0]].strip())
+    loop = steps[i + 1]
+    if assigned is None or loop.continued or loop.assigns or not _is_marker(loop, "FOR") or len(loop.args) != 3:
+        return None
+    name = assigned.group(1)
+    row = _SCALAR_CELL_RE.fullmatch(loop.args[0])
+    source = _LIST_CELL_RE.fullmatch(loop.args[2])
+    if (row is None or loop.args[1] != "IN" or source is None
+            or _canon_variable(source.group(1)) != _canon_variable(name)):
+        return None
+    end = next((j for j in range(i + 2, len(steps)) if _is_marker(steps[j], "END")), None)
+    if end is None or steps[end].args or steps[end].assigns or steps[end].continued:
+        return None
+    body = steps[i + 2:end]
+    if len(body) < 2 or any(step.setting or step.continued for step in body):
+        return None
+    read, rest = body[0], body[1:]
+    if (not read.scalar_assign or len(read.assigns) != 1 or read.keyword != "get text"
+            or read.prefix not in _BROWSER_PREFIXES or len(read.args) != 1):
+        return None
+    read_of = _SCALAR_CELL_RE.fullmatch(read.args[0])
+    if read_of is None or _canon_variable(read_of.group(1)) != _canon_variable(row.group(1)):
+        return None
+    text_var = read.assigns[0]
+    if rest[0].keyword in ("exit for loop if", "continue for loop if"):
+        skip, rest = rest[0], rest[1:]
+        skips = _BLANK_ROW_SKIP_RE.fullmatch(skip.args[0]) if len(skip.args) == 1 else None
+        if skip.assigns or skip.prefix not in _BUILTIN_PREFIXES or skips is None or _canon_variable(skips.group(1)) != text_var:
+            return None
+    if not rest or not all(_is_text_check(step, text_var) for step in rest):
+        return None
+    canon = _canon_variable(name)
+    if any(n not in (get.line_no, loop.line_no) and _mentions_variable(suite.lines[n], canon) for n in test.line_nos):
+        return None
+    # A line Robot runs that the reader dropped (typed or item assignment, a one-space-indented line, an
+    # unindented `...` line) could sit anywhere between the loop's lines: only those lines may be there.
+    shown = {loop.line_no, *(step.line_no for step in body)}
+    for n in range(get.line_no + 1, steps[end].line_no):
+        stripped = suite.lines[n].strip()
+        if stripped and not stripped.startswith("#") and n not in shown:
+            return None
+    guard = f"{get.parts[1]}Should Not Be Empty    ${{{name}}}    msg={_EMPTY_LOOP_MESSAGE}{get.eol}"
+    return f"{suite.lines[get.line_no]}\n{guard}"
+
+
+def _empty_loop_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number of each accepted `Get Elements` line -> that line + "\\n" + the guard line."""
+    rewrites = {}
+    for test in suite.tests:
+        # Robot runs every row of a templated test, the guard included, as the template's arguments.
+        if any(step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[template]" for step in test.steps):
+            continue
+        for i, step in enumerate(test.steps):
+            line = _empty_loop_line(suite, test, i)
+            if line is not None:
+                rewrites[step.line_no] = line
+    return rewrites
+
+
+def rewrite_empty_loop_checks(robot_code: str) -> str:
+    """Put `Should Not Be Empty    ${rows}    msg=…` after a `Get Elements` line whose list is only checked in a loop.
+
+    A FOR over an empty list runs zero times, and `Get Elements` waits up to the Browser timeout for the first match
+    and then returns `[]` without failing: `Fill Text` a search that matches nothing, loop over the rows, and the
+    test passes having checked nothing.
+
+    Rewritten, inside one test: `@{rows}=    Get Elements    LOCATOR` (or `${rows}=`, plain name, one argument, no
+    library prefix or `Browser.`), the very next step `FOR    ${row}    IN    @{rows}`, and a body, up to the first
+    `END`, of exactly: `${text}=    Get Text    ${row}`; optionally one `Exit For Loop If` / `Continue For Loop If`
+    whose only argument is `len($text.strip()) == 0`; then one or more BuiltIn `Should Contain    ${text}    VALUE`
+    (optionally with `ignore_case=True`; VALUE not a named argument). The new line carries the `Get Elements`
+    line's indent and line end. Comment and blank lines may sit anywhere.
+
+    Left alone: any other body (a `Should Not Contain`, a `Log`, an `IF`, a count), a step between the two lines,
+    `IN RANGE` / `IN ENUMERATE`, any other skip condition, a read variable that is not the checked one, a list named
+    on any other line of the test (a second loop, a `Get Length`, a `Log` after `END`), lower-case `for` / `In` /
+    `end` (Robot reads a lower-case `for` / `end` as a keyword call and rejects any other spelling of `IN`), a FOR
+    with no `END`, a `...`-continued line, any line between `Get Elements` and `END` that the shared reader drops
+    (typed or item assignment, a one-space-indented line, an unindented `...` line), a test with a `[Template]`
+    setting line in its body (a template on the test-name line is not seen; Robot then fails the file at dryrun with
+    or without the new line), a loop in a user keyword, and whole files that hold `language:`, a `TRY`, their own
+    keywords under an error-catching wrapper, or their own `Should Not Be Empty` / `Get Elements` / `Get Text` /
+    `Should Contain` / `Exit For Loop If` / `Continue For Loop If`, or that the reader refuses.
+
+    Idempotent: after the rewrite the next step is no longer the FOR. If `rewrite_text_checks_whole_word` ever
+    reaches loop bodies, accept `Should Match Regexp` here or run this first.
+    """
+    if not robot_code:
+        return robot_code
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.lower())
+    if "getelements" not in squashed or "shouldcontain" not in squashed:
+        return robot_code
+    if "language:" in robot_code.lower():
+        return robot_code  # translated settings (a template among them) are invisible to the reader
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _empty_loop_rewrites(suite), _EMPTY_LOOP_GUARD,
+        "Empty loop normalizer", "loop(s)", "a Should Not Be Empty guard (signal: empty-loop-guard)",
     )
 
 
@@ -2063,6 +2217,218 @@ def remove_change_waits(robot_code: str) -> str:
     except Exception:
         logger.warning("Change-wait remover: left the file unchanged — it raised", exc_info=True)
         return robot_code
+
+
+# ---------------------------------------------------------------------------
+# Org secrets (#131): the query names `{{NAME}}`, the LLMs only ever see that
+# placeholder, and the generated `Fill Text … {{NAME}}` becomes
+# `Fill Secret … %NLRF_SECRET_NAME` (the runner injects that env variable).
+# restore_secret_placeholders is the inverse, for the dryrun repair LLM.
+# ---------------------------------------------------------------------------
+
+_SECRET_PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
+_SECRET_ENV_ARG_RE = re.compile(r"%NLRF_SECRET_([A-Z][A-Z0-9_]{0,63})")
+_SECRET_ENV_MARK = "%NLRF_SECRET_"
+_SECRET_FROM_TEXT = {"fill text": "Fill Secret", "type text": "Type Secret"}
+_TEXT_FROM_SECRET = {"fill secret": "Fill Text", "type secret": "Type Text"}
+
+
+def _secret_step_edits(robot_code: str, keywords: dict[str, str], resolved: bool,
+                       value_of: Callable[[str], str | None]) -> str:
+    """Rewrite each typing step whose second argument `value_of` accepts (returns the new cell for).
+
+    `resolved`: a followable test resolves a whole-cell `${var}` first; a test the reader cannot follow
+    (a control structure) uses the RAW argument, so only a literal placeholder is seen there; a test with a
+    `[Template]` is skipped (its rows are data, not calls)."""
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    lines = list(suite.lines)
+    changed = False
+    for test in suite.tests:
+        if resolved and not test.followable:
+            if any(s.setting and re.sub(_SPACE_UNDERSCORE, "", s.keyword) == "[template]" for s in test.steps):
+                continue
+            all_args = [s.args for s in test.steps]
+        else:
+            all_args = _follow(test, suite.variables) if resolved else [s.args for s in test.steps]
+        for step, args in zip(test.steps, all_args):
+            if step.keyword not in keywords or step.prefix not in _BROWSER_PREFIXES or len(args) < 2 or args[1] is None:
+                continue
+            cell = value_of(args[1])
+            if cell is not None:
+                lines[step.line_no] = _rebuild(step, keywords[step.keyword], replace_second_arg=cell)
+                changed = True
+    return "\n".join(lines) if changed else robot_code
+
+
+def _secret_env_cell(value: str) -> str | None:
+    match = _SECRET_PLACEHOLDER_RE.fullmatch(value)
+    return f"{_SECRET_ENV_MARK}{match.group(1).upper()}" if match else None
+
+
+def _secret_placeholder_cell(value: str) -> str | None:
+    match = _SECRET_ENV_ARG_RE.fullmatch(value)
+    return "{{" + match.group(1) + "}}" if match else None
+
+
+def rewrite_secret_fills(robot_code: str) -> str:
+    """`Fill Text    LOC    {{NAME}}` -> `Fill Secret    LOC    %NLRF_SECRET_NAME` (`Type Text` -> `Type Secret`).
+
+    The second argument must be, after resolving a whole-cell `${var}` that a *** Variables *** row or a
+    `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces); the name
+    goes upper-case. The library prefix (`Browser.`) is kept; a Variables row is left as it is. Left alone: a
+    placeholder inside longer text, a check line holding one, a `${var}` argument in a test the shared reader
+    cannot follow (a control structure: only a literal placeholder is rewritten there), a `[Template]` test,
+    and the whole file when the reader refuses it. Idempotent.
+    """
+    if not robot_code or "{{" not in robot_code:
+        return robot_code
+    out = _secret_step_edits(robot_code, _SECRET_FROM_TEXT, True, _secret_env_cell)
+    if out != robot_code:
+        logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
+    return out
+
+
+# #166: when the LLM did not keep `{{NAME}}`, the field the plan typed it into decides.
+_SECRET_TYPING = {**_SECRET_FROM_TEXT, "fill secret": "Fill Secret", "type secret": "Type Secret"}
+
+
+def _field_key(locator: str) -> str:
+    """A locator in the spelling the pipeline writes, where `id=x`, `css=#x` and `#x` compare equal and a
+    leading `css=` is dropped."""
+    code = strip_redundant_css_prefix(normalize_robot_code("*** Variables ***\n${x}    " + locator.strip()))
+    canon = _canon_locator(code.split("\n")[1].split("    ", 1)[1])
+    return canon[4:] if canon.startswith("css=") else canon
+
+
+def _definition_lines(suite: _Suite, var: str) -> list[int] | None:
+    """The lines defining `${var}`: one-value *** Variables *** rows and `${var}=    Set Variable    x` test
+    steps. None when any definition has another shape (a `...` line, more values, a list, another keyword)."""
+    found: list[int] = []
+    section = None
+    for line_no, raw in enumerate(suite.lines):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        header = _section_header_name(line)
+        if header is not None:
+            section = header
+            continue
+        if section not in _VARIABLE_SECTIONS:
+            continue
+        parts = _CELL_SPLIT_RE.split(line)
+        cells = _content_cells(parts)
+        match = cells and _VARIABLE_ENTRY_RE.fullmatch(parts[cells[0]].strip())
+        if match and _canon_variable(match.group(2).split(":", 1)[0]) == var:
+            following = next((n.strip() for n in suite.lines[line_no + 1:]
+                              if n.strip() and not n.strip().startswith("#")), "")
+            if match.group(1) != "$" or len(cells) != 2 or following.startswith("..."):
+                return None
+            found.append(line_no)
+    for test in suite.tests:
+        for step in test.steps:
+            if var in step.assigns:
+                if (step.keyword != "set variable" or step.prefix not in _BUILTIN_PREFIXES
+                        or len(step.assigns) != 1 or len(step.args) != 1 or step.continued):
+                    return None
+                found.append(step.line_no)
+    return found
+
+
+def link_secret_fields(robot_code: str, fields) -> str:
+    """The field the plan typed a secret into decides how the test types it (#166).
+
+    `fields`: `(locator, NAME or None)` per plan typing step on a field browser-service found, in plan order
+    (`element_identification.secret_fields`; None = the step typed a literal). For each field holding a NAME,
+    the test's typing steps on it (`Fill Text` / `Type Text` / `Fill Secret` / `Type Secret`; locators resolved
+    by the shared reader, only literal ones in a test it cannot follow) pair with the plan's by order, and only
+    when the counts are equal; each secret step becomes `Fill Secret    LOC    %NLRF_SECRET_NAME` (`Type …` ->
+    `Type Secret`), whatever the LLM typed. Locators compare in the pipeline's spelling (`id=x` = `css=#x` =
+    `#x`, a leading `css=` dropped). The variable a rewritten step typed from: one single-line definition (a
+    *** Variables *** row or a `Set Variable` step) that nothing else reads is deleted; one another line reads
+    gets `{{NAME}}` as its value (rewrite_secret_fills then types that reader as the secret); several,
+    multi-line or other definitions stay. No stored value is read. Left alone: no field with a NAME, a count
+    that differs, a typing step inside a user keyword, a file the reader refuses. Idempotent; the input object
+    comes back when nothing changes.
+    """
+    wanted: dict[str, list[str | None]] = {}
+    for locator, name in fields or ():
+        wanted.setdefault(_field_key(locator), []).append(name)
+    wanted = {key: names for key, names in wanted.items() if any(names)}
+    suite = _parse_suite(robot_code) if wanted else None
+    if suite is None:
+        return robot_code
+    typed: dict[str, list[_Step]] = {}
+    for test in suite.tests:
+        all_args = _follow(test, suite.variables) if test.followable else [s.args for s in test.steps]
+        for step, args in zip(test.steps, all_args):
+            if step.keyword in _SECRET_TYPING and step.prefix in _BROWSER_PREFIXES and len(args) >= 2 and args[0]:
+                key = _field_key(args[0])
+                if key in wanted:
+                    typed.setdefault(key, []).append(step)
+    lines = list(suite.lines)
+    linked = 0
+    typed_from: dict[str, str] = {}
+    for key, names in wanted.items():
+        steps = typed.get(key, [])
+        if len(steps) != len(names):
+            continue  # the test types this field a different number of times than the plan: left as today
+        for step, name in zip(steps, names):
+            if name is None:
+                continue
+            env = _SECRET_ENV_MARK + name
+            if not (step.keyword in _TEXT_FROM_SECRET and step.args[1] == env):
+                lines[step.line_no] = _rebuild(step, _SECRET_TYPING[step.keyword], replace_second_arg=env)
+                linked += 1
+            ref = _SCALAR_CELL_RE.fullmatch(step.args[1]) or (
+                step.keyword in _TEXT_FROM_SECRET and _EXPRESSION_VAR_RE.fullmatch(step.args[1]))
+            if ref:
+                typed_from[_canon_variable(ref.group(1))] = name
+    removed: set[int] = set()
+    for var, name in typed_from.items():
+        defs = _definition_lines(suite, var)
+        if not defs or len(defs) != 1:
+            continue  # none, several, or a shape this reader cannot rewrite: left as written
+        if not any(_mentions_variable(line, var) for i, line in enumerate(lines) if i != defs[0]):
+            removed.add(defs[0])  # nothing reads it any more: the LLM's own value goes
+            continue
+        parts = _CELL_SPLIT_RE.split(lines[defs[0]])
+        value_idx = _content_cells(parts)[-1]
+        parts[value_idx] = parts[value_idx].replace(parts[value_idx].strip(), "{{" + name + "}}", 1)
+        lines[defs[0]] = "".join(parts)
+    out = "\n".join(line for i, line in enumerate(lines) if i not in removed)
+    if out == robot_code:
+        return robot_code
+    logger.info(f"Secret field link: {linked} typing step(s) became Fill/Type Secret, {len(removed)} variable "
+                "definition(s) removed (signal: secret-field-linked)")
+    return out
+
+
+def typed_secret_names(robot_code: str) -> set[str]:
+    """The NAMEs a test types with `Fill Secret` / `Type Secret` as `%NLRF_SECRET_NAME` (or a resolved `${var}`
+    holding it): the only forms Browser types the secret from. Empty when the reader refuses the file."""
+    names: set[str] = set()
+
+    def note(value: str) -> None:
+        match = _SECRET_ENV_ARG_RE.fullmatch(value)
+        if match:
+            names.add(match.group(1))
+
+    if robot_code and _SECRET_ENV_MARK in robot_code:
+        _secret_step_edits(robot_code, _TEXT_FROM_SECRET, True, note)
+    return names
+
+
+def restore_secret_placeholders(robot_code: str) -> str:
+    """The inverse of `rewrite_secret_fills` for our prefix only: `Fill Secret    LOC    %NLRF_SECRET_NAME`
+    -> `Fill Text    LOC    {{NAME}}` (`Type Secret` -> `Type Text`), so the repair LLM never sees the env name.
+
+    Touches only a `Fill Secret` / `Type Secret` line (with or without `Browser.`) whose second argument is
+    exactly `%NLRF_SECRET_<UPPER-CASE NAME>`; a hand-written `Fill Secret … $x` or `%OTHER_ENV` stays. Returns the
+    input object when there is nothing to restore or the reader refuses the file.
+    """
+    if not robot_code or _SECRET_ENV_MARK not in robot_code:
+        return robot_code
+    return _secret_step_edits(robot_code, _TEXT_FROM_SECRET, False, _secret_placeholder_cell)
 
 
 def normalize_robot_code(robot_code: str) -> str:

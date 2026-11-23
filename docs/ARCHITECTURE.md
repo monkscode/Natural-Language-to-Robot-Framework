@@ -184,7 +184,7 @@ assembler --> threadqueue : 9. Robot code\n(via queue)
 
 workflow --> factory : Load library context
 factory --> planner : planning_context
-factory --> assembler : code_assembly_context
+factory --> assembler : base text (core_rules)
 
 ident --> flaskapi : 10. POST /workflow\n(batch elements, one call)
 flaskapi --> taskqueue : 11. Create task
@@ -307,7 +307,7 @@ Code lives in `tools/browser_service/locators/` (synced from the separate
 
 ## Performance Characteristics
 
-Measured on the 30-query benchmark, 2026-07-11 (Vertex, gemini-flash pins):
+Measured on the benchmark (10 queries × 3 repeats = 30 runs), 2026-07-11 (Vertex, gemini-flash pins):
 - **Pass rate**: 93.3% (28/30), locator success 1.0
 - **End-to-end (generate + execute)**: median ~37s, p90 ~52s
 - **LLM calls per run**: median 4 (planner 1, assembler 1, browser-use ~2-3)
@@ -325,7 +325,7 @@ they are recorded in `test_runs` with status `'error'` and an `error_message`. S
 ## Scalability
 
 - Up to `MAX_CONCURRENT_WORKFLOWS` (default 10, see `config.py`) workflows in parallel
-- The BrowserUse service processes one workflow at a time (busy → 429)
+- The BrowserUse service runs up to `MAX_CONCURRENT_TASKS` (default 10) tasks at once and answers 429 at capacity
 - Future improvements: parallel element detection, distributed execution
 
 ## Security Model
@@ -473,7 +473,11 @@ Stage 2 — Element identification (deterministic Python, NOT an agent):
 
 Stage 3 — Code Assembler (LLM agent, own single-task crew):
   Input:  Steps with validated locators
-  Uses:   library_context.code_assembly_context
+  Uses:   assembler_base_context (intro + library_context.core_rules) on both
+          learning paths; learning ON appends the learned keyword block only
+          when the org has learned keyword patterns (a fresh org gets the base
+          text alone); the
+          dryrun repair call uses library_context.code_assembly_context
           (no tools — per-query keyword knowledge arrives via the
            optimized context when learning is ON)
   Output: Complete .robot file — extracted from the assembler crew's
@@ -559,8 +563,9 @@ Stage 3 — Code Assembler (LLM agent, own single-task crew):
 2. **BrowserUse polling**: element identification polls `/query/{task_id}`
    (5s interval); WebSockets could reduce latency.
 3. **Docker image build**: one-time 2-5 minute penalty, cached afterwards.
-4. **Single BrowserUse task**: the service processes one workflow at a time
-   (`429 Busy` otherwise) — the cross-workflow concurrency limit in practice.
+4. **BrowserUse capacity**: the service runs up to `MAX_CONCURRENT_TASKS`
+   (default 10) tasks at once and answers `429` at capacity, alongside
+   NLRF's own `MAX_CONCURRENT_WORKFLOWS` (default 10).
 
 ### Security Considerations
 

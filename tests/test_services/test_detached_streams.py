@@ -204,6 +204,33 @@ class TestDetachedHelper:
                    and "boom_stream" in r.getMessage() and r.exc_info
                    for r in caplog.records)
 
+    def test_a_quiet_job_gets_heartbeats_between_its_events(self):
+        # A proxy cuts an idle stream (AWS ALB 60 s, Cloudflare 100 s); a test
+        # run can be silent for minutes, so the relay fills the gap.
+        async def job():
+            yield "data: one\n\n"
+            await asyncio.sleep(0.25)
+            yield "data: two\n\n"
+
+        async def collect():
+            return [sse async for sse in ws._detached(job)()]
+
+        with patch.object(ws, "_RELAY_HEARTBEAT_S", 0.05):
+            got = asyncio.run(collect())
+        assert got[0] == "data: one\n\n" and got[-1] == "data: two\n\n"
+        assert set(got[1:-1]) == {": heartbeat\n\n"}
+
+    def test_a_busy_job_gets_no_heartbeat(self):
+        async def job():
+            yield "data: one\n\n"
+            yield "data: two\n\n"
+
+        async def collect():
+            return [sse async for sse in ws._detached(job)()]
+
+        with patch.object(ws, "_RELAY_HEARTBEAT_S", 0.05):
+            assert asyncio.run(collect()) == ["data: one\n\n", "data: two\n\n"]
+
     def test_concurrent_streams_do_not_cross_events(self):
         def make(name):
             async def job():

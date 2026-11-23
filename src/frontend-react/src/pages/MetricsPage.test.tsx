@@ -199,6 +199,23 @@ describe('MetricsPage — the recent-runs table', () => {
     expect(screen.getByText('3 calls · $0.0200')).toBeInTheDocument()
   })
 
+  it('signs a context-size increase "+" and a decrease "−"', () => {
+    setup({ recent: [metricsRow({
+      context_reduction: { baseline_tokens: 541, optimized_tokens: 1267, reduction_percentage: -134.2 },
+    })] })
+    fireEvent.click(screen.getByText('https://flipkart.com'))
+    expect(screen.getByText('541 → 1,267 (+134.2%)')).toBeInTheDocument()
+    expect(screen.getByText('Context change')).toBeInTheDocument()
+    expect(screen.queryByText('Context reduction')).toBeNull()
+
+    cleanup()
+    setup({ recent: [metricsRow({
+      context_reduction: { baseline_tokens: 728, optimized_tokens: 541, reduction_percentage: 25.69 },
+    })] })
+    fireEvent.click(screen.getByText('https://flipkart.com'))
+    expect(screen.getByText('728 → 541 (−25.7%)')).toBeInTheDocument()
+  })
+
   it('treats a per-ROW success rate as a 0–1 fraction', () => {
     // The mirror of the summary test: 0.75 here must render "75.0%", and the
     // two conventions must not be unified without changing the backend.

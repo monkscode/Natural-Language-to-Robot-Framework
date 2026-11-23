@@ -38,8 +38,9 @@ env/
 .gitattributes
 
 # Logs
-*.log
-logs/
+**/*.log
+**/logs/
+**/*.tsbuildinfo
 bus.log
 run.log
 cleanup_worker.log

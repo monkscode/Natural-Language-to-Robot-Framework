@@ -22,6 +22,9 @@ Every job the old agent did is a mechanical rule, ported here as code:
     deliberately NOT stapled onto the steps or IdentifiedElement (the
     Assembler must never see them); they travel BESIDE the steps as the
     `change_waits` list that identify_elements returns (change_waits_from)
+  - secret fields (#166): each plan typing step on a found field, with the
+    NAME of an exact `{{NAME}}` value, also travels BESIDE the steps as
+    `secret_fields` (secret_fields) for robot_code_normalizer.link_secret_fields
 
 Steps arriving from crew._extract_plan_steps are PlanOutput-validated
 (fail-fast, pre-browser); merge_locators additionally filters each step to
@@ -42,6 +45,10 @@ kickoffs). Depends on: tasks.py models, tools.browser_use_tool (lazily).
 import logging
 import re
 from typing import Any, Callable
+
+import structlog
+
+from src.backend.core.secret_scrub import mask_values
 
 from .tasks import IdentifiedElement, PlannedStep
 
@@ -107,6 +114,23 @@ _ACTION_PREFIXES: tuple[tuple[str, str], ...] = (
     ("get ", "get_text"), ("wait ", "get_text"),
     ("hover", "get_text"), ("upload", "get_text"),
 )
+
+# get_text keywords that find an element without reading a value from it
+# (#162). Their element is flagged `locate_only`, so browser-service's "a read
+# locator must not hold the value" rule may keep a locator that names the
+# step's text when it lands on the element the agent pointed at. An exact
+# allowlist, no prefixes: everything else mapped to get_text — Get Attribute,
+# Get Classes, a wait that checks text (Wait Until Element Contains, Wait For
+# Condition), "Hover And Get Text", unknown keywords — stays a read, the
+# conservative side.
+_LOCATE_ONLY_KEYWORDS = frozenset({
+    "wait for elements state", "wait until element is visible",
+    "wait until element is not visible", "wait until element is enabled",
+    "hover", "get element count", "upload file by selector", "upload file",
+    # A state check returns only state flags (visible, enabled, checked), never
+    # text; the visibility rewrite usually makes it a wait in the final test.
+    "get element states",
+})
 
 # Dedup precedence: when several steps share one element, the element's action
 # is the highest-precedence one and the value comes from that winning step
@@ -482,6 +506,20 @@ def _apply_action_value(element: dict[str, Any], action: str, value: Any) -> Non
         element["value"] = value
 
 
+def _mark_locate_only(element: dict[str, Any] | None, keyword: Any, created: bool = False) -> None:
+    """#162: flag an element a locate-only step creates; any step that reads or acts drops the flag for good."""
+    if element is None:
+        return
+    locate_only = (
+        action_for_keyword(keyword) == "get_text"
+        and _normalize_keyword(keyword) in _LOCATE_ONLY_KEYWORDS
+    )
+    if created and locate_only:
+        element["locate_only"] = True
+    elif not locate_only:
+        element.pop("locate_only", None)
+
+
 def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, str]]:
     """Build the batch-tool element specs from the plan.
 
@@ -538,12 +576,14 @@ def build_elements(steps: list[Any]) -> tuple[list[dict[str, Any]], dict[int, st
         value = step.get("value")
 
         element = by_description.get(description)
+        _mark_locate_only(element, step.get("keyword"))
         if element is None:
             element = {
                 "id": f"elem_{len(elements) + 1}",
                 "description": description,
                 "action": action,
             }
+            _mark_locate_only(element, step.get("keyword"), created=True)
             if pending_navigation:
                 element["navigate_before"] = pending_navigation
             _apply_action_value(element, action, value)
@@ -665,32 +705,111 @@ def _identified_from_entry(
 _batch_tool = None
 
 
-def _default_run_tool(elements: list[dict[str, Any]], url: str, user_query: str) -> dict[str, Any]:
+def _default_run_tool(
+    elements: list[dict[str, Any]], url: str, user_query: str, secrets: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Call the real batch tool (lazy import keeps unit tests network-free)."""
     global _batch_tool
     if _batch_tool is None:
         from tools.browser_use_tool import BatchBrowserUseTool
         _batch_tool = BatchBrowserUseTool()
-    return _batch_tool._run(elements=elements, url=url, user_query=user_query)
+    return _batch_tool._run(elements=elements, url=url, user_query=user_query, secrets=secrets)
+
+
+_SECRET_VALUE_RE = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]{0,63})\s*\}\}")
+
+
+def _secret_values(elements: list[dict[str, Any]]) -> dict[str, str]:
+    """{NAME: the org's stored value} for each value that is exactly `{{NAME}}`; `elements` is not
+    changed. Nothing to hand over (no such value, no user, no org, name no longer stored) is {}.
+    A lost or unset key raises (SecretsUnavailable; an unreadable stored value as a RuntimeError
+    sentence) and fails the generation."""
+    wanted = {}
+    for index, element in enumerate(elements):
+        value = element.get("value")
+        match = _SECRET_VALUE_RE.fullmatch(value) if isinstance(value, str) else None
+        if match:
+            wanted[index] = match.group(1).upper()
+    if not wanted:
+        return {}
+    from cryptography.fernet import InvalidToken
+    from src.backend.auth import secrets  # lazy: the auth stack stays out of plain element tests
+
+    org_id = secrets.org_of(structlog.contextvars.get_contextvars().get("user_id"))
+    if not org_id:
+        return {}
+    try:
+        stored = secrets.get_values(org_id, set(wanted.values()))
+    except InvalidToken:  # carries no text: the user would see a blank "An error occurred: "
+        raise RuntimeError(
+            "This request's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
+            "Add them again on the Secrets page, then try again."
+        ) from None
+    return dict(stored)
+
+
+def _swap_values_back(node: Any, name_of_value: dict[str, str]) -> Any:
+    """`node` with every stored value, in every string at any depth (dict keys too), replaced by
+    its `{{NAME}}`; longest value first, in ONE pass, so nothing is half-swapped or swapped twice."""
+    if not name_of_value:
+        return node
+    pattern = re.compile("|".join(re.escape(v) for v in sorted(name_of_value, key=len, reverse=True)))
+
+    def swap(item: Any) -> Any:
+        if isinstance(item, str):
+            return pattern.sub(lambda m: name_of_value[m.group(0)], item)
+        if isinstance(item, dict):
+            return {swap(k): swap(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return type(item)(swap(v) for v in item)
+        return item
+
+    return swap(node)
+
+
+def secret_fields(merged: list[dict[str, Any]]) -> tuple[tuple[str, str | None], ...]:
+    """The plan's typing steps on fields browser-service found, as `(locator, NAME or None)` in plan order:
+    NAME (upper-cased) when the step's value is exactly `{{NAME}}`, None for any other value; () when no
+    step types a secret. Kept beside the steps like not_found (#166: link_secret_fields reads it)."""
+    fields = []
+    for step in merged:
+        if step.get("found") and step.get("locator") and action_for_keyword(step.get("keyword") or "") == "input":
+            value = step.get("value")
+            match = _SECRET_VALUE_RE.fullmatch(value) if isinstance(value, str) else None
+            fields.append((step["locator"], match.group(1).upper() if match else None))
+    return tuple(fields) if any(name for _, name in fields) else ()
 
 
 def _fetch_locator_mapping(
     elements: list[dict[str, Any]],
     url: str,
     user_query: str,
-    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None,
+    run_tool: Callable[..., dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
     """ONE batch tool call; every failure mode returns {} (placeholder path)."""
     runner = run_tool or _default_run_tool
+    # bs types each value itself; the swap-back stays for page text that shows one (D22).
+    secrets = _secret_values(elements)
+    name_of_value = {secrets[name]: "{{" + name + "}}" for name in sorted(secrets, reverse=True)}
     try:
-        response = runner(elements, url, user_query) or {}
-    except Exception:
+        response = (runner(elements, url, user_query, secrets=secrets) if secrets
+                    else runner(elements, url, user_query)) or {}
+    except Exception as exc:
         # CONTRACT: no retry, no reformulation — degrade to placeholders.
-        logger.exception(
-            "batch_browser_automation raised — steps fall back to the "
-            "found:false placeholder path (no retry by design)"
-        )
+        if name_of_value:
+            # No traceback, and the text masked: an error that echoes the request could hold a value.
+            logger.error(
+                "batch_browser_automation raised %s: %s — steps fall back to the "
+                "found:false placeholder path (no retry by design)",
+                type(exc).__name__, mask_values(str(exc), name_of_value),
+            )
+        else:
+            logger.exception(
+                "batch_browser_automation raised — steps fall back to the "
+                "found:false placeholder path (no retry by design)"
+            )
         response = {}
+    response = _swap_values_back(response, name_of_value)
     if response.get("status") != "success":
         logger.warning(
             "batch_browser_automation returned status=%r — steps fall back "
@@ -805,14 +924,125 @@ def _stage_summary_message(found: int, total: int) -> str:
         return "✅ No page elements needed for this test"
     if found == total:
         return "✅ All page elements identified"
-    return (f"⚠️ Identified {found} of {total} elements — "
-            "placeholders will mark the rest")
+    return f"⚠️ Identified {found} of {total} elements"
+
+
+def _not_found_cause(entry: dict[str, Any]) -> str:
+    """bs refused the call because it named no element (evidence "none"): nothing was checked."""
+    return "nothing_checked" if entry.get("evidence") == "none" else "not_found"
+
+
+def not_found_entries(
+    steps: list[dict[str, Any]],
+    step_element_ids: dict[int, str],
+    locator_mapping: dict[str, dict[str, Any]],
+    url: str | None,
+) -> list[dict[str, Any]]:
+    """The locator steps that end up without a working locator, and why, in plan order.
+
+    One entry per element (folded steps share one) and one per step that names no
+    element. The description is the planner's element_description as written (the
+    first step's), never the form rewrite build_elements keys on. A step's value is never recorded: it may
+    be a password.
+    """
+    entries: list[dict[str, Any]] = []
+    listed: set[str] = set()
+    for index, raw_step in enumerate(steps):
+        step = _as_dict(raw_step)
+        if not step_needs_locator(step):
+            continue
+        element_id = step_element_ids.get(index)
+        if element_id is None:
+            entries.append({"cause": "no_description", "keyword": step.get("keyword")})
+            continue
+        if element_id in listed:
+            continue
+        if not url:  # the same test identify_elements applies before calling the tool
+            cause = "no_url"
+        elif element_id not in locator_mapping:
+            # A tool error, a raise and a crash-shaped "success" all land here; a
+            # normal run backfills a record for every element it was given.
+            cause = "not_checked"
+        elif not _entry_found(locator_mapping[element_id]):
+            cause = _not_found_cause(locator_mapping[element_id])
+        else:
+            continue
+        listed.add(element_id)
+        entries.append({"cause": cause, "description": (step.get("element_description") or "").strip()})
+    return entries
+
+
+def not_found_lines(entries: list[dict[str, Any]]) -> list[str]:
+    """The Generation Logs copy: title, one line per cause present, footer. [] for no entries."""
+    if not entries:
+        return []
+    n = len(entries)
+    lines = [
+        "Delivered — 1 element was not found while this test was generated" if n == 1
+        else f"Delivered — {n} elements were not found while this test was generated"
+    ]
+
+    def of(cause: str) -> list[dict[str, Any]]:
+        return [e for e in entries if e["cause"] == cause]
+
+    def quoted(group: list[dict[str, Any]]) -> str:
+        return ", ".join(f"“{e['description']}”" for e in group)
+
+    if group := of("not_found"):
+        if len(group) == 1:
+            lines.append(
+                f"{quoted(group)} — not found on the page, so the test has no working locator for it "
+                "and will most likely fail at that step. If the web address is right and the element "
+                "is on the page, describe it more specifically and generate again.")
+        else:
+            lines.append(
+                f"{quoted(group)} — not found on the page, so the test has no working locator for them "
+                "and will most likely fail at those steps. If the web address is right and the elements "
+                "are on the page, describe them more specifically and generate again.")
+    if group := of("nothing_checked"):
+        if len(group) == 1:
+            lines.append(
+                f"{quoted(group)} — not found: the browser AI could not point at it on the page, "
+                "so nothing was checked and the test has no working locator for it. If the "
+                "element is on the page, describe it more specifically and generate again.")
+        else:
+            lines.append(
+                f"{quoted(group)} — not found: the browser AI could not point at them on the page, "
+                "so nothing was checked and the test has no working locator for them. If the "
+                "elements are on the page, describe them more specifically and generate again.")
+    if group := of("not_checked"):
+        pronoun = "it" if len(group) == 1 else "them"
+        lines.append(
+            f"{quoted(group)} — the page could not be checked just now, so no locator was found for "
+            f"{pronoun}. Generate the test again in a minute.")
+    if group := of("no_url"):
+        lines.append(
+            f"{quoted(group)} — not checked: your description has no web address, so no page was "
+            "opened. Add the page's address (for example https://example.com) and generate again.")
+    if group := of("no_description"):
+        if len(group) == 1:
+            lines.append(
+                f"A “{group[0]['keyword']}” step does not name an element. Describe the element in "
+                "your test description and generate again.")
+        else:
+            keywords = ", ".join(f"“{k}”" for k in dict.fromkeys(e["keyword"] for e in group))
+            lines.append(
+                f"{len(group)} steps do not name an element ({keywords}). Describe each element in "
+                "your test description and generate again.")
+    lines.append("You can still edit the code or run the test.")
+    return lines
+
+
+def not_found_notice(count: int) -> str:
+    """The Generated Code card's subtitle."""
+    noun = "1 element was" if count == 1 else f"{count} elements were"
+    return f"{noun} not found while generating — details in Generation Logs below"
 
 
 def identify_elements(
     steps: list[Any],
     user_query: str,
-    run_tool: Callable[[list[dict[str, Any]], str, str], dict[str, Any]] | None = None,
+    run_tool: Callable[..., dict[str, Any]] | None = None,
     on_progress: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
     """The deterministic replacement for identify_elements_task.
@@ -825,7 +1055,8 @@ def identify_elements(
     Args:
         steps: plan steps (dicts or PlannedStep models), in plan order.
         user_query: the user's original query, forwarded VERBATIM.
-        run_tool: injectable tool runner (tests); defaults to the real tool.
+        run_tool: injectable tool runner (tests); defaults to the real tool. Called as
+            (elements, url, user_query), plus secrets= when the request names a stored secret.
         on_progress: optional callback(progress, message) for SSE routing;
             its own errors are swallowed — progress must never break the run.
     """
@@ -871,9 +1102,13 @@ def identify_elements(
         notify(55, f"📍 Found {found} of {len(elements)} elements on the page")
 
     merged = merge_locators(dict_steps, step_element_ids, locator_mapping)
+    # Kept beside the steps like change_waits: the assembler never sees it. A locator
+    # step that names no element has no element, so it is added to the count here.
+    not_found = not_found_entries(dict_steps, step_element_ids, locator_mapping, url)
+    no_description = sum(1 for e in not_found if e["cause"] == "no_description")
     # Progress still reaches 60 either way (forward-only ladder) — only the
     # completion text differs on partial/failed identification.
-    notify(60, _stage_summary_message(found, len(elements)))
+    notify(60, _stage_summary_message(found, len(elements) + no_description))
 
     # F1: browser-service's marks are external input — a malformed one costs
     # the wait, never the generation.
@@ -891,4 +1126,6 @@ def identify_elements(
             "not_found": len(elements) - found,
         },
         "change_waits": change_waits,
+        "not_found": not_found,
+        "secret_fields": secret_fields(merged),
     }

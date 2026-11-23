@@ -48,8 +48,12 @@ from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
     ensure_browser_timeout,
     insert_change_waits,
+    link_secret_fields,
     normalize_robot_code,
     remove_change_waits,
+    restore_secret_placeholders,
+    rewrite_empty_loop_checks,
+    rewrite_secret_fills,
     rewrite_select_text_reads,
     rewrite_text_checks_whole_word,
     rewrite_typed_value_reads,
@@ -57,6 +61,7 @@ from src.backend.crew_ai.robot_code_normalizer import (
     strip_redundant_css_prefix,
 )
 from src.backend.core.artifact_store import get_artifact_store, make_shared_dir
+from src.backend.core.provider_errors import friendly_provider_error, friendly_setup_error
 from src.backend.services.docker_service import (
     IMAGE_TAG,
     normalize_docker_mount_source,
@@ -80,7 +85,7 @@ _MAX_ERROR_TEXT_CHARS = 4000
 # Shared code extraction + normalization (main path AND repair path)
 # ---------------------------------------------------------------------------
 
-def extract_and_normalize_robot_code(task_output) -> str:
+def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
     """Extract robot code from a CrewAI task output and apply the full
     normalization pipeline.
 
@@ -90,10 +95,13 @@ def extract_and_normalize_robot_code(task_output) -> str:
       Strategy 1 — output.pydantic.code (AssemblyOutput)
       Strategy 2 — output.json_dict['code']
       Strategy 3 — raw JSON {"code": "..."} → code, else raw output as-is
-      then: escaped-newline/tab fix → normalize_robot_code → strip_redundant_css_prefix →
+      then: escaped-newline/tab fix (only when the code holds no real newline; edge whitespace ignored) → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
-            rewrite_visibility_checks_to_wait → rewrite_select_text_reads →
-            rewrite_typed_value_reads → rewrite_text_checks_whole_word → ensure_browser_timeout.
+            rewrite_visibility_checks_to_wait → link_secret_fields → rewrite_select_text_reads →
+            rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → rewrite_secret_fills → ensure_browser_timeout.
+
+    `secret_fields` (`RunCrewResult.secret_fields`, #166): the plan's typing steps on found fields; () links
+    nothing, so the code comes out exactly as before.
     """
     # Strategy 1: Pydantic output (output_pydantic=AssemblyOutput)
     if hasattr(task_output, 'pydantic') and task_output.pydantic:
@@ -121,8 +129,10 @@ def extract_and_normalize_robot_code(task_output) -> str:
             robot_code = raw_output
             logger.info("✅ Using raw output as robot code (not JSON)")
 
-    # Normalize escaped newlines/tabs to actual characters (LLMs emit literal \n)
-    if '\\n' in robot_code or '\\t' in robot_code or '\\r' in robot_code:
+    # Normalize escaped newlines/tabs to actual characters (LLMs emit literal \n),
+    # only when the code holds no real newline (edge whitespace does not count): in a
+    # multi-line file a `\n` is a Robot escape (`SEPARATOR=\n`) and must stay.
+    if '\n' not in robot_code.strip() and ('\\n' in robot_code or '\\t' in robot_code or '\\r' in robot_code):
         robot_code = robot_code.replace('\\r\\n', '\n')  # Windows line endings
         robot_code = robot_code.replace('\\n', '\n')
         robot_code = robot_code.replace('\\t', '\t')
@@ -196,12 +206,22 @@ def extract_and_normalize_robot_code(task_output) -> str:
     # Then a text check on a Get Text read becomes a whole-word, any-letter-case
     # Should Match Regexp — after the select rewrite, which must see the
     # select's Should Contain first.
+    # Last, the empty-loop guard: a positive check inside a FOR over a Get Elements
+    # list gets one Should Not Be Empty line. It runs last so that, on generation,
+    # the rewrites above see the code exactly as they did before it existed.
     # Same place as the visibility rewrite, for the same reason: every repair
-    # round passes through here too. All three are optional and skip-only, so one
+    # round passes through here too. All five are optional and skip-only, so one
     # that raises costs only its own rewrite, never the generation.
-    for name, rewrite in (("rewrite_select_text_reads", rewrite_select_text_reads),
+    # The very last: a typed `{{NAME}}` org secret becomes `Fill Secret … %NLRF_SECRET_NAME`
+    # (#131), after every rewrite above has seen the placeholder form it reads.
+    # The very first: the field the plan typed a secret into is typed as that secret,
+    # whatever the LLM wrote there (#166), so every later rewrite sees the secret form.
+    for name, rewrite in (("link_secret_fields", lambda code: link_secret_fields(code, secret_fields)),
+                          ("rewrite_select_text_reads", rewrite_select_text_reads),
                           ("rewrite_typed_value_reads", rewrite_typed_value_reads),
-                          ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word)):
+                          ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word),
+                          ("rewrite_empty_loop_checks", rewrite_empty_loop_checks),
+                          ("rewrite_secret_fills", rewrite_secret_fills)):
         try:
             robot_code = rewrite(robot_code)
         except Exception:
@@ -484,9 +504,11 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
 
     # FRESH instances — own CleanedLLMWrapper + monitor, so the MAIN crew's
     # calculate_usage_metrics()/llm_monitor never see these repair calls (no
-    # double-count; §5). The assembler relies on library_context for keyword
-    # knowledge (§8.2).
-    agents = RobotAgents(model_provider, model_name, library_context)
+    # double-count; §5). The repair call keeps the code-structure text
+    # (code_assembly_context) on both learning paths (owner, 2026-10-16);
+    # the main call gets the base text instead.
+    agents = RobotAgents(model_provider, model_name, library_context,
+                         assembler_context=library_context.code_assembly_context)
     tasks = RobotTasks(library_context)
     # run_id == workflow_id. These calls run after the workflow OTel span has
     # closed, so metadata is the ONLY thing that can attribute them.
@@ -557,8 +579,11 @@ def _push_progress(progress_queue, message: str, progress: int | None = None) ->
 
 
 def validate_and_repair(run_id, robot_code, model_provider, model_name, progress_queue,
-                        change_waits=None) -> dict:
+                        change_waits=None, secret_fields=()) -> dict:
     """Soft dryrun gate + bounded Assembler repair loop (generation path only).
+
+    `secret_fields` (`RunCrewResult.secret_fields`, #166) goes to every repair's extraction, so a repair
+    that guesses a secret's value again is typed as the secret again.
 
     `change_waits` (browser-service's marks, as `RunCrewResult.change_waits`) is applied to every
     repaired test before it is re-checked, so the repair cannot drop the two inserted lines;
@@ -572,6 +597,8 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
         {"code": <possibly-repaired code>,
          "dryrun_status": "passed" | "failed" | "unverified" | "skipped",
          "dryrun_errors": <str, only when failed>,
+         "message": <str, only when unverified (why), or failed after the provider
+                     refused a repair call (its setup, rate-limit or no-answer sentence)>,
          "repair_usage": <dict, calculate_crewai_cost shape; {} when no repair ran>,
          "dryrun_attempts": <int, dryruns invoked>,
          "dryrun_repairs": <int, repair rounds invoked>,
@@ -640,6 +667,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
 
     code = robot_code
     last_result = None
+    provider_hint = None
     try:
         for attempt in range(settings.MAX_DRYRUN_FIXES + 1):
             # Advance the bar to 88 on the first verify only; re-verifies after a
@@ -662,8 +690,11 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     # The repair LLM is handed the test WITHOUT the two change-wait
                     # lines (it would edit, copy or "fix" them); the pair goes back
                     # below. Only when marks exist: no marks, no pair of ours.
+                    # It also sees `{{NAME}}`, never the `%NLRF_SECRET_NAME` env name (#131);
+                    # the rewrite in extract_and_normalize_robot_code puts it back.
                     task_output, attempt_usage, attempt_guardrails = repair_robot_code(
-                        run_id, remove_change_waits(code) if change_waits else code,
+                        run_id,
+                        restore_secret_placeholders(remove_change_waits(code) if change_waits else code),
                         last_result["errors"], model_provider, model_name,
                     )
                     # Count the repair cost as soon as it is known, before
@@ -671,7 +702,7 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                     _accumulate_usage(repair_usage, attempt_usage)
                     for _name, _count in (attempt_guardrails or {}).items():
                         guardrail_attempts[_name] = guardrail_attempts.get(_name, 0) + _count
-                    new_code = extract_and_normalize_robot_code(task_output)
+                    new_code = extract_and_normalize_robot_code(task_output, secret_fields)
                     new_code = insert_change_waits(new_code, change_waits)
                 except Exception as e:
                     # §8.3 — repair fault isolation: degrade with current code,
@@ -680,6 +711,9 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
                         "🔬 DRYRUN: repair attempt failed — stopping (non-blocking): %s",
                         e, exc_info=True,
                     )
+                    # A 429 / 503 / timeout here is the provider's, not the test's:
+                    # the same sentence the workflow gives it, carried as the gate's message.
+                    provider_hint = friendly_setup_error(e, model_provider) or friendly_provider_error(e)
                     break
                 finally:
                     # finally, not the success path: a repair that raised still
@@ -705,4 +739,5 @@ def validate_and_repair(run_id, robot_code, model_provider, model_name, progress
 
     # Loop exhausted (or broke early) without a pass → failed, but STILL delivered.
     return _result(code=code, dryrun_status="failed",
-                   dryrun_errors=last_result["errors"] if last_result else "")
+                   dryrun_errors=last_result["errors"] if last_result else "",
+                   **({"message": provider_hint} if provider_hint else {}))

@@ -91,8 +91,8 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
 
     with ExitStack() as stack:
         mock_crew_cls = stack.enter_context(patch("src.backend.crew_ai.crew.Crew"))
-        stack.enter_context(patch("src.backend.crew_ai.crew.RobotAgents",
-                                  return_value=agents_mock))
+        mock_agents_cls = stack.enter_context(patch(
+            "src.backend.crew_ai.crew.RobotAgents", return_value=agents_mock))
         stack.enter_context(patch("src.backend.crew_ai.crew.RobotTasks",
                                   return_value=tasks_mock))
         mock_identify = stack.enter_context(
@@ -122,6 +122,7 @@ def _run_crew_with_mocks(optimization_enabled=False, kickoff_result=None,
         )
 
     mocks = {
+        "agents_cls": mock_agents_cls,
         "crew_cls": mock_crew_cls,
         "agents": agents_mock,
         "tasks": tasks_mock,
@@ -144,11 +145,12 @@ class TestRunCrewReturnShape:
     assertion below still holds.
     """
 
-    def test_returns_nine_member_tuple(self):
-        """Success path: result is a 9-member tuple (change_waits is the 9th)."""
+    def test_returns_eleven_member_tuple(self):
+        """Success path: result is an 11-member tuple (not_found is the 10th, secret_fields the 11th)."""
         result, _ = _run_crew_with_mocks()
         assert isinstance(result, tuple)
-        assert len(result) == 9
+        assert len(result) == 11
+        assert result.secret_fields is result[10]
 
     def test_named_access_matches_positional(self):
         """It is a NamedTuple: names and indices address the same members."""
@@ -198,6 +200,12 @@ class TestRunCrewReturnShape:
         agents_mock = _make_agents_mock()
         out, _ = _run_crew_with_mocks(agents_mock=agents_mock)
         assert out[4] is agents_mock.llm._monitor
+
+    def test_agents_get_no_assembler_context_when_optimization_disabled(self):
+        """Learning off: RobotAgents is built with assembler_context=None, so
+        the agent falls back to assembler_base_context itself."""
+        _, mocks = _run_crew_with_mocks(optimization_enabled=False)
+        assert mocks["agents_cls"].call_args.kwargs["assembler_context"] is None
 
     def test_two_crews_one_kickoff_each(self):
         """Task 16: planner crew + assembler crew, each kicked off once."""
@@ -287,6 +295,24 @@ class TestRunCrewElementStage:
         call = mocks["tasks"].assemble_code_task.call_args
         steps_json = call.kwargs.get("identified_steps_json") or call.args[1]
         assert "change_waits" not in steps_json
+        assert json.loads(steps_json) == {"steps": _IDENTIFICATION_RESULT["steps"]}
+
+    def test_not_found_is_empty_when_identification_has_none(self):
+        """Warn at generation: no not_found key in the identification result -> ()."""
+        result, _ = _run_crew_with_mocks()
+        assert result.not_found == ()
+        assert result[9] == ()
+
+    def test_not_found_carries_the_identification_list_as_a_tuple(self):
+        """The not-found list travels beside the steps, never inside them."""
+        entries = [{"cause": "not_found", "description": "search box"}]
+        result, mocks = _run_crew_with_mocks(
+            identification_result={**_IDENTIFICATION_RESULT, "not_found": entries})
+        assert result.not_found == tuple(entries)
+        assert isinstance(result.not_found, tuple)
+        call = mocks["tasks"].assemble_code_task.call_args
+        steps_json = call.kwargs.get("identified_steps_json") or call.args[1]
+        assert "not_found" not in steps_json
         assert json.loads(steps_json) == {"steps": _IDENTIFICATION_RESULT["steps"]}
 
     def test_identify_elements_failure_propagates(self):

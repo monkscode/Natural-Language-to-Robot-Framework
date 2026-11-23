@@ -91,6 +91,18 @@ class TestBrowserLibraryContext:
     def test_core_rules_mentions_new_browser(self, ctx):
         assert "New Browser" in ctx.core_rules
 
+    def test_assembler_base_context_is_the_literal_frame(self, ctx):
+        """The base text the assembler's main call sends on every path."""
+        from src.backend.crew_ai.library_context import assembler_base_context
+
+        base = assembler_base_context(ctx)
+        assert base == (
+            "\nYou are an expert Robot Framework developer using Browser.\n\n"
+            + ctx.core_rules
+            + "\n"
+        )
+        assert "--- BROWSER LIBRARY CODE STRUCTURE ---" not in base
+
     def test_planning_rules_not_empty(self, ctx):
         rules = ctx.planning_rules
         assert isinstance(rules, str)

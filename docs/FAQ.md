@@ -15,10 +15,10 @@ Mark 1 works with 95%+ of modern websites. It's particularly good with:
 ### Is Mark 1 free?
 Yes! Mark 1 is open source (Apache 2.0 License). You only pay for AI model API calls:
 - **Google Gemini**: Free tier includes 1,500 requests/day
-- **Ollama**: Completely free (runs locally)
+- **Ollama**: Not usable with the shipped launchers today. Element discovery needs Gemini or Vertex. See "Can I use Mark 1 offline?"
 
 ### Can I use Mark 1 offline?
-Yes, if you use Ollama with local models. However, online models (Gemini) generally provide better results and faster performance.
+No. A local planner (Ollama) is not usable with the shipped `run.sh` or docker compose today: browser-service reads the same `MODEL_PROVIDER` setting and requires Gemini or Vertex. Element discovery sends Google the test request text, the page URL, the page's element list, and screenshots when it escalates to vision. See "Fully local (Ollama)" in [CONFIGURATION.md](CONFIGURATION.md) and [browser-service issue 88](https://github.com/monkscode/browser-service/issues/88), which asks whether that can change, and [NLRF issue 190](https://github.com/monkscode/Natural-Language-to-Robot-Framework/issues/190), which tracks the shared setting.
 
 ## Technical Questions
 
@@ -130,7 +130,6 @@ Yes:
 - Use faster AI models (gemini-2.5-flash)
 - Simplify your test queries
 - Ensure good network connectivity
-- Use local models (Ollama) for faster response
 
 ### What are the rate limits?
 **Gemini Free Tier**:
@@ -138,23 +137,19 @@ Yes:
 - 15 requests per minute
 
 **Ollama**:
-- No rate limits (runs locally)
-- Limited by your hardware
+- Not usable with the shipped launchers today. Element discovery still uses the Gemini / Vertex endpoint and its limits.
 
 ## Security & Privacy Questions
 
 ### Is my data secure?
 Yes:
 - API keys stored locally in `.env` file
-- Test data processed locally or in your chosen cloud
+- Page content goes to the configured Gemini / Vertex endpoint during element discovery
 - Browser sessions isolated in Docker containers
 - Logs stored locally only
 
 ### Can I use Mark 1 with sensitive data?
-For maximum privacy, use Ollama with local models. This ensures:
-- No data leaves your machine
-- Complete control over AI processing
-- No third-party API calls
+No local mode works today. Element discovery sends page content to Google: the test request text, the page URL, the page's element list, and screenshots when it escalates to vision. Do not point Mark 1 at an application whose page content must not leave your network. See [browser-service issue 88](https://github.com/monkscode/browser-service/issues/88) for the open question of a local discovery model.
 
 ### Are API keys committed to git?
 No. The `.env` file is in `.gitignore` by default. Never commit API keys to version control.

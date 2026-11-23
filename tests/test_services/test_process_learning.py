@@ -439,7 +439,8 @@ class TestProcessLearningUsageAttribution:
         mock_url.return_value = "https://example.com"
 
         self._set_cache("attr-s", [5, 12])
-        self._run_both_phases("attr-s", "search on example.com", "v2", {"test_status": "passed"})
+        self._run_both_phases("attr-s", "search on example.com",
+                              "*** Test Cases ***\nT\n    Click    id=go\n", {"test_status": "passed"})
 
         mock_fire.assert_called_once()
         kw = mock_fire.call_args.kwargs
@@ -463,7 +464,8 @@ class TestProcessLearningUsageAttribution:
         mock_url.return_value = "https://example.com"
 
         self._set_cache("attr-b", [5, 12])
-        self._run_both_phases("attr-b", "search on example.com", "v2 DIFFERENT",
+        self._run_both_phases("attr-b", "search on example.com",
+                          "*** Test Cases ***\nT\n    Click    id=go2\n",
                           {"test_status": "passed"})
 
         mock_fire.assert_called_once()

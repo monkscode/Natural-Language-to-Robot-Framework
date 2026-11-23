@@ -33,13 +33,18 @@ class TestGetAgentContext:
         return agents
 
     def test_library_context_used(self):
-        """When no optimization, uses library context."""
+        """When no learned context, the base text is sent (not the structure text)."""
+        from src.backend.crew_ai.library_context import assembler_base_context
+
         lib_ctx = MagicMock()
         lib_ctx.code_assembly_context = "Browser Library context here"
+        lib_ctx.library_name = "Browser"
+        lib_ctx.core_rules = "CORE"
         agents = self._make_agents(library_context=lib_ctx)
 
         result = agents._get_agent_context("assembler")
-        assert "Browser Library context here" in result
+        assert result == "\n\n" + assembler_base_context(lib_ctx)
+        assert "Browser Library context here" not in result
 
     def test_optimized_priority(self):
         """When optimized context exists, it takes priority."""

@@ -12,7 +12,9 @@ from typing import AsyncGenerator, Generator, Dict, Any
 from datetime import datetime, timezone
 
 from src.backend.crew_ai.crew import run_crew, extract_url_from_query
-from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits
+from src.backend.crew_ai.element_identification import not_found_lines, not_found_notice
+from src.backend.crew_ai.llm_provider_routing import resolve_model_string
+from src.backend.crew_ai.robot_code_normalizer import insert_change_waits, remove_change_waits, typed_secret_names
 from src.backend.auth.jwt_utils import is_validated_admin
 from src.backend.runner_exec import client as runner_exec_client
 from src.backend.services.dryrun_service import extract_and_normalize_robot_code, validate_and_repair
@@ -29,6 +31,11 @@ from src.backend.core.artifact_store import get_artifact_store
 from src.backend.core.provider_errors import friendly_provider_error, friendly_setup_error
 from src.backend.core.failure_sentences import failure_sentence, first_failure_message
 from src.backend.core.secret_redaction import redact_secrets
+from src.backend.core.secret_scrub import mask_values
+from src.backend.auth.secrets import (
+    SecretsUnavailable, get_values, org_of, secret_names_in_code, secret_names_in_query,
+)
+from cryptography.fernet import InvalidToken
 from src.backend.services.report_inliner import inline_report_screenshots
 from src.backend.core.config import settings
 
@@ -153,6 +160,35 @@ def _safe_delete_temp_metrics(workflow_id: str) -> None:
         get_temp_metrics_storage().delete_temp_file(workflow_id)
     except Exception as e:
         logging.debug("Temp metrics cleanup failed for %s (non-blocking): %s", workflow_id, e)
+
+
+def _browser_use_cost(browser_metrics: dict, model_provider: str, model_name: str) -> float:
+    """browser-service's cost for its browser-use calls, or our own price for them when it reports $0 (bs #32).
+
+    browser-use prices its calls from its own download of LiteLLM's list and reports $0 when that download fails or
+    lacks the model. Price the same tokens with browser-use's formula on the base prices in LiteLLM's table (the live
+    list, or the pin ensure_model_entry added). Never litellm.cost_per_token: it tiers the run's SUMMED tokens.
+    """
+    cost = browser_metrics.get('actual_cost', 0.0)
+    if cost or not browser_metrics.get('tokens', 0):
+        return cost
+    prompt = browser_metrics.get('input_tokens', 0)  # includes the cached ones
+    cached = browser_metrics.get('cached_tokens', 0)
+    completion = browser_metrics.get('output_tokens', 0)
+    try:
+        import litellm
+        model = resolve_model_string(model_provider, model_name)
+        info = litellm.get_model_info(model=model)
+        cost = ((prompt - cached) * (info.get('input_cost_per_token') or 0.0)
+                + cached * (info.get('cache_read_input_token_cost') or 0.0)
+                + completion * (info.get('output_cost_per_token') or 0.0))
+    except Exception as e:
+        logging.warning("browser-use cost lookup failed for model=%s (%s prompt / %s cached / %s completion tokens "
+                        "reported at $0): %s", model_name, prompt, cached, completion, e)
+        return 0.0
+    logging.warning("browser-use reported $0 for model=%s (%s prompt / %s cached / %s completion tokens); priced from "
+                    "LiteLLM's model table instead: $%.8f", model, prompt, cached, completion, cost)
+    return cost
 
 
 def _safe_evict_hint_metadata(workflow_id: str) -> None:
@@ -575,6 +611,17 @@ def _process_learning_attribution(
             and (pre_run_record is None or not pre_run_record.hint_attribution_done)
             and feedback_loop.nl_engine is not None
         ):
+            # Evaluated last, so a run without hints never pays for the checker.
+            # A hollow pass is no evidence a hint was used: no judgment, no credit,
+            # and hint_attribution_done stays 0 for a later clean pass (issue #132).
+            from src.backend.crew_ai.optimization.feedback_loop import hollow_pass_shapes
+            hollow = hollow_pass_shapes(robot_code, user_query)
+            if hollow:
+                logging.info(
+                    "[LEARNING] %s: hollow pass (%s) — hint usage not judged",
+                    run_id, ", ".join(sorted(hollow)),
+                )
+                return
             from src.backend.crew_ai.optimization.learning_config import extract_domain
             from src.backend.crew_ai.optimization.conflict_detection import (
                 fire_usage_attribution,
@@ -726,6 +773,10 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # F1: browser-service's change marks, kept beside the steps (never in the
             # assembler's prompt); an eight-member result has none.
             change_waits = getattr(run_result, "change_waits", ()) or ()
+            # Elements delivered without a working locator; reported on the complete event.
+            not_found = getattr(run_result, "not_found", ()) or ()
+            # #166: the fields the plan typed a secret into; they decide how the test types it.
+            secret_fields = getattr(run_result, "secret_fields", ()) or ()
 
         # Store hint metadata for the execution phase to consume
         if hint_metadata:
@@ -735,7 +786,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # the assembler crew) and apply the shared normalization pipeline (also used
         # by the dryrun repair path) so both normalize identically.
         robot_code = insert_change_waits(
-            extract_and_normalize_robot_code(crew_with_results.tasks[-1].output), change_waits)
+            extract_and_normalize_robot_code(crew_with_results.tasks[-1].output, secret_fields), change_waits)
 
         # Deterministic robot --dryrun gate + bounded Assembler repair loop.
         # SOFT gate: Docker down / any error degrades to dryrun_status:'unverified'
@@ -744,9 +795,19 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # not the asyncio loop) and AFTER create_workflow_span has closed (R5).
         gate = validate_and_repair(
             workflow_id, robot_code, model_provider, model_name,
-            progress_queue=progress_queue, change_waits=change_waits,
+            progress_queue=progress_queue, change_waits=change_waits, secret_fields=secret_fields,
         )
         robot_code = gate["code"]
+        # Names only, never a value: a secret the request names that the final test does not type.
+        try:
+            untyped = [n for n in secret_names_in_query(natural_language_query)
+                       if n not in typed_secret_names(robot_code)]
+        except Exception:  # a log line only: it never costs the generation
+            logging.warning("secret-not-typed check failed (non-blocking)", exc_info=True)
+            untyped = []
+        if untyped:
+            logging.warning("Generated test does not type secret(s) %s as Fill/Type Secret %%NLRF_SECRET_<NAME> "
+                            "(signal: secret-not-typed)", ", ".join(untyped))
 
         logging.info(
             "Generated Robot Framework code is here:\n%s", robot_code)
@@ -827,7 +888,7 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # Calculate averages
             total_elements = browser_metrics.get('elements_processed', 0)
             browser_llm_calls = browser_metrics.get('llm_calls', 0)
-            browser_actual_cost = browser_metrics.get('actual_cost', 0.0)
+            browser_actual_cost = _browser_use_cost(browser_metrics, model_provider, model_name)
 
             avg_llm_calls = browser_llm_calls / total_elements if total_elements > 0 else 0
             avg_cost = browser_actual_cost / total_elements if total_elements > 0 else 0
@@ -961,8 +1022,11 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # Show finalizing step before completion
         yield {"status": "running", "message": f"{EMOJI['success']} Finalizing test code..."}
 
-        # Confirm success with line count
-        yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
+        # Confirm the line count; "Success!" is claimed only when every element was found
+        if not_found:
+            yield {"status": "running", "message": f"Generated {lines} lines of test code."}
+        else:
+            yield {"status": "running", "message": f"{EMOJI['success']} Success! Generated {lines} lines of test code."}
 
         # Terminal 100% — pushed here (the event bus now caps at 80 and crew.py no
         # longer pushes 100) so the bar reaches 100 only AFTER the dryrun gate has
@@ -975,6 +1039,9 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
         # gate did not pass, attach dryrun_status + dryrun_errors so the frontend can
         # surface a warning without a new status.
         complete_event = {"status": "complete", "robot_code": robot_code, "workflow_id": workflow_id, "message": f"{EMOJI['success']} Test generation complete."}
+        if not_found:
+            complete_event["not_found_lines"] = not_found_lines(list(not_found))
+            complete_event["not_found_notice"] = not_found_notice(len(not_found))
         if gate["dryrun_status"] != "passed":
             complete_event["dryrun_status"] = gate["dryrun_status"]
             complete_event["dryrun_errors"] = gate.get("dryrun_errors", "")
@@ -983,7 +1050,8 @@ def run_agentic_workflow(natural_language_query: str, model_provider: str, model
             # produced no output.xml) and only the gate knows which; it records
             # that in `message`, and dryrun_errors cannot carry it because only
             # the 'failed' exit sets that key. Without this the client had
-            # nothing to show and had to assert one hard-coded cause.
+            # nothing to show and had to assert one hard-coded cause. A 'failed'
+            # gate carries `message` too when the provider refused a repair call.
             if gate.get("message"):
                 complete_event["dryrun_message"] = redact_secrets(gate["message"])
         yield complete_event
@@ -1253,8 +1321,12 @@ def _stored_reason(text: str | None) -> str | None:
     return redact_secrets(text)[:_ERROR_MESSAGE_MAX_CHARS] or None
 
 
-def _failure_reason(output_xml_path: str | None) -> tuple[str | None, str | None]:
+def _failure_reason(
+        output_xml_path: str | None, secret_values: list[str] | tuple = ()) -> tuple[str | None, str | None]:
     """(stored reason, plain-English sentence) for a `failed` run — never raises.
+
+    secret_values are masked out of the text BEFORE redaction and the cap, which
+    could otherwise split a value or cut it at the limit and leave a fragment.
 
     Runs inside the try that spans the verdict write and the result event, on
     every failing run (bench included), so an exception here would turn a real
@@ -1263,7 +1335,8 @@ def _failure_reason(output_xml_path: str | None) -> tuple[str | None, str | None
     Generate card and History read one text.
     """
     try:
-        message = _stored_reason(first_failure_message(output_xml_path))
+        text = first_failure_message(output_xml_path)
+        message = _stored_reason(mask_values(text, secret_values) if text else text)
         return message, failure_sentence(message)
     except Exception:
         logging.exception(
@@ -1323,6 +1396,10 @@ async def sweep_abandoned_runs_forever() -> None:
 # loop holds tasks weakly, so an unreferenced one can be collected mid-run.
 _detached_jobs: set[asyncio.Task] = set()
 _JOB_DONE = object()
+# A quiet relay sends an SSE comment this often. A proxy in front of the API
+# cuts a stream that sends nothing (AWS ALB 60 s, Cloudflare 100 s idle), and a
+# test run is silent for as long as it runs. Every client skips non-data lines.
+_RELAY_HEARTBEAT_S = 15
 
 
 async def _pump_job(job, events: asyncio.Queue, reader_gone: asyncio.Event, name: str) -> None:
@@ -1368,7 +1445,16 @@ def _detached(job_fn):
         _detached_jobs.add(task)
         task.add_done_callback(_detached_jobs.discard)
         try:
-            while (item := await events.get()) is not _JOB_DONE:
+            while True:
+                try:
+                    # A timed-out get() leaves the queue untouched: an item is
+                    # only taken when get() returns.
+                    item = await asyncio.wait_for(events.get(), _RELAY_HEARTBEAT_S)
+                except TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is _JOB_DONE:
+                    break
                 if isinstance(item, Exception):
                     raise item
                 yield item
@@ -1480,8 +1566,14 @@ async def _drain_generation_queue(workflow_thread: Thread, q: Queue, result_stor
         raise _GenerationError()
 
 
-async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str | None, release_slot):
+async def _stream_docker_execution(
+        run_id: str, robot_code: str, user_query: str | None, release_slot,
+        user_id: str | None = None):
     """Save robot_code to disk, run in Docker, and trigger learning.
+
+    A test that names org secrets (%NLRF_SECRET_X) gets them as container env,
+    looked up for user_id's org; one whose secret is missing or unreadable is
+    refused before Docker. Every runner-derived text on this path is masked.
 
     Yields SSE data strings for all execution events (build progress, result, errors).
     Handles all error paths internally — the caller's finally block remains
@@ -1521,6 +1613,36 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': save_error})}\n\n"
         return
 
+    # Org secrets the test names. No names: today's path, no lookup, no masking.
+    # The refusal texts hold names and exception TYPES only, never a value.
+    secrets_by_name: dict[str, str] = {}
+    secret_names = secret_names_in_code(robot_code)
+    if secret_names:
+        refusal = None
+        try:
+            org_id = await asyncio.to_thread(org_of, user_id)
+            if org_id:
+                secrets_by_name = await asyncio.to_thread(get_values, org_id, secret_names)
+        except SecretsUnavailable as e:
+            refusal = str(e)
+        except InvalidToken:
+            refusal = ("This test's secrets cannot be read with this server's SECRETS_ENCRYPTION_KEY. "
+                       "Add them again on the Secrets page, then run it again.")
+        except Exception as e:
+            logging.error("Could not read the secrets of run %s (%s)", run_id, type(e).__name__)
+            refusal = f"Could not read this test's secrets ({type(e).__name__})."
+        else:
+            missing = [n for n in secret_names if n not in secrets_by_name]
+            if missing:
+                refusal = (f"This test needs the secret(s) {', '.join(missing)}, which your "
+                           "organization does not hold. Add them on the Secrets page, then run it again.")
+        if refusal:
+            _safe_evict_hint_metadata(run_id)
+            await asyncio.to_thread(_set_run_status, run_id, "error", refusal)
+            yield f"data: {json.dumps({'stage': 'execution', 'status': 'error', 'run_id': run_id, 'message': refusal})}\n\n"
+            return
+    secret_values = list(secrets_by_name.values())
+
     try:
         # Phase 4: execution goes through the socket-holding executor; FastAPI
         # no longer touches Docker. ensure_image is required — if it raises
@@ -1546,7 +1668,18 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         await asyncio.to_thread(runner_exec_client.ensure_image)
 
         logging.info(f"🚀 Executing test: {test_filename}")
-        result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
+        if secrets_by_name:
+            result = await asyncio.to_thread(
+                runner_exec_client.execute, run_id, test_filename,
+                env={f"NLRF_SECRET_{n}": v for n, v in secrets_by_name.items()})
+        else:
+            result = await asyncio.to_thread(runner_exec_client.execute, run_id, test_filename)
+        if secret_values:
+            # The runner's folder is scrubbed already; this is the second lock.
+            if isinstance(result.get("message"), str):
+                result["message"] = mask_values(result["message"], secret_values)
+            if isinstance(result.get("result"), dict) and isinstance(result["result"].get("logs"), str):
+                result["result"]["logs"] = mask_values(result["result"]["logs"], secret_values)
 
         # History row: only passed/failed are real verdicts (from output.xml);
         # anything else means the run errored before producing one.
@@ -1558,7 +1691,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # None, clearing a reason left by an earlier run of the same id.
         if _verdict == "failed":
             _reason, result["failure_sentence"] = await asyncio.to_thread(
-                _failure_reason, result.get("output_xml_path"))
+                _failure_reason, result.get("output_xml_path"), secret_values)
         elif _verdict == "error":
             _reason = _stored_reason(str(result.get("message") or ""))
             # The row gets the capped, redacted text (Ruling R6); the SSE
@@ -1620,7 +1753,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
                 result, *learning_ctx)
 
     except Exception as e:
-        logging.error(f"An error occurred during Docker execution: {e}")
+        logging.error(f"An error occurred during Docker execution: {mask_values(str(e), secret_values)}")
         _safe_evict_hint_metadata(run_id)
         # Unlike its siblings above, this message has no prefix — so an exception
         # that stringifies to '' (a no-arg TimeoutError, a bare DockerException)
@@ -1629,7 +1762,7 @@ async def _stream_docker_execution(run_id: str, robot_code: str, user_query: str
         # Built before the write: the row stores it capped (a runner system
         # error carries up to 400 lines of container stderr), the event keeps
         # it whole.
-        detail = redact_secrets(str(e)) or type(e).__name__
+        detail = redact_secrets(mask_values(str(e), secret_values)) or type(e).__name__
         await asyncio.to_thread(
             _set_run_status, run_id, "error", detail[:_ERROR_MESSAGE_MAX_CHARS])
         # Persist whatever artifacts the run produced before erroring (a partial
@@ -1893,7 +2026,9 @@ async def stream_execute_only(
             is_platform_admin=is_platform_admin, test_id=test_id,
             test_version_id=test_version_id)
 
-        async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
+        async for sse in _stream_docker_execution(
+                run_id, robot_code, user_query, releaser.done,
+                user_id=user["user_id"] if user else None):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
@@ -1966,7 +2101,9 @@ async def stream_generate_and_run(
             _record_run, run_id, user, user_query, status="running", robot_code=robot_code,
             is_platform_admin=is_platform_admin)
 
-        async for sse in _stream_docker_execution(run_id, robot_code, user_query, releaser.done):
+        async for sse in _stream_docker_execution(
+                run_id, robot_code, user_query, releaser.done,
+                user_id=user["user_id"] if user else None):
             yield sse
     finally:
         # Guard against CancelledError (BaseException, not caught by except above):
