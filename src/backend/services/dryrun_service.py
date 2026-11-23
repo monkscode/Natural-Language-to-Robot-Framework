@@ -43,6 +43,7 @@ import xml.etree.ElementTree as ET
 import docker
 import requests as _requests
 
+from src.backend.auth.secrets import secret_names_in_code
 from src.backend.core.config import settings
 from src.backend.core.workflow_metrics import calculate_crewai_cost
 from src.backend.crew_ai.robot_code_normalizer import (
@@ -79,6 +80,10 @@ _USAGE_KEYS = ("llm_calls", "cost", "tokens", "prompt_tokens", "completion_token
 # Cap the error text fed into the repair prompt so a pathological output.xml can't
 # bloat the LLM request. RF dryrun errors are short ("Did you mean: Browser.Click").
 _MAX_ERROR_TEXT_CHARS = 4000
+
+# Robot resolves `%{NLRF_SECRET_X}` in a *** Variables *** row at suite start, so the dryrun needs the
+# variable set; it never reads the secret store, only this fixed filler.
+_DRYRUN_SECRET_PLACEHOLDER = "nlrf-dryrun-placeholder"
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +218,8 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
     # round passes through here too. All five are optional and skip-only, so one
     # that raises costs only its own rewrite, never the generation.
     # The very last: a typed `{{NAME}}` org secret becomes `Fill Secret … %NLRF_SECRET_NAME`
-    # (#131), after every rewrite above has seen the placeholder form it reads.
+    # (#131) and every other `{{NAME}}` becomes `%{NLRF_SECRET_NAME}`, after every rewrite
+    # above has seen the placeholder form it reads.
     # The very first: the field the plan typed a secret into is typed as that secret,
     # whatever the LLM wrote there (#166), so every later rewrite sees the secret form.
     for name, rewrite in (("link_secret_fields", lambda code: link_secret_fields(code, secret_fields)),
@@ -411,6 +417,10 @@ def run_dryrun_in_container(client, run_id: str, robot_code: str) -> dict:
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
     }
+
+    secret_names = secret_names_in_code(robot_code)
+    if secret_names:
+        container_config["environment"] = {f"NLRF_SECRET_{name}": _DRYRUN_SECRET_PLACEHOLDER for name in secret_names}
 
     _force_remove_stale_container(client, container_name)
 

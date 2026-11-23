@@ -68,20 +68,64 @@ class TestRewrite:
         code = _suite("Fill Text    id=password    ${PW}", variables="${PW}    {{PW}}")
         out = rewrite_secret_fills(code)
         assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
-        assert "${PW}    {{PW}}\n" in out
+        assert "${PW}    %{NLRF_SECRET_PW}\n" in out  # the row itself is a leftover reference
 
     def test_the_browser_prefix_is_kept(self):
         out = rewrite_secret_fills(_fill("Browser.Fill Text", "{{SAUCE_PASSWORD}}"))
         assert "    Browser.Fill Secret    id=password    %NLRF_SECRET_SAUCE_PASSWORD\n" in out
 
-    def test_a_check_line_holding_a_placeholder_is_untouched(self):
+    def test_a_check_line_holding_a_placeholder_becomes_a_reference(self):
         code = _suite("Fill Text    id=user-name    standard_user", "Should Contain    ${msg}    {{X}}")
-        assert rewrite_secret_fills(code) == code
+        assert "    Should Contain    ${msg}    %{NLRF_SECRET_X}\n" in rewrite_secret_fills(code)
 
-    def test_a_placeholder_inside_a_longer_text_is_untouched(self):
-        for value in ("pre-{{X}}", "{{X}}-post", "{{X}} {{Y}}", "{{1X}}", "{{}}", "{{" + "A" * 65 + "}}"):
+    def test_a_placeholder_inside_a_longer_text_becomes_a_reference_in_place(self):
+        out = rewrite_secret_fills(_fill("Fill Text", "pre-{{x}}-post {{ Y }}"))
+        assert "    Fill Text    id=password    pre-%{NLRF_SECRET_X}-post %{NLRF_SECRET_Y}\n" in out
+
+    def test_a_malformed_placeholder_is_untouched(self):
+        for value in ("{{1X}}", "{{}}", "{{" + "A" * 65 + "}}"):
             code = _fill("Fill Text", value)
             assert rewrite_secret_fills(code) == code, value
+
+    def test_url_variables_row_and_documentation_become_references(self):
+        code = ("*** Settings ***\nLibrary    Browser\n\n*** Variables ***\n${u}    https://x.example/?t={{TOKEN}}\n"
+                "${h}    id=hdr\n\n*** Test Cases ***\nT\n    [Documentation]    Logs in as {{USER}}\n"
+                "    New Page    ${u}\n    Get Text    ${h}    ==    {{USER}}\n")
+        out = rewrite_secret_fills(code)
+        assert "${u}    https://x.example/?t=%{NLRF_SECRET_TOKEN}\n" in out
+        assert "[Documentation]    Logs in as %{NLRF_SECRET_USER}\n" in out
+        assert "    Get Text    ${h}    ==    %{NLRF_SECRET_USER}\n" in out
+        assert "{{" not in out
+
+    def test_fill_secret_the_llm_wrote_with_a_placeholder_gets_the_env_form(self):
+        for kw in ("Fill Secret", "Browser.Type Secret"):
+            out = rewrite_secret_fills(_fill(kw, "{{ pw }}"))
+            assert f"    {kw}    id=password    %NLRF_SECRET_PW\n" in out
+
+    def test_fill_secret_through_a_followable_variable_gets_the_env_form(self):
+        code = _suite("Fill Secret    id=password    ${pw}", variables="${pw}    {{PW}}")
+        out = rewrite_secret_fills(code)
+        assert "    Fill Secret    id=password    %NLRF_SECRET_PW\n" in out
+
+    @pytest.mark.parametrize("line", [
+        "Set Variable    ${{True}}", "Should Be True    ${{x}}", "Log    @{{x}}", "Log    &{{x}}", "Log    %{{x}}",
+    ])
+    def test_robot_inline_python_and_sigil_forms_are_untouched(self, line):
+        code = _suite(line)
+        assert rewrite_secret_fills(code) == code
+
+    def test_an_existing_reference_is_untouched(self):
+        code = _suite("Should Contain    ${t}    %{NLRF_SECRET_USER}")
+        assert rewrite_secret_fills(code) == code
+
+    def test_the_leftover_pass_is_idempotent_and_logs_only_when_it_changes(self, caplog):
+        code = _suite("Get Text    id=hdr    ==    {{USER}}")
+        with caplog.at_level(logging.INFO, logger="src.backend.crew_ai.robot_code_normalizer"):
+            once = rewrite_secret_fills(code)
+            assert "signal: secret-reference-rewritten" in caplog.text
+            caplog.clear()
+            assert rewrite_secret_fills(once) == once
+        assert "secret-reference-rewritten" not in caplog.text
 
     def test_a_64_character_name_is_rewritten(self):
         name = "A" * 64
@@ -98,9 +142,9 @@ class TestRewrite:
         assert rewrite_secret_fills(code) is code
         assert rewrite_secret_fills("") == ""
 
-    def test_an_unreadable_suite_is_returned_unchanged(self):
+    def test_an_unreadable_suite_keeps_its_typing_step_and_gets_only_the_leftover_reference(self):
         code = "*** Test Cases ***\n| T |\n| | Fill Text | id=password | {{X}} |\n"
-        assert rewrite_secret_fills(code) == code
+        assert rewrite_secret_fills(code) == code.replace("{{X}}", "%{NLRF_SECRET_X}")
 
     def test_a_test_with_an_unrelated_if_block_is_still_rewritten(self):
         code = _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    {{PW}}")
@@ -118,11 +162,15 @@ class TestRewrite:
     def test_an_unfollowable_test_with_a_variable_argument_is_left_alone(self):
         code = _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    ${PW}",
                       variables="${PW}    {{PW}}")
-        assert rewrite_secret_fills(code) == code
+        out = rewrite_secret_fills(code)
+        assert "    Fill Text    id=password    ${PW}\n" in out  # the step is not followed: not a Fill Secret
+        assert "${PW}    %{NLRF_SECRET_PW}\n" in out
 
     def test_a_template_test_data_row_is_left_alone(self):
         code = _suite("[Template]    Fill Text", "id=password    {{PW}}", "Fill Text    id=password    {{PW}}")
-        assert rewrite_secret_fills(code) == code
+        out = rewrite_secret_fills(code)
+        assert "Fill Secret" not in out  # data rows are not calls
+        assert "{{" not in out and out.count("%{NLRF_SECRET_PW}") == 2
 
     @pytest.mark.parametrize("code", [
         _suite("IF    True", "    Log    x", "END", "Fill Text    id=password    {{PW}}"),

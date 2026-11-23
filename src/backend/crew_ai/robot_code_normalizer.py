@@ -2272,26 +2272,37 @@ def _secret_placeholder_cell(value: str) -> str | None:
     return "{{" + match.group(1) + "}}" if match else None
 
 
-def rewrite_secret_fills(robot_code: str) -> str:
-    """`Fill Text    LOC    {{NAME}}` -> `Fill Secret    LOC    %NLRF_SECRET_NAME` (`Type Text` -> `Type Secret`).
+# #166: when the LLM did not keep `{{NAME}}`, the field the plan typed it into decides.
+_SECRET_TYPING = {**_SECRET_FROM_TEXT, "fill secret": "Fill Secret", "type secret": "Type Secret"}
+# Every other `{{NAME}}`; not after `$ @ &` or `%`, where Robot's `${{expr}}` is inline Python.
+_SECRET_LEFTOVER_RE = re.compile(r"(?<![$@&%])" + _SECRET_PLACEHOLDER_RE.pattern)
 
-    The second argument must be, after resolving a whole-cell `${var}` that a *** Variables *** row or a
-    `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces); the name
-    goes upper-case. The library prefix (`Browser.`) is kept; a Variables row is left as it is. Left alone: a
-    placeholder inside longer text, a check line holding one, a `${var}` argument in a test the shared reader
-    cannot follow (a control structure: only a literal placeholder is rewritten there), a `[Template]` test,
-    and the whole file when the reader refuses it. Idempotent.
+
+def rewrite_secret_fills(robot_code: str) -> str:
+    """`Fill Text    LOC    {{NAME}}` -> `Fill Secret    LOC    %NLRF_SECRET_NAME` (`Type Text` -> `Type Secret`),
+    then every other `{{NAME}}` -> `%{NLRF_SECRET_NAME}`.
+
+    A typing step's second argument must be, after resolving a whole-cell `${var}` that a *** Variables *** row
+    or a `Set Variable` fixed, exactly one placeholder (any letter case, spaces allowed inside the braces); the
+    name goes upper-case. A step already typed `Fill Secret` / `Type Secret` is read the same way. The library
+    prefix (`Browser.`) is kept. Left alone by the typing pass: a placeholder inside longer text, a `${var}`
+    argument in a test the shared reader cannot follow (a control structure: only a literal placeholder is
+    rewritten there), a `[Template]` test, and the whole file when the reader refuses it.
+
+    The leftover pass then reads the text as it stands: a placeholder in a check line, a URL, a *** Variables ***
+    row, a [Documentation] or inside longer text becomes `%{NLRF_SECRET_NAME}`, which Robot resolves from the
+    environment. `${{x}}`, `@{{x}}`, `&{{x}}` and `%{{x}}` are not placeholders. Idempotent.
     """
     if not robot_code or "{{" not in robot_code:
         return robot_code
-    out = _secret_step_edits(robot_code, _SECRET_FROM_TEXT, True, _secret_env_cell)
+    out = _secret_step_edits(robot_code, _SECRET_TYPING, True, _secret_env_cell)
     if out != robot_code:
         logger.info("Secret fill normalizer: typed placeholder(s) became Fill/Type Secret (signal: secret-fill-rewritten)")
-    return out
-
-
-# #166: when the LLM did not keep `{{NAME}}`, the field the plan typed it into decides.
-_SECRET_TYPING = {**_SECRET_FROM_TEXT, "fill secret": "Fill Secret", "type secret": "Type Secret"}
+    swapped = _SECRET_LEFTOVER_RE.sub(lambda m: "%{NLRF_SECRET_" + m.group(1).upper() + "}", out)
+    if swapped != out:
+        logger.info("Secret fill normalizer: remaining placeholder(s) became NLRF_SECRET_NAME references"
+                    "(signal: secret-reference-rewritten)")
+    return swapped
 
 
 def _field_key(locator: str) -> str:
