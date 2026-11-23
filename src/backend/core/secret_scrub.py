@@ -145,7 +145,7 @@ def _replace_file(path: Path, data: bytes) -> None:
     """Write ``data`` over ``path`` by replacing the file: the runner writes reports as root (644) into a
     folder anyone may write, so the scrub (uid 1000) cannot open them for writing but can replace them.
     The temp name ends in none of the scrubbed suffixes; a failed write leaves no temp file."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".scrubtmp")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".scrub-", suffix=".scrubtmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)

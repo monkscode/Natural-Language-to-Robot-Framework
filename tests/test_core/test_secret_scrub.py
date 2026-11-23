@@ -413,3 +413,15 @@ def test_a_failing_replace_leaves_no_temp_file_and_names_every_file(tmp_path):
     assert sorted(err.value.files) == ["log.html", "output.xml", "playwright-log.txt"]
     assert MARK not in str(err.value)
     assert {p.name: p.read_bytes() for p in run.iterdir()} == before  # nothing written, no temp left
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows path limits differ: the full path would pass MAX_PATH; Linux CI and production run it")
+def test_a_report_file_with_a_254_character_name_is_still_masked(tmp_path):
+    # NAME_MAX is 255: a temp name built from the report name + 19 characters would not fit. Writable file,
+    # so the root clause of _POSIX_ONLY is not needed here.
+    name = "a" * 250 + ".txt"
+    (tmp_path / name).write_text(f"line with {MARK} inside\n", encoding="utf-8")
+    assert scrub_run_dir(tmp_path, [MARK]) == [name]
+    text = (tmp_path / name).read_text(encoding="utf-8")
+    assert MARK not in text and "***" in text
+    assert [p.name for p in tmp_path.iterdir()] == [name]
