@@ -367,3 +367,61 @@ def test_strings_regex_has_no_exponential_backtracking():
     start = time.perf_counter()
     _STRINGS.search(text)
     assert time.perf_counter() - start < 0.1
+
+
+# --- a report file the process cannot write in place is replaced, not failed -----------------------
+
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="a read-only destination cannot be replaced on Windows, and root ignores the mode; production and CI are Linux non-root",
+)
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize("name", ["playwright-log.txt", "log.html", "output.xml"])
+def test_a_read_only_report_file_in_a_writable_folder_is_masked_by_replacing_it(tmp_path, name):
+    # The runner container writes the reports as root (644) into a 0777 folder; the scrub runs as uid 1000.
+    run = _make_run(tmp_path)
+    for f in run.iterdir():
+        f.chmod(0o444)
+    assert scrub_run_dir(run, [MARK]) == ["log.html", "output.xml", "playwright-log.txt"]
+    assert MARK not in _all_text(run)
+    assert "***" in (run / name).read_text(encoding="utf-8")
+    assert sorted(p.name for p in run.iterdir()) == ["log.html", "output.xml", "playwright-log.txt", "shot.png"]
+    assert (run / name).stat().st_mode & 0o777 == 0o444  # the report keeps its mode, not mkstemp's 0600
+
+
+def test_the_replaced_output_xml_is_byte_identical_to_the_in_place_write(tmp_path):
+    path = tmp_path / "output.xml"
+    path.write_text(f'<robot><arg>{MARK}</arg></robot>', encoding="utf-8")
+    ref = tmp_path / "ref.xml.bin"
+    tree = ET.ElementTree(ET.fromstring(path.read_bytes()))
+    tree.getroot()[0].text = "***"
+    tree.write(ref, encoding="UTF-8", xml_declaration=True)
+    scrub_run_dir(tmp_path, [MARK])
+    # ET's own file write turns a newline into CRLF on Windows only; production (Linux) writes LF
+    assert path.read_bytes() == ref.read_bytes().replace(b"\r\n", b"\n")
+    assert path.read_bytes().startswith(b"<?xml")
+
+
+def test_a_failing_replace_leaves_no_temp_file_and_names_every_file(tmp_path):
+    run = _make_run(tmp_path)
+    before = {p.name: p.read_bytes() for p in run.iterdir()}
+    with patch("src.backend.core.secret_scrub.os.replace", side_effect=OSError("denied")):
+        with pytest.raises(ScrubError) as err:
+            scrub_run_dir(run, [MARK])
+    assert sorted(err.value.files) == ["log.html", "output.xml", "playwright-log.txt"]
+    assert MARK not in str(err.value)
+    assert {p.name: p.read_bytes() for p in run.iterdir()} == before  # nothing written, no temp left
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows path limits differ: the full path would pass MAX_PATH; Linux CI and production run it")
+def test_a_report_file_with_a_254_character_name_is_still_masked(tmp_path):
+    # NAME_MAX is 255: a temp name built from the report name + 19 characters would not fit. Writable file,
+    # so the root clause of _POSIX_ONLY is not needed here.
+    name = "a" * 250 + ".txt"
+    (tmp_path / name).write_text(f"line with {MARK} inside\n", encoding="utf-8")
+    assert scrub_run_dir(tmp_path, [MARK]) == [name]
+    text = (tmp_path / name).read_text(encoding="utf-8")
+    assert MARK not in text and "***" in text
+    assert [p.name for p in tmp_path.iterdir()] == [name]

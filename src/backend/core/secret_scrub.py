@@ -10,6 +10,7 @@ each entry either ``*<raw text>`` or base64(zlib(text)) (RF 7.4.2 ``robot/utils/
 so a plain text replace cannot reach the compressed ones. Only those array entries are
 touched; the page's markup and script are never edited, so a value like ``status`` cannot
 break the page. The same holds for XML: only parsed text and attribute values change.
+A changed file is replaced (temp file in the same folder, then ``os.replace``), never opened for writing.
 
 Referenced by: the run-finish and error-reporting paths of the secrets feature (#131).
 Depends on: the standard library only.
@@ -17,10 +18,13 @@ Depends on: the standard library only.
 
 import base64
 import html
+import io
 import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 import zlib
 from collections.abc import Iterable
@@ -137,6 +141,21 @@ def _read_bounded(path: Path) -> bytes:
     return data
 
 
+def _replace_file(path: Path, data: bytes) -> None:
+    """Write ``data`` over ``path`` by replacing the file: the runner writes reports as root (644) into a
+    folder anyone may write, so the scrub (uid 1000) cannot open them for writing but can replace them.
+    The temp name ends in none of the scrubbed suffixes; a failed write leaves no temp file."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".scrub-", suffix=".scrubtmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        shutil.copymode(path, tmp)  # mkstemp makes it 0600; other readers of the folder need the old mode
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def _scrub_xml(path: Path, values: list[str]) -> bool:
     try:
         tree = ET.ElementTree(ET.fromstring(_read_bounded(path)))
@@ -156,7 +175,9 @@ def _scrub_xml(path: Path, values: list[str]) -> bool:
                 el.attrib[key] = new
                 dirty = True
     if dirty:
-        tree.write(path, encoding="UTF-8", xml_declaration=True)
+        buf = io.BytesIO()
+        tree.write(buf, encoding="UTF-8", xml_declaration=True)
+        _replace_file(path, buf.getvalue())
     return dirty
 
 
@@ -165,13 +186,14 @@ def _scrub_text(path: Path, values: list[str], fn=mask_values) -> bool:
     out = fn(src, values)
     if out == src:
         return False
-    path.write_bytes(out.encode("utf-8"))
+    _replace_file(path, out.encode("utf-8"))
     return True
 
 
 def scrub_run_dir(run_dir: Path, values: list[str]) -> list[str]:
     """Mask the values in every report file under ``run_dir``; return the changed relative paths.
 
+    A changed file is replaced, not written in place, so a root-owned 644 report in this folder is masked too.
     Images and other binary files are left alone. Nothing is logged but file names. A file that
     cannot be scrubbed does not stop the others: after all are done, ``ScrubError`` names it.
     A symlink, or a path that resolves outside ``run_dir`` (a test container can plant one), is
