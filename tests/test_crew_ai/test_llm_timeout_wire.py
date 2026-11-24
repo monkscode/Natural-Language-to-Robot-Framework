@@ -151,3 +151,37 @@ def test_cloud_wrappers_get_the_policy_and_no_litellm_retries(provider):
         llm = get_llm(provider, "gemini-3.5-flash")
     assert llm._provider_retry == ProviderRetryPolicy(BASE_S)
     assert llm.additional_params["num_retries"] == 0
+
+
+def test_vertex_salvage_call_is_cut_on_every_try(hung_server):
+    """W5.1: crewai's salvage (Converter) call reaches the socket with the per-try
+    timeouts, and one budget covers the whole salvage (owner D12 = B-lite): the
+    Converter's attempts 2 and 3 send nothing, so 3 requests, not 9.
+
+    Instructor is patched to fail loudly: without the routing, the call would take
+    crewai's instructor route and never reach this server (the test then sees 0)."""
+    from crewai.utilities.converter import Converter, ConverterError
+    from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
+    from pydantic import BaseModel
+
+    from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
+
+    class Out(BaseModel):
+        steps: list[str]
+
+    base_url, accepted = hung_server
+    with _settings(), \
+         patch.dict(os.environ, {"VERTEXAI_PROJECT": "p", "VERTEXAI_LOCATION": "global"}), \
+         patch.object(VertexBase, "_ensure_access_token", return_value=("fake-token", "p")), \
+         patch("crewai.utilities.internal_instructor.InternalInstructor.to_pydantic_with_completion",
+               side_effect=AssertionError("the instructor route was used")):
+        llm = get_llm("vertex", "gemini-3.8-flash")
+        llm.api_base = base_url
+        started = time.monotonic()
+        with pytest.raises(ConverterError) as raised:
+            Converter(llm=llm, text="this is not JSON", model=Out,
+                      instructions="Return the steps as JSON.").to_pydantic()
+        elapsed = time.monotonic() - started
+    assert len(accepted) == 3, f"expected one request per try, saw {len(accepted)}"
+    assert report_of(raised.value.__cause__).timed_out_after_s == (0.5, 1.0, 2.0)
+    assert 3.4 <= elapsed < 20, f"three tries of 0.5/1/2 s took {elapsed:.2f} s"

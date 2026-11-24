@@ -806,34 +806,32 @@ class TestResponseModelReroute:
             "token accumulator read zero — workflow metrics and pricing are blind"
         )
 
-    def test_salvage_path_keeps_response_model(self):
+    def test_salvage_path_is_one_native_schema_call(self):
         """crewai's Converter — the salvage step when raw text fails validation —
-        passes response_model with NO from_task/from_agent and has relied on
-        instructor since 1.8.1. Stripping it there costs 3 extra LLM calls and then
-        raises ConverterError. This is the test a blanket pop fails."""
+        passes response_model with NO from_task/from_agent. The wrapper sends it as
+        one native response_format call (W5.1), not through instructor's TOOLS mode.
+        Drives the REAL Converter. The wrapper has no response_format of its own, so
+        only the routing can put the schema on the wire: a blanket response_model pop
+        would send a plain completion, instructor would send `tools`."""
+        from crewai.utilities.converter import Converter
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
         from src.backend.crew_ai.tasks import AssemblyOutput
 
         with patch.dict(os.environ, VERTEX_ENV):
-            llm = get_llm("vertex", "gemini-3.5-flash", response_format=AssemblyOutput)
+            llm = get_llm("vertex", "gemini-3.8-flash")
 
         with _CompletionSpy() as spy:
-            result = llm.call(
-                messages=[{"role": "user", "content": "convert this"}],
-                response_model=AssemblyOutput,
-            )
+            result = Converter(llm=llm, text="not JSON", model=AssemblyOutput,
+                               instructions="Return the code as JSON.").to_pydantic()
 
-        # crewai's instructor branch returns result.model_dump_json() — a JSON
-        # string, not a model instance — so the return type cannot tell the two
-        # paths apart. The wire can: instructor uses TOOLS-mode function calling,
-        # the plain completion path does not.
-        assert "tools" in spy.first, (
-            "response_model was stripped from the Converter path — the call went "
-            "out as a plain completion, so crewai falls back to coercing raw text. "
-            "That is the blanket-pop regression: 3 extra calls, then ConverterError."
-        )
         assert len(spy.calls) == 1, f"expected one salvage call, got {len(spy.calls)}"
-        assert AssemblyOutput.model_validate_json(result).code
+        assert "tools" not in spy.first, "the salvage call took instructor's TOOLS mode"
+        assert spy.first.get("response_format") is AssemblyOutput, (
+            "the salvage call went out without its schema"
+        )
+        assert spy.first.get("thinkingConfig") == {"thinkingBudget": 0}
+        assert spy.first.get("timeout"), "the W5 per-try timeout did not reach LiteLLM"
+        assert result.code
 
     def test_ollama_path_is_not_forced_through_instructor(self):
         """On providers without schema support get_llm drops response_format and the

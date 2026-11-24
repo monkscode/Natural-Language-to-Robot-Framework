@@ -49,6 +49,17 @@ PROVIDER TIMEOUTS AND RETRIES (W5, owner design D3, 2026-09-24):
     this wrapper -- not LiteLLM -- retries timeouts and provider rejections
     (see provider_retry.py). Local (Ollama) wrappers keep LiteLLM's own
     num_retries=3 and its 600 s default timeout.
+
+CREWAI'S SALVAGE CALL (W5.1, owner D8, D12):
+    When an agent's answer fails output_pydantic validation, crewai's Converter
+    calls llm.call(messages=..., response_model=Model) with no from_task /
+    from_agent. crewai would send that through instructor (no timeout, no
+    thinking guard, no workflow metadata; instructor retries itself). call()
+    sends it instead as one normal response_format call inside the W5 budget,
+    on models that enforce a response schema, and a salvage that gave up after
+    the W5 retries is not sent again by the Converter's next attempts: one
+    budget per salvage. The async path (acall, the Converter's ato_pydantic)
+    is not routed: NLRF runs sync kickoff only.
 """
 
 import logging
@@ -68,6 +79,7 @@ from .provider_retry import (
     attach_report,
     classify_provider_error,
     provider_retry_delay_s,
+    report_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -515,6 +527,15 @@ class CleanedLLMWrapper(LLM):
     _EMPTY_RETRY_BASE_SECONDS = 0.5
     _EMPTY_RETRY_CAP_SECONDS = 5.0
 
+    # W5.1 B-lite (owner D12): the give-up of this wrapper's PREVIOUS call(), kept
+    # only when that call was a routed salvage whose W5 retries gave up on a
+    # provider error -- (the salvage's response model, the exception it raised).
+    # A Pydantic private attribute on crewai 1.15: BaseLLM.__init__ (which __new__
+    # calls) gives every instance its own None. Never shared: the planner and
+    # assembler wrappers alias only _monitor and _token_usage (agents.py), and each
+    # dryrun repair round builds fresh wrappers (dryrun_service.py).
+    _salvage_give_up: tuple[type, BaseException] | None = None
+
     def call(self, messages, *args, **kwargs) -> str:
         """Run _call_cleaned with crewai's own 429 retry loop switched off.
 
@@ -524,14 +545,72 @@ class CleanedLLMWrapper(LLM):
         requests while our 5-try report said 5. The marker below keeps crewai from
         wrapping this method; the contextvar makes its wrapper around super().call()
         run once. Our budget (provider_retry.py) is then the only 429 retry.
+
+        A salvage call from crewai's Converter (see _salvage_response_model) is sent
+        as a normal response_format call for its duration, inside the same
+        contextvar scope; every other call goes straight to _call_cleaned, unchanged.
+
+        One budget per salvage (owner D12, "B-lite"): the Converter retries any
+        error up to 3 times, back to back. When this wrapper's previous call() was
+        a salvage for the same model that gave up after W5's retries (its exception
+        carries a retry report), the next one re-raises that same exception at once
+        instead of spending another budget. Any other call clears the memory, and so
+        does a salvage that ends any other way (an answer, a fatal error).
         """
         token = _active_llm_rate_limit_retry.set(True)
         try:
-            return self._call_cleaned(messages, *args, **kwargs)
+            salvage_model = self._salvage_response_model(kwargs)
+            remembered, self._salvage_give_up = self._salvage_give_up, None
+            if salvage_model is None:
+                return self._call_cleaned(messages, *args, **kwargs)
+            if remembered is not None and remembered[0] is salvage_model:
+                self._salvage_give_up = remembered
+                logger.warning(
+                    "[LLM_RETRY] %s: salvage call not sent again; the previous attempt gave up "
+                    "after the provider retries (%s)", self.model, type(remembered[1]).__name__,
+                )
+                raise remembered[1]
+            kwargs.pop("response_model")
+            previous_format = self.response_format
+            self.response_format = salvage_model
+            try:
+                return self._call_cleaned(messages, *args, **kwargs)
+            except Exception as exc:
+                if report_of(exc) is not None:
+                    self._salvage_give_up = (salvage_model, exc)
+                raise
+            finally:
+                self.response_format = previous_format
         finally:
             _active_llm_rate_limit_retry.reset(token)
 
     call._crewai_rate_limit_wrapped = True  # type: ignore[attr-defined]
+
+    def _salvage_response_model(self, kwargs: dict) -> type | None:
+        """The Pydantic model of a crewai salvage call to send as a schema call, else None.
+
+        crewai's Converter calls llm.call(messages=..., response_model=Model) and
+        passes neither from_task nor from_agent (crewai/utilities/converter.py:103-106).
+        The agent executor always passes both keys (utilities/agent_utils.py:766-773),
+        and crewai's unsupported-'stop' re-entry (llm.py:2072-2080) passes them as
+        None, so key PRESENCE decides: exactly the complement of the scoped
+        response_model pop in _call_cleaned, and the two compose. Only models
+        LiteLLM says enforce a response schema are routed; others keep crewai's path.
+        """
+        response_model = kwargs.get("response_model")
+        if response_model is None:
+            return None
+        if "from_task" in kwargs or "from_agent" in kwargs:
+            return None
+        try:
+            from litellm.utils import supports_response_schema
+            if not supports_response_schema(model=self.model):
+                return None
+        except Exception:
+            logger.warning("Response-schema check failed for %s; salvage call left to crewai",
+                           self.model, exc_info=True)
+            return None
+        return response_model
 
     def _call_cleaned(self, messages, *args, **kwargs) -> str:
         """
