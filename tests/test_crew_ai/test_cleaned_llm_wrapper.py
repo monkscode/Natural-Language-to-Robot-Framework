@@ -765,7 +765,7 @@ class TestResponseModelReroute:
     litellm LLM. On that path nothing but model/response_model/messages reaches
     LiteLLM: the Vertex thinking guard, num_retries, the W5 per-try timeout,
     api_key and base_url are dropped, native response_format becomes TOOLS-mode
-    function calling, and _token_usage stays zero so workflow metrics and
+    function calling, and _token_usage can read zero so workflow metrics and
     pricing silently read 0.
 
     The existing characterization tests cannot see this: they assert on

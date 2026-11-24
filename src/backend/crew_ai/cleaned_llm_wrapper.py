@@ -571,7 +571,10 @@ class CleanedLLMWrapper(LLM):
         # step when the model's raw text fails validation) also passes response_model and
         # relies on instructor; stripping it there costs extra LLM calls and then raises
         # ConverterError. The executor always passes from_task/from_agent
-        # (utilities/agent_utils.py:766-772); the Converter passes neither.
+        # (utilities/agent_utils.py:766-772); the Converter passes neither. The pop also
+        # strips response_model for planner_observer.py:159, the reasoning handler and
+        # agent_executor.py:2815; our agents (agents.py) set no reasoning/planning, so
+        # none of those paths is reached.
         if "from_task" in kwargs or "from_agent" in kwargs:
             kwargs.pop("response_model", None)
 

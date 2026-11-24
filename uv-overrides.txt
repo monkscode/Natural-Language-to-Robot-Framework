@@ -1,4 +1,4 @@
-# Packages crewai lists but this project never loads; every uv pip compile AND every install from the compiled file passes --overrides uv-overrides.txt
+# Packages the dependency graph pulls in that this project never loads; every uv pip compile AND every install from the compiled file passes --overrides uv-overrides.txt
 lancedb; sys_platform == 'never'
 pyarrow; sys_platform == 'never'
 lance-namespace; sys_platform == 'never'

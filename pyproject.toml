@@ -53,9 +53,9 @@ dependencies = [
     # psycopg[binary] ships prebuilt wheels (no local libpq/compiler needed);
     # [pool] adds the ConnectionPool used by the auth store.
     "psycopg[binary,pool]",
-    # Direct imports of the auth module. Both are otherwise only transitive
-    # (bcrypt declared-only, PyJWT via crewai) and would vanish the moment those
-    # are removed/upgraded — declare them so auth never depends on that accident.
+    # Direct imports of the auth module. bcrypt reaches us only through this
+    # declaration; PyJWT also arrives transitively via crewai. Both are declared
+    # because the auth module imports them directly.
     # bcrypt is used directly (NOT via passlib, which breaks on bcrypt 5.x).
     "bcrypt>=4.1,<6",
     "PyJWT>=2.8,<3",
@@ -70,9 +70,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# S3 artifact-storage backend. Installed ONLY when ARTIFACT_STORE=s3 is used, so
-# a local-only deployment never ships the AWS SDK (boto3 + botocore is ~50-80MB).
-# boto3 is lazy-imported by S3ArtifactStore.
+# S3 artifact-storage backend. boto3 is lazy-imported by S3ArtifactStore. litellm
+# >=1.105 already depends on boto3, so this extra adds nothing today; it keeps the
+# S3 backend working if litellm ever drops that dependency.
 #   local/dev:  pip install -e '.[s3]'
 #   Docker:     docker build --build-arg INSTALL_S3=true ... (see Dockerfile.fastapi)
 s3 = [

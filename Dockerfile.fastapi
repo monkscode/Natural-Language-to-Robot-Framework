@@ -61,8 +61,8 @@ WORKDIR /build
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Opt in to the S3 artifact-storage backend at build time. Default is off, so the
-# image ships without the AWS SDK (boto3 + botocore is ~50-80MB) unless requested:
+# Install the S3 extra at build time. litellm >=1.105 already pulls in boto3, so
+# this flag adds nothing today (kept for if litellm drops it):
 #   docker build --build-arg INSTALL_S3=true ...
 ARG INSTALL_S3=false
 
