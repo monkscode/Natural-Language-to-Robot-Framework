@@ -633,8 +633,10 @@ class CleanedLLMWrapper(LLM):
         # and base_url are dropped, native response_format becomes TOOLS-mode function
         # calling, and the token accumulator can read zero. Strip it — but ONLY on the
         # agent-executor path. crewai's Converter (utilities/converter.py:103, the salvage
-        # step when the model's raw text fails validation) also passes response_model and
-        # relies on instructor; stripping it there costs extra LLM calls and then raises
+        # step when the model's raw text fails validation) also passes response_model. For a
+        # model that enforces a response schema (vertex/gemini) call() has already made it
+        # a native schema call (_salvage_response_model); any other model still relies on
+        # instructor here, and stripping it costs extra LLM calls and then raises
         # ConverterError. The executor always passes from_task/from_agent
         # (utilities/agent_utils.py:766-772); the Converter passes neither. The pop also
         # strips response_model for planner_observer.py:159 and agent_executor.py:2815;
