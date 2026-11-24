@@ -104,10 +104,13 @@ class Settings(BaseSettings):
     # The wrapper (CleanedLLMWrapper.call) retries the SAME litellm.completion()
     # call — NOT the agent loop — so tool results already in the message history
     # are reused. browser-use, batch_browser_automation, etc. are NOT re-invoked.
-    # Default 2 = up to two extra attempts (3 total calls). Max 5 to bound
-    # worst-case extra latency (~12s with exponential backoff at 5s cap).
+    # Default 1 = one extra attempt (2 total calls) per wrapper call. crewai
+    # >=1.15 retries a blank answer once more inside its agent loop (4 asks per
+    # agent attempt, an all-blank run sends 12 requests; default 2 sent 18). A
+    # direct wrapper call (the salvage path) gets 2. Max 5 to bound worst-case
+    # extra latency (~12s with exponential backoff at 5s cap).
     LLM_EMPTY_RESPONSE_MAX_RETRIES: int = Field(
-        default=2,
+        default=1,
         description="Extra LLM call attempts when response is empty/whitespace (0 = disabled, max 5). Exponential backoff: 500ms × 2^n capped at 5s.",
     )
 

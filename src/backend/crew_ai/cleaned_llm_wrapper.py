@@ -511,7 +511,7 @@ class CleanedLLMWrapper(LLM):
     _provider_retry: ProviderRetryPolicy | None = None
 
     # Backoff for empty-response retries: 0.5s * 2^retry_idx, capped at 5s.
-    # Worst-case extra latency at default max_retries=2: 0.5 + 1.0 = 1.5s.
+    # Worst-case extra latency at default max_retries=1: 0.5s.
     _EMPTY_RETRY_BASE_SECONDS = 0.5
     _EMPTY_RETRY_CAP_SECONDS = 5.0
 
