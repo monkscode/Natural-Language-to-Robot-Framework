@@ -103,10 +103,25 @@ class TestClassify:
     def test_fatal(self, exc):
         assert classify_provider_error(exc) == "fatal"
 
-    def test_unparseable_reply_text_alone_does_not_make_a_400_retryable(self):
-        """Retrying a 200 that is not JSON needs litellm's status 422 AND its text."""
-        text = "GeminiException - Error converting to valid response block=x"
-        assert classify_provider_error(E.BadRequestError(message=text, model="m", llm_provider="gemini")) == "fatal"
+    @pytest.mark.parametrize("status", [409, 422, 499])
+    def test_a_bad_request_with_an_unnamed_status_is_a_rejection(self, status):
+        exc = E.BadRequestError(message="x", model="m", llm_provider="gemini")
+        exc.status_code = status
+        assert classify_provider_error(exc) == "rejected"
+
+    @pytest.mark.parametrize("status", [None, 400, 401, 403, 404])
+    def test_a_bad_request_with_no_or_a_caller_fault_status_is_fatal(self, status):
+        exc = E.BadRequestError(message="x", model="m", llm_provider="gemini")
+        exc.status_code = status
+        assert classify_provider_error(exc) == "fatal"
+
+    @pytest.mark.parametrize("exc", [
+        E.ContextWindowExceededError(message="too long", model="m", llm_provider="gemini"),
+        E.ContentPolicyViolationError(message="blocked", model="m", llm_provider="gemini"),
+    ])
+    def test_bad_request_subclasses_carry_400_and_stay_fatal(self, exc):
+        assert exc.status_code == 400
+        assert classify_provider_error(exc) == "fatal"
 
     def test_timeout_is_checked_before_connection_errors(self):
         """litellm.Timeout also descends from openai.APIConnectionError."""
@@ -296,6 +311,9 @@ class TestRealLiteLLMMapping:
         (403, "application/json", b'{"error": {"code": 403, "message": "p", "status": "PERMISSION_DENIED"}}', "fatal"),
         (404, "application/json", b'{"error": {"code": 404, "message": "n", "status": "NOT_FOUND"}}', "fatal"),
         (200, "application/json", b'{"candidates": [', "rejected"),  # truncated JSON behind a 200
+        (409, "application/json", b'{"error": {"code": 409, "message": "a", "status": "ABORTED"}}', "rejected"),
+        (422, "application/json", b'{"error": {"code": 422, "message": "u", "status": "UNPROCESSABLE"}}', "rejected"),
+        (499, "application/json", b'{"error": {"code": 499, "message": "c", "status": "CANCELLED"}}', "rejected"),
     ])
     def test_gemini_statuses_are_sorted_from_the_real_mapping(self, status, content_type, body, kind):
         server = self._serve(status, content_type, body)

@@ -68,7 +68,8 @@ class TestRequestCountsThroughTheRealWrapper:
         assert len(calls) == 5
         assert report_of(raised.value).tries == 5
         assert report_of(raised.value).rejections == 5
-        # Only the wrapper's four backoffs (<= 8 s each); crewai's own sleeps would add more.
+        # The wrapper's four backoffs. crewai's own loop binds time.sleep as a default argument,
+        # so this mock never sees it: the request count above is the real guard.
         assert len(sleep.call_args_list) == 4
 
     def test_per_day_quota_429_sends_one_request(self):
