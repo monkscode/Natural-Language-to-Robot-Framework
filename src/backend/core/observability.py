@@ -44,6 +44,7 @@ def init_observability() -> bool:
 
     try:
         from traceloop.sdk import Traceloop
+        from traceloop.sdk.instruments import Instruments
 
         # Always capture full prompt/response — customers consent to full data collection.
         os.environ["TRACELOOP_TRACE_CONTENT"] = "true"
@@ -55,6 +56,9 @@ def init_observability() -> bool:
             disable_batch=False,
             exporter=exporter,
             traceloop_sync_enabled=False,  # Don't phone home to Traceloop cloud
+            # Our LiteLLM callback owns LLM trace data; Traceloop's own litellm
+            # instrument (traceloop-sdk 0.63+) would record every call twice.
+            block_instruments={Instruments.LITELLM},
         )
 
         logger.info(

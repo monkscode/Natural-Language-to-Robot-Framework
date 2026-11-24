@@ -58,6 +58,17 @@ class TestInitObservability:
                     result = init_observability()
                     assert isinstance(result, bool)
 
+    def test_traceloop_litellm_instrument_is_blocked(self):
+        """Our LiteLLM callback owns LLM trace data; Traceloop's own litellm
+        instrument (new in traceloop-sdk 0.63) would record every call twice."""
+        from traceloop.sdk.instruments import Instruments
+        with patch("src.backend.core.config.settings", _make_settings("postgres")):
+            with patch("src.backend.core.observability._get_exporter", return_value=MagicMock()):
+                with patch("traceloop.sdk.Traceloop.init") as init:
+                    from src.backend.core.observability import init_observability
+                    assert init_observability() is True
+        assert init.call_args.kwargs["block_instruments"] == {Instruments.LITELLM}
+
     def test_success_returns_true(self):
         with patch("src.backend.core.config.settings", _make_settings("postgres")):
             with patch("src.backend.core.observability._get_exporter", return_value=MagicMock()):
