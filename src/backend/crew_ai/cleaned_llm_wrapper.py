@@ -58,7 +58,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
+from crewai.llm import LLM
 from crewai.llms.retry import _active_llm_rate_limit_retry
 
 from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
@@ -439,104 +439,71 @@ class CleanedLLMWrapper(LLM):
             logger.debug("get_workflow_usage failed", exc_info=True)
             return dict(self._ZERO_USAGE)
 
+    # True once the Ollama /api/show lookup ran (hit or miss) -- see below.
+    _ollama_context_probed = False
+
     def get_context_window_size(self) -> int:
-        """Return the context window size for the configured model.
+        """Return the usable context window (crewai applies its 85% ratio).
 
-        LLM.get_context_window_size() matches self.model against keys in
-        LLM_CONTEXT_WINDOW_SIZES using startswith, but our model string is
-        'provider/model' (e.g. 'gemini/gemini-2.5-flash'). The provider prefix
-        causes all startswith checks to fail, returning the tiny 6963-token
-        default. This override fixes that by querying authoritative sources:
-
-        1. LiteLLM's local model database  — covers all cloud providers
-        2. Ollama's REST API               — covers local models not in LiteLLM DB
-        3. CrewAI's built-in lookup        — last resort fallback
+        Cloud models: crewai's own catalog answers (it understands our
+        'provider/model' strings since 1.15). Ollama models are in no catalog,
+        so with context_window_size unset we ask Ollama's /api/show ONCE per
+        instance and store the FULL window; crewai then returns 85% of it. A
+        failed lookup stores nothing (crewai warns and uses its default) and is
+        not retried -- the lookup is a 5 s HTTP call.
         """
-        if self.context_window_size != 0:
-            return self.context_window_size
+        if (
+            not self.context_window_size
+            and self.model.startswith("ollama/")
+            and not self._ollama_context_probed
+        ):
+            self._ollama_context_probed = True
+            self._probe_ollama_context_window()
+        return super().get_context_window_size()
 
-        # Step 1: LiteLLM's local model database (no API call — ships with litellm)
-        # Note: only use max_input_tokens (context window), NOT max_tokens (output limit)
+    def _probe_ollama_context_window(self) -> None:
+        """Store Ollama's reported context_length in self.context_window_size."""
         try:
-            import litellm
-            info = litellm.get_model_info(self.model)
-            max_input_tokens = info.get("max_input_tokens")
-            if max_input_tokens:
-                self.context_window_size = int(max_input_tokens * CONTEXT_WINDOW_USAGE_RATIO)
-                logger.debug(
-                    f"🪟 Context window for '{self.model}': "
-                    f"{self.context_window_size} tokens (source: LiteLLM DB)"
-                )
-                return self.context_window_size
-        except Exception as e:
-            # Intermediate step miss — not warning-worthy on its own. Ollama is
-            # only tried for ollama/ models; the final unresolved case is
-            # surfaced once, at WARNING, in Step 3 below.
-            logger.debug(
-                f"LiteLLM DB has no context-window entry for '{self.model}' "
-                f"(type={type(e).__name__}, detail={e})"
+            import requests
+            model_name = self.model.split("/", 1)[1]
+            # rstrip to handle trailing slash in OLLAMA_API_BASE (e.g. "http://host/")
+            base_url = (self.base_url or "http://localhost:11434").rstrip("/")
+            response = requests.post(
+                f"{base_url}/api/show",
+                json={"model": model_name},
+                timeout=5,
             )
-
-        # Step 2: Ollama API — local models are not in LiteLLM's central database
-        if self.model.startswith("ollama/"):
-            try:
-                import requests
-                model_name = self.model.split("/", 1)[1]
-                # rstrip to handle trailing slash in OLLAMA_API_BASE (e.g. "http://host/")
-                base_url = (self.base_url or "http://localhost:11434").rstrip("/")
-                response = requests.post(
-                    f"{base_url}/api/show",
-                    json={"model": model_name},
-                    timeout=5,
+            if response.status_code == 200:
+                model_info = response.json().get("model_info", {})
+                # Keys follow the pattern "{architecture}.context_length"
+                # e.g. "llama.context_length", "qwen2.context_length"
+                ctx_length = next(
+                    (v for k, v in model_info.items()
+                     if k.endswith(".context_length")),
+                    None,
                 )
-                if response.status_code == 200:
-                    model_info = response.json().get("model_info", {})
-                    # Keys follow the pattern "{architecture}.context_length"
-                    # e.g. "llama.context_length", "qwen2.context_length"
-                    ctx_length = next(
-                        (v for k, v in model_info.items()
-                         if k.endswith(".context_length")),
-                        None,
+                if ctx_length:
+                    self.context_window_size = int(ctx_length)
+                    logger.debug(
+                        f"🪟 Context window for '{self.model}': "
+                        f"{self.context_window_size} tokens (source: Ollama API)"
                     )
-                    if ctx_length:
-                        self.context_window_size = int(
-                            ctx_length * CONTEXT_WINDOW_USAGE_RATIO
-                        )
-                        logger.debug(
-                            f"🪟 Context window for '{self.model}': "
-                            f"{self.context_window_size} tokens (source: Ollama API)"
-                        )
-                        return self.context_window_size
-                    else:
-                        logger.warning(
-                            f"⚠️ Ollama /api/show returned no context_length key "
-                            f"for '{model_name}' — falling back to CrewAI defaults"
-                        )
                 else:
                     logger.warning(
-                        f"⚠️ Ollama /api/show returned HTTP {response.status_code} "
+                        f"⚠️ Ollama /api/show returned no context_length key "
                         f"for '{model_name}' — falling back to CrewAI defaults"
                     )
-            except Exception as e:
+            else:
                 logger.warning(
-                    f"⚠️ Failed to query Ollama API for context window of "
-                    f"'{self.model}' (type={type(e).__name__}, detail={e}) "
-                    f"— falling back to CrewAI defaults"
+                    f"⚠️ Ollama /api/show returned HTTP {response.status_code} "
+                    f"for '{model_name}' — falling back to CrewAI defaults"
                 )
-
-        # Step 3: CrewAI's built-in lookup (last resort — likely returns tiny default)
-        result = super().get_context_window_size()
-        # Cache the fallback like Steps 1 and 2 do: the context window cannot
-        # change during the process, and without caching this whole method —
-        # including a litellm lookup and a 5s Ollama HTTP call — re-runs on
-        # every get_context_window_size() call, spamming this WARNING each time.
-        self.context_window_size = result
-        logger.warning(
-            f"⚠️ Context window for '{self.model}' not resolved from LiteLLM DB "
-            f"or Ollama API — using CrewAI fallback: {result} tokens. "
-            f"Context summarization may be suboptimal."
-        )
-        return result
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Failed to query Ollama API for context window of "
+                f"'{self.model}' (type={type(e).__name__}, detail={e}) "
+                f"— falling back to CrewAI defaults"
+            )
 
     # Per-try timeouts + retries for cloud providers (W5). get_llm sets it on
     # vertex/gemini instances; the class default None (local Ollama, or any
