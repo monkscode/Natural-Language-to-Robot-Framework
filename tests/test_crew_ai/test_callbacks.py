@@ -185,7 +185,7 @@ class TestNeverRaises:
 class TestGetCrewCallbacks:
     """crew.py's single wiring point."""
 
-    def test_returns_step_callback_and_stage_collector(self):
+    def test_step_slot_is_none_and_task_slot_is_the_stage_collector(self):
         from src.backend.crew_ai.callbacks import (
             StageMetricsCallback,
             get_crew_callbacks,
@@ -194,7 +194,7 @@ class TestGetCrewCallbacks:
         llm = _llm_returning()
         step_callback, task_callback = get_crew_callbacks(llm=llm)
 
-        assert callable(step_callback)
+        assert step_callback is None
         assert isinstance(task_callback, StageMetricsCallback)
         assert task_callback.stage_metrics == {}
 
@@ -204,5 +204,5 @@ class TestGetCrewCallbacks:
 
         step_callback, task_callback = get_crew_callbacks()
 
-        assert callable(step_callback)
+        assert step_callback is None
         assert callable(task_callback)
