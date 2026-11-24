@@ -968,10 +968,6 @@ class TestTotalLlmCallsUsesActualCalls:
             assert m.total_llm_calls == self._crewai_calls() + 2, f"bad value {bad!r}"
 
 
-_PRICE_KEYS = (
-    "vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "gemini-3.5-flash",
-    "vertex_ai/gemini-3.8-flash", "gemini/gemini-3.8-flash", "gemini-3.8-flash",
-)
 # bench run fff8e5a3-e8c7-48b7-9923-11094bbe1a3f: real tokens, browser-service cost 0.0
 RUN = {'tokens': 23289, 'input_tokens': 22655, 'output_tokens': 634, 'cached_tokens': 0,
        'actual_cost': 0.0, 'llm_calls': 2, 'elements_processed': 2}
@@ -987,51 +983,39 @@ def helper_warnings(caplog):
             if r.levelno == logging.WARNING and r.getMessage().startswith("browser-use ")]
 
 
-@pytest.fixture
-def no_entry():
-    """LiteLLM's table as after a failed download: no 3.5 / 3.8 entry; restored afterwards."""
-    from src.backend.crew_ai import model_map_fallback
-    with patch.dict(litellm.model_cost), patch.object(model_map_fallback, "_checked", set()):
-        for key in _PRICE_KEYS:
-            litellm.model_cost.pop(key, None)
-        yield
-
-
-@pytest.fixture
-def pinned(no_entry):
-    """The table with the pinned 3.8 entries (all three keys) ensure_model_entry adds."""
-    from src.backend.crew_ai import model_map_fallback
-    model_map_fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.8-flash")
-
-
 class TestBrowserUseCostFallback:
-    """bs #32: browser-use reports $0 beside real tokens when it could not load prices."""
+    """bs #32: browser-use reports $0 beside real tokens when it could not load prices.
+
+    Priced from litellm's bundled table (1.105.3 bundles gemini-3.8-flash: 7.5e-07 in, 3.75e-06 out,
+    7.5e-08 cached). A model the table lacks cannot be built from gemini names any more (litellm answers
+    those itself), so the unpriceable case uses a made-up non-gemini name.
+    """
 
     @pytest.mark.parametrize("provider, routed", [("vertex", "vertex_ai/gemini-3.8-flash"),
                                                   ("gemini", "gemini/gemini-3.8-flash")])
-    def test_priced_when_tokens_and_zero_cost(self, pinned, caplog, provider, routed):
+    def test_priced_when_tokens_and_zero_cost(self, caplog, provider, routed):
         with caplog.at_level(logging.WARNING):
             cost = _browser_use_cost(RUN, provider, "gemini-3.8-flash")
         assert cost == pytest.approx(0.01936875, abs=1e-12)
         [w] = helper_warnings(caplog)
         assert routed in w and "22655" in w and "634" in w and "0.01936875" in w
 
-    def test_cached_tokens_at_cache_read_rate(self, pinned):
+    def test_cached_tokens_at_cache_read_rate(self):
         run = {**RUN, 'cached_tokens': 10000}
         assert _browser_use_cost(run, "vertex", "gemini-3.8-flash") == pytest.approx(0.01261875, abs=1e-12)
 
-    def test_unpriceable_model_stays_zero_and_warns(self, no_entry, caplog):
+    def test_unpriceable_model_stays_zero_and_warns(self, caplog):
         with caplog.at_level(logging.WARNING):
-            assert _browser_use_cost(RUN, "vertex", "gemini-3.8-flash") == 0.0
+            assert _browser_use_cost(RUN, "vertex", "bs32-unmapped-test") == 0.0
         [w] = helper_warnings(caplog)
-        assert "vertex_ai/gemini-3.8-flash" in w and "isn't mapped" in w
+        assert "bs32-unmapped-test" in w and "isn't mapped" in w
 
-    def test_bs_cost_kept_when_positive(self, no_entry, caplog):
+    def test_bs_cost_kept_when_positive(self, caplog):
         with caplog.at_level(logging.WARNING):
             assert _browser_use_cost({**RUN, 'actual_cost': 0.0123}, "vertex", "gemini-3.8-flash") == 0.0123
         assert helper_warnings(caplog) == []
 
-    def test_zero_tokens_untouched(self, no_entry, caplog):
+    def test_zero_tokens_untouched(self, caplog):
         with caplog.at_level(logging.WARNING):
             assert _browser_use_cost({**RUN, 'tokens': 0}, "vertex", "gemini-3.8-flash") == 0.0
             assert _browser_use_cost({}, "vertex", "gemini-3.8-flash") == 0.0
@@ -1049,14 +1033,14 @@ class TestBrowserUseCostFallback:
                                           completion_tokens=0)[0] == pytest.approx(0.625)
             assert _browser_use_cost(run, "vertex", "bs32-tiered-test") == pytest.approx(0.3125)
 
-    def test_metrics_row_uses_priced_cost(self, pinned):
+    def test_metrics_row_uses_priced_cost(self):
         m = _capture_workflow_metrics(RUN, "gemini-3.8-flash")
         assert m.browser_use_cost == pytest.approx(0.01936875)
         assert m.crewai_cost == 0.0008
         assert m.total_cost == pytest.approx(0.0008 + 0.01936875)
         assert m.avg_cost_per_element == pytest.approx(0.01936875 / 2)
 
-    def test_pricing_error_keeps_the_row(self, pinned, caplog):
+    def test_pricing_error_keeps_the_row(self, caplog):
         with caplog.at_level(logging.WARNING), \
              patch("litellm.get_model_info", side_effect=RuntimeError("boom")):
             m = _capture_workflow_metrics(RUN, "gemini-3.8-flash")

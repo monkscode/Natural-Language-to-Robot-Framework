@@ -98,6 +98,10 @@ def _pin_valid_tiktoken_cache() -> None:
     if not bundled:
         warnings.warn(f"no bundled tiktoken files in {tokenizers}; tokenizer cache NOT pinned")
         return
+    # cl100k is what litellm's default_encoding.py loads at import; without it every litellm import
+    # tries 5 refused downloads, silently
+    if "9b5ad71b2ce5302211f9c61530b329a4922fc6a4" not in {f.name for f in bundled}:
+        warnings.warn(f"cl100k tokenizer file (9b5ad71b...) missing from {tokenizers}; litellm import will try to download it")
     cache_dir = Path(tempfile.mkdtemp(prefix="nlrf_test_tiktoken_"))
     for f in bundled:
         (cache_dir / f.name).write_bytes(f.read_bytes().replace(b"\r\n", b"\n"))
