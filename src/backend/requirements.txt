@@ -49,8 +49,10 @@ botocore==1.44.9
     # via
     #   boto3
     #   s3transfer
-cel-python==0.5.0
-    # via crewai
+cel-python==0.5.0 ; sys_platform == 'never'
+    # via
+    #   --override uv-overrides.txt
+    #   crewai
 certifi==2026.11.20
     # via
     #   crewai-cli
@@ -78,8 +80,10 @@ colorama==0.4.6
     #   typer
 crewai==1.15.44
     # via natural-language-to-robot-framework (pyproject.toml)
-crewai-cli==1.15.44
-    # via crewai
+crewai-cli==1.15.44 ; sys_platform == 'never'
+    # via
+    #   --override uv-overrides.txt
+    #   crewai
 crewai-core==1.15.44
     # via
     #   crewai
@@ -132,7 +136,7 @@ fsspec==2026.9.0
     # via huggingface-hub
 google-auth==2.63.1
     # via natural-language-to-robot-framework (pyproject.toml)
-google-re2==1.1.20251105
+google-re2==1.1.20251105 ; sys_platform == 'never'
     # via cel-python
 googleapis-common-protos==1.76.0
     # via
@@ -226,11 +230,11 @@ lancedb==0.41.0 ; sys_platform == 'never'
     # via
     #   --override uv-overrides.txt
     #   crewai
-lark==1.3.1
+lark==1.3.1 ; sys_platform == 'never'
     # via cel-python
 limits==5.8.0
     # via slowapi
-linkify-it-py==2.2.0
+linkify-it-py==2.2.0 ; sys_platform == 'never'
     # via markdown-it-py
 litellm==1.105.3
     # via natural-language-to-robot-framework (pyproject.toml)
@@ -245,7 +249,7 @@ markupsafe==3.0.4
     # via jinja2
 mcp==1.30.0
     # via crewai
-mdit-py-plugins==0.7.0
+mdit-py-plugins==0.7.0 ; sys_platform == 'never'
     # via textual
 mdurl==0.1.2
     # via markdown-it-py
@@ -571,13 +575,13 @@ pdfminer-six==20260107
     # via pdfplumber
 pdfplumber==0.11.11
     # via crewai
-pendulum==3.3.0
+pendulum==3.3.0 ; sys_platform == 'never'
     # via cel-python
 pillow==13.0.0
     # via
     #   fastembed
     #   pdfplumber
-platformdirs==4.14.8
+platformdirs==4.14.8 ; sys_platform == 'never'
     # via textual
 portalocker==2.7.0
     # via
@@ -738,7 +742,7 @@ tenacity==9.2.1
     # via
     #   instructor
     #   traceloop-sdk
-textual==8.2.8
+textual==8.2.8 ; sys_platform == 'never'
     # via crewai-cli
 tiktoken==0.14.0
     # via litellm
@@ -795,7 +799,7 @@ typing-inspection==0.4.5
     #   mcp
     #   pydantic
     #   pydantic-settings
-tzdata==2026.6
+tzdata==2026.6 ; sys_platform == 'never' or sys_platform == 'win32'
     # via
     #   pendulum
     #   psycopg
@@ -806,7 +810,7 @@ urllib3==2.8.0
     #   lance-namespace-urllib3-client
     #   qdrant-client
     #   requests
-uv==0.13.9
+uv==0.13.9 ; sys_platform == 'never'
     # via crewai-cli
 uvicorn==0.54.0
     # via
