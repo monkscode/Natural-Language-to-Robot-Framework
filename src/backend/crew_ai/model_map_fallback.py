@@ -1,28 +1,24 @@
-"""Keep our configured Gemini model known to LiteLLM when its model-list download fails.
+"""Keep our configured Gemini model priced and schema-capable in LiteLLM's model list.
 
-At ``import litellm``, LiteLLM 1.75.3 downloads its model list from GitHub
-(5 s timeout) and, on ANY failure, silently loads the copy bundled in the
-package (litellm/litellm_core_utils/get_model_cost_map.py). That copy has neither
-gemini-3.5-flash nor gemini-3.8-flash, so one failed download at process start turns off schema
-enforcement for the planner and the assembler (get_llm drops response_format),
-moves the system prompt into the user turn of every request, and makes the
-model's cost read $0 for the life of the process. LiteLLM logs nothing about
-the failed download; the only traces are get_llm's INFO line and a cost-lookup
-WARNING, and neither names the cause.
+litellm 1.105.3 bundles gemini-3.5-flash and gemini-3.8-flash, so today
+ensure_model_entry() does nothing for them, even after a failed list download at
+import. It stays as the guard for a model litellm lacks. For an unmapped
+gemini-named model litellm builds an entry with schema support and a price of 0
+(no error), so "known" here means a real price, not merely "no error": the cost
+would otherwise read $0 silently.
 
-ensure_model_entry() adds our pinned copy of the model's entries (verbatim
-from LiteLLM's online list, pinned_model_entries.json) to litellm.model_cost
-ONLY when LiteLLM does not know the model, adding only missing keys, and logs a
-WARNING naming the pinned date. If the model is still not schema-capable it
-logs an ERROR. After a good download, or with a litellm that bundles the model,
-it does nothing. It never raises: a failure of its own is logged as an ERROR and
-the attempt is retried on the next call.
+When LiteLLM has no priced entry for the model, ensure_model_entry() adds our
+pinned copy of its entries (verbatim from LiteLLM's online list,
+pinned_model_entries.json), adding only missing keys, and logs a WARNING naming
+the pinned date. If the model is still unpriced or not schema-capable it logs
+an ERROR (planner and assembler would run without schema enforcement, cost $0).
+It never raises: a failure of its own is logged as an ERROR and the attempt is
+retried on the next call.
 
-To add a model (a one-time step per model): copy its entries from LiteLLM's
-online list into pinned_model_entries.json, refresh the existing entries from
-the same download, set pinned_on to that day, and update
-test_the_pin_file_holds_both_models_entries. A model we run but never pinned is
-reported by the ERROR line, not silently.
+To add a model: copy its entries from LiteLLM's online list into
+pinned_model_entries.json, refresh the existing entries from the same download,
+set pinned_on to that day, and update test_the_pin_file_holds_both_models_entries.
+A model we run but never pinned is reported by the ERROR line, not silently.
 
 Referenced by:
     - src/backend/crew_ai/cleaned_llm_wrapper.py (get_llm, before the schema gate)
@@ -49,11 +45,11 @@ _lock = threading.Lock()
 
 
 def _known(routed_model: str) -> bool:
+    """True when LiteLLM has a real price for the model (an unmapped gemini name gets price 0)."""
     try:
-        litellm.get_model_info(model=routed_model)
+        return bool(litellm.get_model_info(model=routed_model).get("input_cost_per_token"))
     except Exception:
         return False
-    return True
 
 
 def ensure_model_entry(model_provider: str, routed_model: str) -> None:
@@ -77,17 +73,23 @@ def ensure_model_entry(model_provider: str, routed_model: str) -> None:
                 for key, entry in entries.items():
                     litellm.model_cost.setdefault(key, dict(entry))
                 if entries:
+                    # model_cost was edited in place: drop LiteLLM's cached lookups (they hold the price-0 answer)
+                    litellm.utils._invalidate_model_cost_lowercase_map()
                     logger.warning(
                         "LiteLLM's model list has no entry for %s (most likely its download from GitHub "
                         "failed when litellm was imported). Using our copy of its entries, pinned on %s; "
                         "their prices may be out of date.",
                         routed_model, pinned["pinned_on"],
                     )
+            problems = []
             if not litellm.utils.supports_response_schema(model=routed_model):
+                problems.append("the planner and the assembler run WITHOUT schema enforcement")
+            if not _known(routed_model):
+                problems.append("its cost reads $0")
+            if problems:
                 logger.error(
-                    "LiteLLM does not know %s as a schema-capable model: the planner and the "
-                    "assembler run WITHOUT schema enforcement%s.",
-                    routed_model, "" if _known(routed_model) else ", and its cost reads $0",
+                    "LiteLLM does not know %s as a priced, schema-capable model: %s.",
+                    routed_model, ", and ".join(problems),
                 )
         except Exception:
             logger.exception(

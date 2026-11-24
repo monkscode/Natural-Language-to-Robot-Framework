@@ -983,24 +983,37 @@ def helper_warnings(caplog):
             if r.levelno == logging.WARNING and r.getMessage().startswith("browser-use ")]
 
 
+@pytest.fixture
+def pinned_prices():
+    """The repo's pinned 3.8 / 3.5 entries laid over litellm's table, so exact arithmetic never reads the
+    loaded table (in CI the live GitHub list: an upstream price change must not turn CI red)."""
+    from src.backend.crew_ai.model_map_fallback import PINNED_FILE
+    entries = json.loads(PINNED_FILE.read_text(encoding="utf-8"))["entries"]
+    litellm.utils._invalidate_model_cost_lowercase_map()
+    with patch.dict(litellm.model_cost, entries):
+        litellm.utils._invalidate_model_cost_lowercase_map()
+        yield
+    litellm.utils._invalidate_model_cost_lowercase_map()
+
+
 class TestBrowserUseCostFallback:
     """bs #32: browser-use reports $0 beside real tokens when it could not load prices.
 
-    Priced from litellm's bundled table (1.105.3 bundles gemini-3.8-flash: 7.5e-07 in, 3.75e-06 out,
-    7.5e-08 cached). A model the table lacks cannot be built from gemini names any more (litellm answers
-    those itself), so the unpriceable case uses a made-up non-gemini name.
+    Exact numbers use the pinned 3.8 entry (7.5e-07 in, 3.75e-06 out, 7.5e-08 cached) via `pinned_prices`.
+    A model the table lacks cannot be built from gemini names any more (litellm answers those itself),
+    so the unpriceable case uses a made-up non-gemini name.
     """
 
     @pytest.mark.parametrize("provider, routed", [("vertex", "vertex_ai/gemini-3.8-flash"),
                                                   ("gemini", "gemini/gemini-3.8-flash")])
-    def test_priced_when_tokens_and_zero_cost(self, caplog, provider, routed):
+    def test_priced_when_tokens_and_zero_cost(self, pinned_prices, caplog, provider, routed):
         with caplog.at_level(logging.WARNING):
             cost = _browser_use_cost(RUN, provider, "gemini-3.8-flash")
         assert cost == pytest.approx(0.01936875, abs=1e-12)
         [w] = helper_warnings(caplog)
         assert routed in w and "22655" in w and "634" in w and "0.01936875" in w
 
-    def test_cached_tokens_at_cache_read_rate(self):
+    def test_cached_tokens_at_cache_read_rate(self, pinned_prices):
         run = {**RUN, 'cached_tokens': 10000}
         assert _browser_use_cost(run, "vertex", "gemini-3.8-flash") == pytest.approx(0.01261875, abs=1e-12)
 
@@ -1033,7 +1046,7 @@ class TestBrowserUseCostFallback:
                                           completion_tokens=0)[0] == pytest.approx(0.625)
             assert _browser_use_cost(run, "vertex", "bs32-tiered-test") == pytest.approx(0.3125)
 
-    def test_metrics_row_uses_priced_cost(self):
+    def test_metrics_row_uses_priced_cost(self, pinned_prices):
         m = _capture_workflow_metrics(RUN, "gemini-3.8-flash")
         assert m.browser_use_cost == pytest.approx(0.01936875)
         assert m.crewai_cost == 0.0008
