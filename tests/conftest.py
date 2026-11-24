@@ -48,12 +48,13 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 
 # crewai telemetry OFF for the whole test process, set before anything imports
-# crewai. crewai 1.8.1 pings api.scarf.sh from a thread started at `import
-# crewai`, and its module-level EventListener makes crewai's own TracerProvider
-# the global one, so every span a test opens is exported to telemetry.crewai.com.
-# Both are gated by CREWAI_DISABLE_TELEMETRY (crewai Telemetry._is_telemetry_disabled).
-# Measured 2026-09-27 on the 446 tracing tests: 3 crewai attempts (api.scarf.sh
-# + 2 x telemetry.crewai.com) without it, 0 with it. Forced rather than
+# crewai. crewai's Telemetry builds a private TracerProvider that exports its
+# own spans to telemetry.crewai.com:4319; CREWAI_DISABLE_TELEMETRY switches that
+# off (crewai Telemetry._is_telemetry_disabled). On crewai 1.8.1 it also pinged
+# api.scarf.sh at import and made its provider the process-global one, so every
+# span a test opened was exported; 1.15.44 does neither (see
+# tests/test_infra/test_no_crewai_telemetry.py). Measured 2026-09-27 on 1.8.1
+# over the 446 tracing tests: 3 crewai attempts without it, 0 with it. Forced rather than
 # setdefault, like LOG_DIR below: a shell that
 # exported "false" must not reach the session. A `pytest -p` plugin that imported
 # crewai would run before this line; none exists.
