@@ -59,6 +59,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
+from crewai.llms.retry import _active_llm_rate_limit_retry
 
 from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
 from .provider_retry import (
@@ -548,6 +549,24 @@ class CleanedLLMWrapper(LLM):
     _EMPTY_RETRY_CAP_SECONDS = 5.0
 
     def call(self, messages, *args, **kwargs) -> str:
+        """Run _call_cleaned with crewai's own 429 retry loop switched off.
+
+        crewai >=1.15 wraps every subclass-defined call() (base_llm.py
+        __init_subclass__) and the LLM.call we reach through super() in
+        run_with_rate_limit_retry: 3 tries each, so one always-429 call sent 15
+        requests while our 5-try report said 5. The marker below keeps crewai from
+        wrapping this method; the contextvar makes its wrapper around super().call()
+        run once. Our budget (provider_retry.py) is then the only 429 retry.
+        """
+        token = _active_llm_rate_limit_retry.set(True)
+        try:
+            return self._call_cleaned(messages, *args, **kwargs)
+        finally:
+            _active_llm_rate_limit_retry.reset(token)
+
+    call._crewai_rate_limit_wrapped = True  # type: ignore[attr-defined]
+
+    def _call_cleaned(self, messages, *args, **kwargs) -> str:
         """
         CrewAI LLM.call wrapper. Applies Action/ActionInput cleaning and retries
         on empty responses (None / "" / whitespace), which Vertex AI Gemini —
@@ -572,9 +591,8 @@ class CleanedLLMWrapper(LLM):
         # relies on instructor; stripping it there costs extra LLM calls and then raises
         # ConverterError. The executor always passes from_task/from_agent
         # (utilities/agent_utils.py:766-772); the Converter passes neither. The pop also
-        # strips response_model for planner_observer.py:159, the reasoning handler and
-        # agent_executor.py:2815; our agents (agents.py) set no reasoning/planning, so
-        # none of those paths is reached.
+        # strips response_model for planner_observer.py:159 and agent_executor.py:2815;
+        # our agents (agents.py) set no planning, so neither path is reached.
         if "from_task" in kwargs or "from_agent" in kwargs:
             kwargs.pop("response_model", None)
 

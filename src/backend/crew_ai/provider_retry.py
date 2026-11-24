@@ -69,6 +69,9 @@ _RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
 # A per-minute quota window never needs more than a minute.
 RETRY_DELAY_CAP_S = 60.0
 
+# litellm's text when a Gemini 200 reply cannot be parsed (an HTML error page behind a 200).
+_UNPARSEABLE_REPLY = "Error converting to valid response"
+
 FailureKind = Literal["timeout", "rejected", "fatal"]
 
 # Jitter only, not security; SystemRandom keeps static analysis quiet.
@@ -90,19 +93,25 @@ def classify_provider_error(exc: BaseException) -> FailureKind:
     """Sort one failed try: 'timeout', 'rejected' (retry after a backoff) or 'fatal'.
 
     Timeout is checked first because litellm.Timeout also descends from
-    openai.APIConnectionError. LiteLLM 1.75.3 maps Vertex/Gemini 408 to
-    Timeout, 429 to RateLimitError, 500 and "The model is overloaded." to
-    InternalServerError and 503 to ServiceUnavailableError; every other status
-    (502, 504, 520, ...) and anything else it cannot map becomes
-    APIConnectionError, its catch-all (litellm_core_utils/exception_mapping_utils.py;
-    gemini takes the vertex branch, which has no 504 case). APIConnectionError
-    is retried as a rejection, whatever caused it: a chain-based transport
-    test would make those gateway errors and Vertex token-fetch failures
-    fatal (probed 2026-09-25, PR #115 review).
+    openai.APIConnectionError. LiteLLM 1.105.3 (probed 2026-11-24) maps Vertex/Gemini
+    408 and 504 to Timeout, 429 to RateLimitError, 500 and "The model is
+    overloaded." to InternalServerError and 503 to ServiceUnavailableError; every
+    other status (502, 520, ...) and anything else it cannot map becomes
+    APIConnectionError, its catch-all (litellm_core_utils/exception_mapping_utils.py).
+    (1.75.3 sent 504 to that catch-all.) APIConnectionError is retried as a
+    rejection, whatever caused it: a chain-based transport test would make those
+    gateway errors and Vertex token-fetch failures fatal (probed 2026-09-25, PR #115
+    review). A 200 whose body is not valid JSON now arrives as a BadRequestError
+    with status 422 and litellm's own "Error converting to valid response" text
+    (vertex_and_google_ai_studio_gemini.py); it is retried like 1.75.3's catch-all
+    did. A real 400, 401, 403 or 404 never carries that text, so stays fatal.
     A 429 on a per-day quota is fatal: nothing succeeds before the daily reset.
     """
     if isinstance(exc, litellm.Timeout):
         return "timeout"
+    if (isinstance(exc, litellm.BadRequestError) and getattr(exc, "status_code", None) == 422
+            and _UNPARSEABLE_REPLY in str(exc)):
+        return "rejected"
     if isinstance(exc, litellm.RateLimitError) and names_per_day_quota(str(exc)):
         return "fatal"
     if isinstance(exc, (litellm.RateLimitError, litellm.ServiceUnavailableError,
