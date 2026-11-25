@@ -23,6 +23,7 @@ A model we run but never pinned is reported by the ERROR line, not silently.
 Referenced by:
     - src/backend/crew_ai/cleaned_llm_wrapper.py (get_llm, before the schema gate)
     - src/backend/main.py (startup_event, once for the configured model)
+    - src/backend/core/price_list.py (forget_checked_models, then the configured model, after the live list is adopted)
 
 Depends on:
     - litellm (model_cost, get_model_info, utils.supports_response_schema)
@@ -50,6 +51,12 @@ def _known(routed_model: str) -> bool:
         return bool(litellm.get_model_info(model=routed_model).get("input_cost_per_token"))
     except Exception:
         return False
+
+
+def forget_checked_models() -> None:
+    """Check every model again on its next ensure_model_entry call: litellm.model_cost was replaced."""
+    with _lock:
+        _checked.clear()
 
 
 def ensure_model_entry(model_provider: str, routed_model: str) -> None:

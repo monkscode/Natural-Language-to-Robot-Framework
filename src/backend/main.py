@@ -1,4 +1,6 @@
 import os
+from src.backend.core.price_list import use_shipped_price_list
+_PRICE_LIST_SET_BY_US = use_shipped_price_list()  # before any import below can reach litellm
 import re
 import sys
 import logging
@@ -206,6 +208,14 @@ async def startup_event():
                            resolve_model_string(settings.MODEL_PROVIDER, settings.ONLINE_MODEL))
     except Exception as e:
         logging.warning(f"[LLM] model-list check skipped: {e}")
+
+    # LiteLLM's live price list: litellm was imported with its shipped list (see the top of this
+    # file); download the live one in the background. Never blocks startup.
+    try:
+        from src.backend.core.price_list import start_live_price_list
+        app.state.live_price_list = start_live_price_list(_PRICE_LIST_SET_BY_US)
+    except Exception as e:
+        logging.warning(f"[LLM] live price list download not started: {e}")
 
     logging.info("Application startup complete.")
     _check_learning_health()

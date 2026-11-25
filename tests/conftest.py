@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 # time, which is before any fixture runs.
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 
+# No test downloads litellm's price list: main's startup fetches the live one only when it set this itself.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # crewai telemetry OFF for the whole test process, set before anything imports
 # crewai. crewai's Telemetry builds a private TracerProvider that exports its
 # own spans to telemetry.crewai.com:4319; CREWAI_DISABLE_TELEMETRY switches that

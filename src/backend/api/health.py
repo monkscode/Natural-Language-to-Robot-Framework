@@ -11,6 +11,7 @@ Depends on:
     src/backend/core/build_info  — the commit this image was built from
     src/backend/core/config      — settings singleton
     src/backend/services/workflow_service — get_active_workflow_count()
+    litellm (get_model_cost_map_source_info) — which price list is in use (/health only)
 """
 
 from src.backend.core.build_info import build_info
@@ -28,6 +29,16 @@ def _pins() -> dict:
     }
 
 
+def _price_list() -> dict:
+    """LiteLLM's price list in use: "live" (downloaded, src/backend/core/price_list.py) or "shipped" with litellm."""
+    try:
+        from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
+        info = get_model_cost_map_source_info()
+        return {"source": {"remote": "live", "local": "shipped"}[info["source"]], "loaded_at": info["loaded_at"]}
+    except Exception:  # noqa: BLE001 — never fail the health check over it
+        return {"source": None, "loaded_at": None}
+
+
 async def health_check():
     """Health check handler for Docker health monitoring (/health)."""
     active = get_active_workflow_count()
@@ -40,6 +51,7 @@ async def health_check():
         "available_slots": max(0, max_wf - active),
         "pins": _pins(),
         "build": build_info(),
+        "price_list": _price_list(),
     }
 
 

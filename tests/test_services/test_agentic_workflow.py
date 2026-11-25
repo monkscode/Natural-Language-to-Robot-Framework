@@ -986,7 +986,7 @@ def helper_warnings(caplog):
 @pytest.fixture
 def pinned_prices():
     """The repo's pinned 3.8 / 3.5 entries laid over litellm's table, so exact arithmetic never reads the
-    loaded table (in CI the live GitHub list: an upstream price change must not turn CI red)."""
+    loaded table (litellm's shipped list: a litellm upgrade must not turn CI red)."""
     from src.backend.crew_ai.model_map_fallback import PINNED_FILE
     entries = json.loads(PINNED_FILE.read_text(encoding="utf-8"))["entries"]
     litellm.utils._invalidate_model_cost_lowercase_map()

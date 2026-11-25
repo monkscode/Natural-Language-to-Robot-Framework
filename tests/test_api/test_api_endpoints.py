@@ -274,6 +274,33 @@ class TestHealthPins:
         assert resp.json()["pins"]["optimization_enabled"] is True
 
 
+class TestHealthPriceList:
+    """/health says which LiteLLM price list prices runs (src/backend/core/price_list.py)."""
+
+    SOURCE_INFO = "litellm.litellm_core_utils.get_model_cost_map.get_model_cost_map_source_info"
+
+    @pytest.mark.parametrize("source, shown", [("remote", "live"), ("local", "shipped")])
+    def test_health_names_the_list_and_passes_loaded_at_through(self, health_app_client, source, shown):
+        info = {"source": source, "loaded_at": "2026-11-25T04:30:00.123456+00:00"}
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch(self.SOURCE_INFO, return_value=info):
+            resp = health_app_client.get("/health")
+        assert resp.json()["price_list"] == {"source": shown,
+                                             "loaded_at": "2026-11-25T04:30:00.123456+00:00"}
+
+    def test_a_failing_read_keeps_health_up(self, health_app_client):
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch(self.SOURCE_INFO, side_effect=RuntimeError("boom")):
+            resp = health_app_client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["price_list"] == {"source": None, "loaded_at": None}
+
+    def test_api_health_is_unchanged(self, health_app_client):
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0):
+            resp = health_app_client.get("/api/health")
+        assert "price_list" not in resp.json()
+
+
 @pytest.fixture(scope="module")
 def health_app_client():
     """FastAPI test client with only the health endpoints, no main.py import.

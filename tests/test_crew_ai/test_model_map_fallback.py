@@ -4,7 +4,7 @@ litellm 1.105.3 bundles gemini-3.5-flash and gemini-3.8-flash, so the fallback i
 a no-op for both (owner decision 5). For an UNMAPPED gemini name litellm builds a
 schema-True, price-0 entry instead of raising, so "known" means "has a price" and
 the startup ERROR fires on a missing price too. Exact prices come from the repo's
-pin file, never from the loaded table (in CI that is the live GitHub list).
+pin file, never from the loaded table (litellm's shipped list, which a litellm upgrade changes).
 
 Referenced by: none (leaf test module).
 Depends on: src/backend/crew_ai/model_map_fallback.py, litellm 1.105.3.
@@ -72,7 +72,8 @@ def _pin_doc(model_name="foo-bar"):
 def test_the_loaded_map_gives_schema_and_cost_and_the_fallback_does_nothing(
         fresh_checks, caplog, provider, model):
     """Schema enforcement and a price are there without us. Asserts only 'schema True, price > 0':
-    the loaded table is the live GitHub list in CI, so exact prices would turn CI red on an upstream change."""
+    the loaded table is litellm's shipped list (tests/conftest.py), so exact prices would turn CI red on a
+    litellm upgrade."""
     assert supports_response_schema(model=model) is True
     assert all(price > 0 for price in _cost(model))
     before = dict(litellm.model_cost)
@@ -205,6 +206,27 @@ def test_a_failed_attempt_is_retried_on_the_next_call(fresh_checks, caplog):
     assert flaky.reads == 2
     assert supports_response_schema(model=UNMAPPED) is True
     assert [r.levelname for r in caplog.records if r.name == fallback.__name__] == ["ERROR", "WARNING"]
+
+
+def test_after_a_wholesale_swap_forgetting_the_checks_puts_the_pin_back(fresh_checks, tmp_path):
+    """litellm's adopt_model_cost_map REPLACES litellm.model_cost (the live price list after start),
+    so a pinned entry is gone and the remembered check would never add it again."""
+    from litellm.litellm_core_utils.get_model_cost_map import adopt_model_cost_map
+
+    pin = tmp_path / "pin.json"
+    pin.write_text(json.dumps(_pin_doc()), encoding="utf-8")
+    with patch.object(fallback, "PINNED_FILE", pin), \
+         patch.object(litellm, "model_cost", dict(litellm.model_cost)):
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        assert UNMAPPED in litellm.model_cost
+        adopt_model_cost_map({key: entry for key, entry in litellm.model_cost.items() if key != UNMAPPED})
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        assert UNMAPPED not in litellm.model_cost  # remembered as checked: nothing re-added
+        fallback.forget_checked_models()
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        assert supports_response_schema(model=UNMAPPED) is True
+        assert _cost(UNMAPPED) == pytest.approx((0.00075, 0.000375))
+    _invalidate()
 
 
 def test_the_pin_file_holds_both_models_entries():
