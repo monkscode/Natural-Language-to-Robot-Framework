@@ -82,8 +82,9 @@ PROVIDER_MISS_PREFIXES = (
 # text does not count: "litellm.ContextWindowExceededError: litellm.BadRequestError: ..."
 # is a 400. LiteLLM 1.105.3 maps a Vertex/Gemini 429 to RateLimitError, 503 to
 # ServiceUnavailableError, 500 to InternalServerError, 408 and 504 to Timeout, 502 to
-# APIConnectionError and any other 5xx (520, ...) to APIError. Not temporary: 400 to
-# BadRequestError, 403 PermissionDeniedError, 401 AuthenticationError, 404 NotFoundError.
+# APIConnectionError and any other 5xx (520, ...) to APIError. Not temporary: 400 and 403
+# to BadRequestError (a 403 whose text lacks "403": PermissionDeniedError), 401
+# AuthenticationError, 404 NotFoundError.
 # An unnamed 4xx (409/422/499) and a non-JSON 200 also become BadRequestError(status): the
 # class name cannot tell them from a 400, so a retried BadRequestError stays a REAL failure
 # (owner: "a 400, any other status ... stays a real failure").

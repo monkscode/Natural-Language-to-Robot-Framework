@@ -319,7 +319,7 @@ class CleanedLLMWrapper(LLM):
     # Token/cost accounting
     #
     # Both readers below diff or read crewai's BaseLLM._token_usage, which
-    # LLM.call updates synchronously in the calling thread (llm.py ~1333).
+    # LLM.call updates synchronously in the calling thread (llm.py ~1361).
     # They are pure READERS — deliberately not an override of call().
     #
     # An accounting wrapper around call() double-counts: crewai retries an
@@ -735,7 +735,7 @@ class CleanedLLMWrapper(LLM):
 
         The timeout is set per try on self.timeout, which crewai forwards to
         litellm.completion on every call (crewai/llm.py:797). A failed try never
-        reaches crewai's token accounting (llm.py:1331-1333) or the LiteLLM
+        reaches crewai's token accounting (llm.py:1356-1361) or the LiteLLM
         success callback, so nothing here can double-count. The exception that
         ends the call is re-raised UNCHANGED: crewai passes litellm.* errors
         straight through, but re-runs the whole task on any other type.
