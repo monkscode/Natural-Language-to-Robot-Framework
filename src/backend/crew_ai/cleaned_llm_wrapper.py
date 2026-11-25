@@ -71,6 +71,7 @@ from typing import Optional
 
 from crewai.llm import LLM
 from crewai.llms.retry import _active_llm_rate_limit_retry
+from pydantic import BaseModel
 
 from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
 from .provider_retry import (
@@ -617,6 +618,29 @@ class CleanedLLMWrapper(LLM):
                            self.model, exc_info=True)
             return None
         return response_model
+
+    def _prepare_completion_params(self, messages, tools=None, skip_file_processing=False):
+        """crewai's request params, with a Gemini route's schema class sent as litellm's strict dict.
+
+        Built from self.response_format at call time (crewai/llm.py:808), so the planner, the
+        assembler and a routed salvage (call() swaps self.response_format) all get it; call and
+        acall both come here. self.response_format itself stays the class.
+        """
+        params = super()._prepare_completion_params(messages, tools, skip_file_processing)
+        schema = params.get("response_format")
+        # Strict schema (every field required, nullable): for a class, litellm 1.105.3's Gemini override
+        # sends the raw model_json_schema() (2 of 9 step fields required) and gemini-3.8-flash folds the
+        # plan into one step (probe, 45 calls each: 16 folded or timed out raw, 0 strict, p = 6.0e-6).
+        # shortcut: remove when litellm ships a fix — BerriAI/litellm#34943 (PR #38255)
+        if (isinstance(schema, type) and issubclass(schema, BaseModel)
+                and self.model.startswith(("vertex_ai/", "gemini/"))):
+            try:
+                from litellm.utils import type_to_response_format_param
+                params["response_format"] = type_to_response_format_param(schema)
+            except Exception:
+                logger.warning("Could not build the strict schema for %s on %s; sending the class",
+                               schema.__name__, self.model, exc_info=True)
+        return params
 
     def _call_cleaned(self, messages, *args, **kwargs) -> str:
         """

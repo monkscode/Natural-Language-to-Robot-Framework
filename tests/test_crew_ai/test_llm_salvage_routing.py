@@ -26,6 +26,7 @@ import litellm
 import pytest
 from crewai import Agent, Crew, Process, Task
 from crewai.utilities.converter import Converter, ConverterError
+from litellm.utils import type_to_response_format_param
 from pydantic import BaseModel
 
 from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper, get_llm
@@ -47,6 +48,10 @@ class Out(BaseModel):
 
 class Other(BaseModel):
     name: str
+
+
+# A Gemini route sends the salvage model as litellm's strict dict (test_strict_response_schema.py).
+STRICT_OUT = type_to_response_format_param(Out)
 
 
 def _wrapper(base=60.0, response_format=None):
@@ -231,7 +236,7 @@ class TestTheRoutedCall:
         with _settings(), _no_instructor(), patch("litellm.completion", side_effect=spy):
             assert _convert(w) == Out(steps=STEPS)
         assert len(seen) == 1
-        assert seen[0]["response_format"] is Out
+        assert seen[0]["response_format"] == STRICT_OUT
         assert seen[0]["timeout"] == 60.0
         assert seen[0]["num_retries"] == 0
         assert w._token_usage["successful_requests"] - before == 1
@@ -247,7 +252,7 @@ class TestTheRoutedCall:
             with patch("litellm.completion", side_effect=spy):
                 assert _convert(w) == Out(steps=STEPS)
         assert len(seen) == 1
-        assert seen[0]["response_format"] is Out
+        assert seen[0]["response_format"] == STRICT_OUT
         assert seen[0]["timeout"] == 60.0
         assert seen[0]["num_retries"] == 0
         assert seen[0]["thinkingConfig"] == {"thinkingBudget": 0}
@@ -381,7 +386,7 @@ class TestOneBudgetPerSalvage:
                 w.call(MESSAGES, response_model=Out)
             assert w.call(MESSAGES, response_model=Other) == other
         assert len(seen) == 4
-        assert seen[3]["response_format"] is Other
+        assert seen[3]["response_format"] == type_to_response_format_param(Other)
         assert w._salvage_give_up is None
 
     def test_crewais_stop_reentry_is_not_routed_and_the_outer_give_up_is_kept(self):
@@ -405,7 +410,7 @@ class TestOneBudgetPerSalvage:
         # times out at 0.05/0.1/0.2 s; the outer budget then counts that as its
         # first timeout and tries 0.1 and 0.2 s.
         assert [c["timeout"] for c in seen] == [0.05, 0.05, 0.1, 0.2, 0.1, 0.2]
-        assert [c["response_format"] for c in seen] == [Out] * 6
+        assert [c["response_format"] for c in seen] == [STRICT_OUT] * 6
         inner, outer = log[0], log[1]
         assert inner is not outer
         assert log[1:] == [outer, outer, outer]
@@ -430,7 +435,7 @@ class TestARealCrew:
         assert result.pydantic == Out(steps=STEPS)
         assert len(seen) == 2
         assert seen[0].get("response_format") is None      # the agent's own call: unchanged
-        assert seen[1]["response_format"] is Out
+        assert seen[1]["response_format"] == STRICT_OUT
         assert seen[1]["timeout"] == 60.0
         # crewai 1.15 scopes the executor's stop words to its own call
         # (agent_utils.py:367-370, call_stop_override): the salvage carries none.

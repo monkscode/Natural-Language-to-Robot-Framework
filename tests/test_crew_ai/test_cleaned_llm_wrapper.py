@@ -814,6 +814,7 @@ class TestResponseModelReroute:
         only the routing can put the schema on the wire: a blanket response_model pop
         would send a plain completion, instructor would send `tools`."""
         from crewai.utilities.converter import Converter
+        from litellm.utils import type_to_response_format_param
         from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
         from src.backend.crew_ai.tasks import AssemblyOutput
 
@@ -826,8 +827,8 @@ class TestResponseModelReroute:
 
         assert len(spy.calls) == 1, f"expected one salvage call, got {len(spy.calls)}"
         assert "tools" not in spy.first, "the salvage call took instructor's TOOLS mode"
-        assert spy.first.get("response_format") is AssemblyOutput, (
-            "the salvage call went out without its schema"
+        assert spy.first.get("response_format") == type_to_response_format_param(AssemblyOutput), (
+            "the salvage call went out without its strict schema"
         )
         assert spy.first.get("thinkingConfig") == {"thinkingBudget": 0}
         assert spy.first.get("timeout"), "the W5 per-try timeout did not reach LiteLLM"
