@@ -298,8 +298,9 @@ class TestOneBudgetPerSalvage:
     attempt. After W5.1: one W5 budget per salvage."""
 
     @pytest.mark.parametrize("answer", [{"mock_timeout": True}, _gateway_504], ids=["hung", "504"])
-    def test_a_hung_salvage_costs_one_budget_not_three(self, answer):
+    def test_a_hung_salvage_costs_one_budget_not_three(self, answer, caplog):
         w = _wrapper(base=0.05)
+        w.set_workflow_id("wf-blite")
         spy, seen = _spy([answer] * 3)
         log = []
         with _settings(), _no_instructor(), _record_calls(log), \
@@ -312,6 +313,8 @@ class TestOneBudgetPerSalvage:
         assert isinstance(log[0], litellm.Timeout)
         assert report_of(log[0]).tries == 3
         assert raised.value.__cause__ is log[0]
+        assert [r.getMessage().endswith("(workflow wf-blite)") for r in caplog.records
+                if "salvage call not sent again" in r.getMessage()] == [True, True]
 
     @pytest.mark.parametrize("error", [_unavailable, _server_error, _connection_error, _rate_limited],
                              ids=["503", "500", "APIConnectionError", "429"])

@@ -555,7 +555,12 @@ class CleanedLLMWrapper(LLM):
         a salvage for the same model that gave up after W5's retries (its exception
         carries a retry report), the next one re-raises that same exception at once
         instead of spending another budget. Any other call clears the memory, and so
-        does a salvage that ends any other way (an answer, a fatal error).
+        does a salvage that ends any other way (an answer, a fatal error). The memory
+        also answers a SECOND Converter run: after a guardrail retry crewai exports the
+        new answer (task.py:1602) and, when the guardrail then passes, exports it again
+        (task.py:1549) with no LLM call in between; NLRF's guardrails return
+        (True, str) (tasks.py:171, 204, 212), so that second salvage re-raises the
+        stored give-up at once (one budget saved; 1.15.44 swallows both, same outcome).
         """
         token = _active_llm_rate_limit_retry.set(True)
         try:
@@ -567,7 +572,8 @@ class CleanedLLMWrapper(LLM):
                 self._salvage_give_up = remembered
                 logger.warning(
                     "[LLM_RETRY] %s: salvage call not sent again; the previous attempt gave up "
-                    "after the provider retries (%s)", self.model, type(remembered[1]).__name__,
+                    "after the provider retries (%s) (workflow %s)", self.model, type(remembered[1]).__name__,
+                    (self.additional_params.get("metadata") or {}).get("workflow_id"),
                 )
                 raise remembered[1]
             kwargs.pop("response_model")
