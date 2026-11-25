@@ -16,6 +16,7 @@ Tests:
 """
 
 import pytest
+from datetime import datetime
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
@@ -294,6 +295,15 @@ class TestHealthPriceList:
             resp = health_app_client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["price_list"] == {"source": None, "loaded_at": None}
+
+    def test_litellms_real_source_info_reads_as_shipped(self, health_app_client):
+        """Unpatched: a litellm upgrade that renames "source" or "loaded_at" must turn this red, not show None.
+        tests/conftest.py pins LITELLM_LOCAL_MODEL_COST_MAP, so litellm loaded its shipped list."""
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0):
+            resp = health_app_client.get("/health")
+        price_list = resp.json()["price_list"]
+        assert price_list["source"] == "shipped"
+        assert datetime.fromisoformat(price_list["loaded_at"])
 
     def test_api_health_is_unchanged(self, health_app_client):
         with patch("src.backend.api.health.get_active_workflow_count", return_value=0):
