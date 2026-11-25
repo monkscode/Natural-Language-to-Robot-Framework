@@ -319,11 +319,11 @@ class CleanedLLMWrapper(LLM):
     # Token/cost accounting
     #
     # Both readers below diff or read crewai's BaseLLM._token_usage, which
-    # LLM.call updates synchronously in the calling thread (llm.py ~1150).
+    # LLM.call updates synchronously in the calling thread (llm.py ~1333).
     # They are pure READERS — deliberately not an override of call().
     #
     # An accounting wrapper around call() double-counts: crewai retries an
-    # unsupported 'stop' parameter with `return self.call(...)` (llm.py:1715),
+    # unsupported 'stop' parameter with `return self.call(...)` (llm.py:2072),
     # which re-enters the override, so the inner and outer frames each bill the
     # same tokens. It also misses any call that does not go through the
     # override, and it puts a metrics read on the LLM call path, where a
@@ -400,7 +400,7 @@ class CleanedLLMWrapper(LLM):
 
         additional_params is the only attribute crewai's
         _prepare_completion_params forwards untouched to LiteLLM
-        (crewai/llm.py:702), so it is the injection point; the value comes back
+        (crewai/llm.py:819), so it is the injection point; the value comes back
         to _litellm_trace_callback as kwargs["litellm_params"]["metadata"].
 
         Without this, llm_traces rows carry a NULL workflow_id and
@@ -629,7 +629,7 @@ class CleanedLLMWrapper(LLM):
           • Provider errors: a cloud wrapper retries timeouts and rejections per its policy (_call_provider); everything else propagates unchanged.
           • Non-string non-None returns (structured tool calls) skip retry and cleaning.
           • If every attempt empties, the empty result is returned so CrewAI raises
-            its existing "None or empty" error — failures are loud, never silent.
+            EmptyLLMResponseError after one more ask of its own — failures are loud, never silent.
         """
         # crewai >=1.10 maps task.output_pydantic onto response_model (agent/core.py:1407,
         # 1451) and the agent executor forwards it here. LLM._handle_non_streaming_response
@@ -716,8 +716,8 @@ class CleanedLLMWrapper(LLM):
             self._monitor.log_response(was_cleaned=False)
             return result
 
-        # Whitespace-only ("   ", "\n") is empty for our purposes but CrewAI only
-        # raises its "None or empty" error on == "" (agent_utils.py). Normalise so a
+        # Whitespace-only ("   ", "\n") is empty for our purposes but CrewAI
+        # treats only a falsy answer as empty (agent_utils.py:546-550). Normalise so a
         # persistent whitespace-only response fails loudly instead of being formatted.
         if not result.strip():
             self._monitor.log_response(was_cleaned=False)
@@ -734,8 +734,8 @@ class CleanedLLMWrapper(LLM):
         """One crewai LLM.call; with a budget, retried per the provider policy.
 
         The timeout is set per try on self.timeout, which crewai forwards to
-        litellm.completion on every call (crewai/llm.py:682). A failed try never
-        reaches crewai's token accounting (llm.py:1146-1150) or the LiteLLM
+        litellm.completion on every call (crewai/llm.py:797). A failed try never
+        reaches crewai's token accounting (llm.py:1331-1333) or the LiteLLM
         success callback, so nothing here can double-count. The exception that
         ends the call is re-raised UNCHANGED: crewai passes litellm.* errors
         straight through, but re-runs the whole task on any other type.

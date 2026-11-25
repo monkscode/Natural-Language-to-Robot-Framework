@@ -98,7 +98,7 @@ def classify_provider_error(exc: BaseException) -> FailureKind:
     overloaded." to InternalServerError and 503 to ServiceUnavailableError; any
     other 4xx (409, 422, 499, ...) and a 200 whose body is not JSON (synthetic 422)
     become BadRequestError(status) through _map_exception_by_status, any other 5xx
-    (502, 520, ...) APIError(status), and what it cannot map APIConnectionError
+    (520, ...) APIError(status), 502 and what it cannot map APIConnectionError
     (litellm_core_utils/exception_mapping_utils.py). 1.75.3 sent every status the
     mapper did not name to APIConnectionError, which is retried; so is
     APIConnectionError now, whatever caused it: a chain-based transport test would

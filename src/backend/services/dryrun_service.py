@@ -542,8 +542,8 @@ def repair_robot_code(run_id, robot_code, dryrun_errors, model_provider,
         output_log_file=None,  # §8.5 — keep repair noise out of logs/crewai.log
         embedder=None,
         # No step_callback/task_callback and NOT registered in progress_events:
-        # a single-agent sequential crew gets no delegation tools (crewai 1.8.1
-        # crew.py:1310 requires len(agents) > 1), and its fix_task.id routes
+        # a single-agent sequential crew gets no delegation tools (crewai 1.15.44
+        # crew.py:1861 requires len(agents) > 1), and its fix_task.id routes
         # nowhere in progress_events, so its bus events are safely dropped (§8.5).
     )
 

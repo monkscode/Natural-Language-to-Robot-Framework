@@ -4,10 +4,10 @@ crewai_tokens is 19.9% of the baseline median llm_tokens (7,888.5 of 39,722),
 so an accumulator that silently reads zero shows up as a ~20% IMPROVEMENT
 against a flat-or-down token gate, and it is invisible in the CSV.
 
-That is the exact failure mode the IN-FLIGHT crewai 1.15 upgrade produces —
+That is the exact failure mode crewai 1.15 produces when unguarded —
 its response_model reroute sends the agent loop through instructor and the
-accumulator is never written. The bench runs the pinned crewai==1.8.1; the
-guard exists so the upgrade cannot land a silent 20% token "win".
+accumulator is never written. The bench runs crewai 1.15.44, where the wrapper keeps it off that path; the
+guard exists so a regression there cannot land a silent 20% token "win".
 
 The guard warns at the capture point instead of adding a CSV column — a new
 column would trip gate_schema against every existing baseline.
