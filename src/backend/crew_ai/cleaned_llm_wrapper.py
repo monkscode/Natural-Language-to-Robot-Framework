@@ -632,8 +632,10 @@ class CleanedLLMWrapper(LLM):
         # sends the raw model_json_schema() (2 of 9 step fields required) and gemini-3.8-flash folds the
         # plan into one step (probe, 45 calls each: 16 folded or timed out raw, 0 strict, p = 6.0e-6).
         # shortcut: remove when litellm ships a fix — BerriAI/litellm#34943 (PR #38255)
+        # Gemini family only, read on the routed string: Vertex also serves Claude / Llama / Mistral, which litellm converts its own way.
         if (isinstance(schema, type) and issubclass(schema, BaseModel)
-                and self.model.startswith(("vertex_ai/", "gemini/"))):
+                and (self.model.startswith("gemini/")
+                     or (self.model.startswith("vertex_ai/") and "gemini" in self.model.lower()))):
             try:
                 from litellm.utils import type_to_response_format_param
                 params["response_format"] = type_to_response_format_param(schema)

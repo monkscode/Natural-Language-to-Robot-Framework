@@ -140,6 +140,20 @@ class TestUnchangedPaths:
         llm = CleanedLLMWrapper(model="ollama/llama3", is_litellm=True, response_format=PlanOutput)
         assert llm._prepare_completion_params(MESSAGES)["response_format"] is PlanOutput
 
+    @pytest.mark.parametrize("model", [
+        "vertex_ai/claude-sonnet-4@20250514",
+        "vertex_ai/meta/llama-3.1-405b-instruct-maas",
+    ])
+    def test_a_non_gemini_vertex_route_keeps_the_class(self, model):
+        """Vertex also serves Claude / Llama; litellm builds their schema its own way."""
+        llm = CleanedLLMWrapper(model=model, is_litellm=True, response_format=PlanOutput)
+        assert llm._prepare_completion_params(MESSAGES)["response_format"] is PlanOutput
+
+    def test_the_family_check_reads_the_routed_string_not_the_bare_name(self):
+        llm = _llm("vertex", "gemini/claude-sonnet-4@20250514", PlanOutput)
+        assert llm.model == "vertex_ai/claude-sonnet-4@20250514"
+        assert llm._prepare_completion_params(MESSAGES)["response_format"] is PlanOutput
+
     @routes
     def test_no_response_format_sends_no_key(self, provider):
         assert "response_format" not in _llm(provider, "gemini-3.8-flash")._prepare_completion_params(MESSAGES)
