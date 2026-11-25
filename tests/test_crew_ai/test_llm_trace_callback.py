@@ -300,18 +300,15 @@ class TestGetLLM:
 
 class TestCleanedLLMWrapperCall:
     def _make_wrapper(self):
-        """Instantiate wrapper with mocked BaseLLM to avoid LiteLLM calls."""
-        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
-        from src.backend.crew_ai.llm_output_cleaner import LLMFormattingMonitor
+        """Build the wrapper through the real constructor; LLM.call is patched per test.
 
-        with patch("src.backend.crew_ai.cleaned_llm_wrapper.LLMFormattingMonitor"):
-            with patch("crewai.llm.BaseLLM.__init__", return_value=None):
-                instance = object.__new__(CleanedLLMWrapper)
-                instance.model = "gemini/gemini-2.5-flash"
-                instance.context_window_size = 0
-                instance._monitor = LLMFormattingMonitor()
-                instance.base_url = None
-                return instance
+        object.__new__ plus a stubbed BaseLLM.__init__ no longer works on crewai
+        1.15: BaseLLM is a Pydantic model, so the instance has no
+        __pydantic_private__ and reading a private attribute raises.
+        """
+        from src.backend.crew_ai.cleaned_llm_wrapper import CleanedLLMWrapper
+
+        return CleanedLLMWrapper(model="gemini/gemini-2.5-flash")
 
     def test_non_string_result_returned_unchanged(self):
         wrapper = self._make_wrapper()

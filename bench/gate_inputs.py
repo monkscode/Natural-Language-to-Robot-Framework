@@ -80,12 +80,16 @@ PROVIDER_MISS_PREFIXES = (
 # A raw message counts only when it STARTS "An error occurred: litellm.<Class>: ..." (or
 # "litellm.<Class>: ...") and that first class is temporary; a class named later in the
 # text does not count: "litellm.ContextWindowExceededError: litellm.BadRequestError: ..."
-# is a 400. LiteLLM 1.75.3 maps a Vertex/Gemini 429 to RateLimitError, 503 to
-# ServiceUnavailableError, 500 to InternalServerError, 408 to Timeout and every
-# status it cannot map (502, 504, ...) to APIConnectionError; 400/403 become
-# BadRequestError, 401 AuthenticationError, 404 NotFoundError.
-TEMPORARY_LITELLM_ERRORS = frozenset({"RateLimitError", "ServiceUnavailableError",
-                                      "InternalServerError", "Timeout", "APIConnectionError"})
+# is a 400. LiteLLM 1.105.3 maps a Vertex/Gemini 429 to RateLimitError, 503 to
+# ServiceUnavailableError, 500 to InternalServerError, 408 and 504 to Timeout, 502 to
+# APIConnectionError and any other 5xx (520, ...) to APIError. Not temporary: 400 and 403
+# to BadRequestError (a 403 whose text lacks "403": PermissionDeniedError), 401
+# AuthenticationError, 404 NotFoundError.
+# An unnamed 4xx (409/422/499) and a non-JSON 200 also become BadRequestError(status): the
+# class name cannot tell them from a 400, so a retried BadRequestError stays a REAL failure
+# (owner: "a 400, any other status ... stays a real failure").
+TEMPORARY_LITELLM_ERRORS = frozenset({"RateLimitError", "ServiceUnavailableError", "InternalServerError",
+                                      "Timeout", "APIConnectionError", "APIError"})
 _LITELLM_CLASS = re.compile(r"(?:An error occurred: )?litellm\.(?:exceptions\.)?(Timeout|[A-Z][A-Za-z]*Error)\b")
 _MODEL_PIN_KEYS = ("model_provider", "online_model", "browser_service.model_provider")
 

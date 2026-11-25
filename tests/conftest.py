@@ -47,13 +47,17 @@ logger = logging.getLogger(__name__)
 # time, which is before any fixture runs.
 os.environ.setdefault("OBSERVABILITY_BACKEND", "none")
 
+# No test downloads litellm's price list: main's startup fetches the live one only when it set this itself.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 # crewai telemetry OFF for the whole test process, set before anything imports
-# crewai. crewai 1.8.1 pings api.scarf.sh from a thread started at `import
-# crewai`, and its module-level EventListener makes crewai's own TracerProvider
-# the global one, so every span a test opens is exported to telemetry.crewai.com.
-# Both are gated by CREWAI_DISABLE_TELEMETRY (crewai Telemetry._is_telemetry_disabled).
-# Measured 2026-09-27 on the 446 tracing tests: 3 crewai attempts (api.scarf.sh
-# + 2 x telemetry.crewai.com) without it, 0 with it. Forced rather than
+# crewai. crewai's Telemetry builds a private TracerProvider that exports its
+# own spans to telemetry.crewai.com:4319; CREWAI_DISABLE_TELEMETRY switches that
+# off (crewai Telemetry._is_telemetry_disabled). On crewai 1.8.1 it also pinged
+# api.scarf.sh at import and made its provider the process-global one, so every
+# span a test opened was exported; 1.15.44 does neither (see
+# tests/test_infra/test_no_crewai_telemetry.py). Measured 2026-09-27 on 1.8.1
+# over the 446 tracing tests: 3 crewai attempts without it, 0 with it. Forced rather than
 # setdefault, like LOG_DIR below: a shell that
 # exported "false" must not reach the session. A `pytest -p` plugin that imported
 # crewai would run before this line; none exists.
@@ -69,6 +73,47 @@ os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 # session cannot delete it.
 SESSION_LOG_DIR = Path(tempfile.mkdtemp(prefix="nlrf_test_logs_"))
 os.environ["LOG_DIR"] = str(SESSION_LOG_DIR)
+
+# Readable tiktoken tokenizers (cl100k, o200k, p50k) for litellm, set before anything imports litellm.
+# litellm/litellm_core_utils/default_encoding.py reads CUSTOM_TIKTOKEN_CACHE_DIR ONCE,
+# at import, and loads cl100k_base right there; litellm.main triggers that import on
+# the first gemini / vertex completion. tiktoken checks the bundled file's sha256
+# and on a mismatch DELETES it from the venv and downloads it from
+# openaipublic.blob.core.windows.net (the network guard refuses that, so the call
+# fails with APIConnectionError). litellm 1.105.3's win_amd64 wheel ships all three
+# bundled files with CRLF line endings, so the hash fails on Windows; LF-normalised copies
+# in a session temp dir pass, and on valid files (Linux CI) the copies are byte-identical.
+# Pinned here, not in a fixture: a per-test patch only works for the test that
+# happens to trigger the first import.
+def _pin_valid_tiktoken_cache() -> None:
+    import atexit
+    import importlib.util
+    import re
+    import shutil
+    import warnings
+
+    spec = importlib.util.find_spec("litellm")  # locates it without importing it
+    if spec is None or not spec.submodule_search_locations:
+        return
+    # tiktoken names each cache file by the sha1 (40 hex) of the URL it would download;
+    # litellm bundles cl100k, o200k and p50k under those names
+    tokenizers = Path(spec.submodule_search_locations[0]) / "litellm_core_utils" / "tokenizers"
+    bundled = [f for f in tokenizers.glob("*") if re.fullmatch(r"[0-9a-f]{40}", f.name)]
+    if not bundled:
+        warnings.warn(f"no bundled tiktoken files in {tokenizers}; tokenizer cache NOT pinned")
+        return
+    # cl100k is what litellm's default_encoding.py loads at import; without it every litellm import
+    # tries 5 refused downloads, silently
+    if "9b5ad71b2ce5302211f9c61530b329a4922fc6a4" not in {f.name for f in bundled}:
+        warnings.warn(f"cl100k tokenizer file (9b5ad71b...) missing from {tokenizers}; litellm import will try to download it")
+    cache_dir = Path(tempfile.mkdtemp(prefix="nlrf_test_tiktoken_"))
+    for f in bundled:
+        (cache_dir / f.name).write_bytes(f.read_bytes().replace(b"\r\n", b"\n"))
+    os.environ["CUSTOM_TIKTOKEN_CACHE_DIR"] = str(cache_dir)
+    atexit.register(shutil.rmtree, cache_dir, ignore_errors=True)
+
+
+_pin_valid_tiktoken_cache()
 
 # Installs the staging/runner guard's audit hook now, before any test code can
 # write or connect; see tests/isolation_guard.py. It imports no src.backend, so

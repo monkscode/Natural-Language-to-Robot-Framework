@@ -103,6 +103,26 @@ class TestClassify:
     def test_fatal(self, exc):
         assert classify_provider_error(exc) == "fatal"
 
+    @pytest.mark.parametrize("status", [409, 422, 499])
+    def test_a_bad_request_with_an_unnamed_status_is_a_rejection(self, status):
+        exc = E.BadRequestError(message="x", model="m", llm_provider="gemini")
+        exc.status_code = status
+        assert classify_provider_error(exc) == "rejected"
+
+    @pytest.mark.parametrize("status", [None, 400, 401, 403, 404])
+    def test_a_bad_request_with_no_or_a_caller_fault_status_is_fatal(self, status):
+        exc = E.BadRequestError(message="x", model="m", llm_provider="gemini")
+        exc.status_code = status
+        assert classify_provider_error(exc) == "fatal"
+
+    @pytest.mark.parametrize("exc", [
+        E.ContextWindowExceededError(message="too long", model="m", llm_provider="gemini"),
+        E.ContentPolicyViolationError(message="blocked", model="m", llm_provider="gemini"),
+    ])
+    def test_bad_request_subclasses_carry_400_and_stay_fatal(self, exc):
+        assert exc.status_code == 400
+        assert classify_provider_error(exc) == "fatal"
+
     def test_timeout_is_checked_before_connection_errors(self):
         """litellm.Timeout also descends from openai.APIConnectionError."""
         import openai
@@ -249,7 +269,7 @@ class TestReportAttachment:
 
 
 class TestRealLiteLLMMapping:
-    """Pins what LiteLLM 1.75.3 really raises for provider statuses, and how W5 sorts it.
+    """Pins what LiteLLM 1.105.3 really raises for provider statuses, and how W5 sorts it.
 
     PR #115 review (2026-09-25): a chain-based "transport only" rule for
     APIConnectionError was declined because these gateway statuses arrive as a
@@ -282,11 +302,18 @@ class TestRealLiteLLMMapping:
         (408, "application/json", b'{"error": {"code": 408, "message": "t", "status": "DEADLINE_EXCEEDED"}}', "timeout"),
         (502, "application/json", b'{"error": {"code": 502, "message": "Bad Gateway"}}', "rejected"),
         (502, "text/html", b"<html>502 Bad Gateway</html>", "rejected"),
-        (504, "application/json", b'{"error": {"code": 504, "message": "d", "status": "DEADLINE_EXCEEDED"}}', "rejected"),
+        (504, "application/json", b'{"error": {"code": 504, "message": "d", "status": "DEADLINE_EXCEEDED"}}', "timeout"),  # 1.75.3: APIConnectionError -> rejected
         (520, "text/html", b"<html>520</html>", "rejected"),
         (200, "text/html", b"<html>not json</html>", "rejected"),
         (503, "application/json", b'{"error": {"code": 503, "message": "u", "status": "UNAVAILABLE"}}', "rejected"),
         (400, "application/json", b'{"error": {"code": 400, "message": "b", "status": "INVALID_ARGUMENT"}}', "fatal"),
+        (401, "application/json", b'{"error": {"code": 401, "message": "k", "status": "UNAUTHENTICATED"}}', "fatal"),
+        (403, "application/json", b'{"error": {"code": 403, "message": "p", "status": "PERMISSION_DENIED"}}', "fatal"),
+        (404, "application/json", b'{"error": {"code": 404, "message": "n", "status": "NOT_FOUND"}}', "fatal"),
+        (200, "application/json", b'{"candidates": [', "rejected"),  # truncated JSON behind a 200
+        (409, "application/json", b'{"error": {"code": 409, "message": "a", "status": "ABORTED"}}', "rejected"),
+        (422, "application/json", b'{"error": {"code": 422, "message": "u", "status": "UNPROCESSABLE"}}', "rejected"),
+        (499, "application/json", b'{"error": {"code": 499, "message": "c", "status": "CANCELLED"}}', "rejected"),
     ])
     def test_gemini_statuses_are_sorted_from_the_real_mapping(self, status, content_type, body, kind):
         server = self._serve(status, content_type, body)

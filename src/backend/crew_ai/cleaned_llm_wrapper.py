@@ -49,6 +49,17 @@ PROVIDER TIMEOUTS AND RETRIES (W5, owner design D3, 2026-09-24):
     this wrapper -- not LiteLLM -- retries timeouts and provider rejections
     (see provider_retry.py). Local (Ollama) wrappers keep LiteLLM's own
     num_retries=3 and its 600 s default timeout.
+
+CREWAI'S SALVAGE CALL (W5.1, owner D8, D12):
+    When an agent's answer fails output_pydantic validation, crewai's Converter
+    calls llm.call(messages=..., response_model=Model) with no from_task /
+    from_agent. crewai would send that through instructor (no timeout, no
+    thinking guard, no workflow metadata; instructor retries itself). call()
+    sends it instead as one normal response_format call inside the W5 budget,
+    on models that enforce a response schema, and a salvage that gave up after
+    the W5 retries is not sent again by the Converter's next attempts: one
+    budget per salvage. The async path (acall, the Converter's ato_pydantic)
+    is not routed: NLRF runs sync kickoff only.
 """
 
 import logging
@@ -58,7 +69,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from crewai.llm import LLM, CONTEXT_WINDOW_USAGE_RATIO
+from crewai.llm import LLM
+from crewai.llms.retry import _active_llm_rate_limit_retry
+from pydantic import BaseModel
 
 from .llm_output_cleaner import LLMOutputCleaner, LLMFormattingMonitor
 from .provider_retry import (
@@ -67,6 +80,7 @@ from .provider_retry import (
     attach_report,
     classify_provider_error,
     provider_retry_delay_s,
+    report_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -306,11 +320,11 @@ class CleanedLLMWrapper(LLM):
     # Token/cost accounting
     #
     # Both readers below diff or read crewai's BaseLLM._token_usage, which
-    # LLM.call updates synchronously in the calling thread (llm.py ~1150).
+    # LLM.call updates synchronously in the calling thread (llm.py ~1361).
     # They are pure READERS — deliberately not an override of call().
     #
     # An accounting wrapper around call() double-counts: crewai retries an
-    # unsupported 'stop' parameter with `return self.call(...)` (llm.py:1715),
+    # unsupported 'stop' parameter with `return self.call(...)` (llm.py:2072),
     # which re-enters the override, so the inner and outer frames each bill the
     # same tokens. It also misses any call that does not go through the
     # override, and it puts a metrics read on the LLM call path, where a
@@ -387,7 +401,7 @@ class CleanedLLMWrapper(LLM):
 
         additional_params is the only attribute crewai's
         _prepare_completion_params forwards untouched to LiteLLM
-        (crewai/llm.py:702), so it is the injection point; the value comes back
+        (crewai/llm.py:819), so it is the injection point; the value comes back
         to _litellm_trace_callback as kwargs["litellm_params"]["metadata"].
 
         Without this, llm_traces rows carry a NULL workflow_id and
@@ -438,104 +452,71 @@ class CleanedLLMWrapper(LLM):
             logger.debug("get_workflow_usage failed", exc_info=True)
             return dict(self._ZERO_USAGE)
 
+    # True once the Ollama /api/show lookup ran (hit or miss) -- see below.
+    _ollama_context_probed = False
+
     def get_context_window_size(self) -> int:
-        """Return the context window size for the configured model.
+        """Return the usable context window (crewai applies its 85% ratio).
 
-        LLM.get_context_window_size() matches self.model against keys in
-        LLM_CONTEXT_WINDOW_SIZES using startswith, but our model string is
-        'provider/model' (e.g. 'gemini/gemini-2.5-flash'). The provider prefix
-        causes all startswith checks to fail, returning the tiny 6963-token
-        default. This override fixes that by querying authoritative sources:
-
-        1. LiteLLM's local model database  — covers all cloud providers
-        2. Ollama's REST API               — covers local models not in LiteLLM DB
-        3. CrewAI's built-in lookup        — last resort fallback
+        Cloud models: crewai's own catalog answers (it understands our
+        'provider/model' strings since 1.15). Ollama models are in no catalog,
+        so with context_window_size unset we ask Ollama's /api/show ONCE per
+        instance and store the FULL window; crewai then returns 85% of it. A
+        failed lookup stores nothing (crewai warns and uses its default) and is
+        not retried -- the lookup is a 5 s HTTP call.
         """
-        if self.context_window_size != 0:
-            return self.context_window_size
+        if (
+            not self.context_window_size
+            and self.model.startswith("ollama/")
+            and not self._ollama_context_probed
+        ):
+            self._ollama_context_probed = True
+            self._probe_ollama_context_window()
+        return super().get_context_window_size()
 
-        # Step 1: LiteLLM's local model database (no API call — ships with litellm)
-        # Note: only use max_input_tokens (context window), NOT max_tokens (output limit)
+    def _probe_ollama_context_window(self) -> None:
+        """Store Ollama's reported context_length in self.context_window_size."""
         try:
-            import litellm
-            info = litellm.get_model_info(self.model)
-            max_input_tokens = info.get("max_input_tokens")
-            if max_input_tokens:
-                self.context_window_size = int(max_input_tokens * CONTEXT_WINDOW_USAGE_RATIO)
-                logger.debug(
-                    f"🪟 Context window for '{self.model}': "
-                    f"{self.context_window_size} tokens (source: LiteLLM DB)"
-                )
-                return self.context_window_size
-        except Exception as e:
-            # Intermediate step miss — not warning-worthy on its own. Ollama is
-            # only tried for ollama/ models; the final unresolved case is
-            # surfaced once, at WARNING, in Step 3 below.
-            logger.debug(
-                f"LiteLLM DB has no context-window entry for '{self.model}' "
-                f"(type={type(e).__name__}, detail={e})"
+            import requests
+            model_name = self.model.split("/", 1)[1]
+            # rstrip to handle trailing slash in OLLAMA_API_BASE (e.g. "http://host/")
+            base_url = (self.base_url or "http://localhost:11434").rstrip("/")
+            response = requests.post(
+                f"{base_url}/api/show",
+                json={"model": model_name},
+                timeout=5,
             )
-
-        # Step 2: Ollama API — local models are not in LiteLLM's central database
-        if self.model.startswith("ollama/"):
-            try:
-                import requests
-                model_name = self.model.split("/", 1)[1]
-                # rstrip to handle trailing slash in OLLAMA_API_BASE (e.g. "http://host/")
-                base_url = (self.base_url or "http://localhost:11434").rstrip("/")
-                response = requests.post(
-                    f"{base_url}/api/show",
-                    json={"model": model_name},
-                    timeout=5,
+            if response.status_code == 200:
+                model_info = response.json().get("model_info", {})
+                # Keys follow the pattern "{architecture}.context_length"
+                # e.g. "llama.context_length", "qwen2.context_length"
+                ctx_length = next(
+                    (v for k, v in model_info.items()
+                     if k.endswith(".context_length")),
+                    None,
                 )
-                if response.status_code == 200:
-                    model_info = response.json().get("model_info", {})
-                    # Keys follow the pattern "{architecture}.context_length"
-                    # e.g. "llama.context_length", "qwen2.context_length"
-                    ctx_length = next(
-                        (v for k, v in model_info.items()
-                         if k.endswith(".context_length")),
-                        None,
+                if ctx_length:
+                    self.context_window_size = int(ctx_length)
+                    logger.debug(
+                        f"🪟 Context window for '{self.model}': "
+                        f"{self.context_window_size} tokens (source: Ollama API)"
                     )
-                    if ctx_length:
-                        self.context_window_size = int(
-                            ctx_length * CONTEXT_WINDOW_USAGE_RATIO
-                        )
-                        logger.debug(
-                            f"🪟 Context window for '{self.model}': "
-                            f"{self.context_window_size} tokens (source: Ollama API)"
-                        )
-                        return self.context_window_size
-                    else:
-                        logger.warning(
-                            f"⚠️ Ollama /api/show returned no context_length key "
-                            f"for '{model_name}' — falling back to CrewAI defaults"
-                        )
                 else:
                     logger.warning(
-                        f"⚠️ Ollama /api/show returned HTTP {response.status_code} "
+                        f"⚠️ Ollama /api/show returned no context_length key "
                         f"for '{model_name}' — falling back to CrewAI defaults"
                     )
-            except Exception as e:
+            else:
                 logger.warning(
-                    f"⚠️ Failed to query Ollama API for context window of "
-                    f"'{self.model}' (type={type(e).__name__}, detail={e}) "
-                    f"— falling back to CrewAI defaults"
+                    f"⚠️ Ollama /api/show returned HTTP {response.status_code} "
+                    f"for '{model_name}' — falling back to CrewAI defaults"
                 )
-
-        # Step 3: CrewAI's built-in lookup (last resort — likely returns tiny default)
-        result = super().get_context_window_size()
-        # Cache the fallback like Steps 1 and 2 do: the context window cannot
-        # change during the process, and without caching this whole method —
-        # including a litellm lookup and a 5s Ollama HTTP call — re-runs on
-        # every get_context_window_size() call, spamming this WARNING each time.
-        self.context_window_size = result
-        logger.warning(
-            f"⚠️ Context window for '{self.model}' not resolved from LiteLLM DB "
-            f"or Ollama API — using CrewAI fallback: {result} tokens. "
-            f"Context summarization may be suboptimal."
-        )
-        return result
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Failed to query Ollama API for context window of "
+                f"'{self.model}' (type={type(e).__name__}, detail={e}) "
+                f"— falling back to CrewAI defaults"
+            )
 
     # Per-try timeouts + retries for cloud providers (W5). get_llm sets it on
     # vertex/gemini instances; the class default None (local Ollama, or any
@@ -543,11 +524,127 @@ class CleanedLLMWrapper(LLM):
     _provider_retry: ProviderRetryPolicy | None = None
 
     # Backoff for empty-response retries: 0.5s * 2^retry_idx, capped at 5s.
-    # Worst-case extra latency at default max_retries=2: 0.5 + 1.0 = 1.5s.
+    # Worst-case extra latency at default max_retries=1: 0.5s.
     _EMPTY_RETRY_BASE_SECONDS = 0.5
     _EMPTY_RETRY_CAP_SECONDS = 5.0
 
+    # W5.1 B-lite (owner D12): the give-up of this wrapper's PREVIOUS call(), kept
+    # only when that call was a routed salvage whose W5 retries gave up on a
+    # provider error -- (the salvage's response model, the exception it raised).
+    # A Pydantic private attribute on crewai 1.15: BaseLLM.__init__ (which __new__
+    # calls) gives every instance its own None. Never shared: the planner and
+    # assembler wrappers alias only _monitor and _token_usage (agents.py), and each
+    # dryrun repair round builds fresh wrappers (dryrun_service.py).
+    _salvage_give_up: tuple[type, BaseException] | None = None
+
     def call(self, messages, *args, **kwargs) -> str:
+        """Run _call_cleaned with crewai's own 429 retry loop switched off.
+
+        crewai >=1.15 wraps every subclass-defined call() (base_llm.py
+        __init_subclass__) and the LLM.call we reach through super() in
+        run_with_rate_limit_retry: 3 tries each, so one always-429 call sent 15
+        requests while our 5-try report said 5. The marker below keeps crewai from
+        wrapping this method; the contextvar makes its wrapper around super().call()
+        run once. Our budget (provider_retry.py) is then the only 429 retry.
+
+        A salvage call from crewai's Converter (see _salvage_response_model) is sent
+        as a normal response_format call for its duration, inside the same
+        contextvar scope; every other call goes straight to _call_cleaned, unchanged.
+
+        One budget per salvage (owner D12, "B-lite"): the Converter retries any
+        error up to 3 times, back to back. When this wrapper's previous call() was
+        a salvage for the same model that gave up after W5's retries (its exception
+        carries a retry report), the next one re-raises that same exception at once
+        instead of spending another budget. Any other call clears the memory, and so
+        does a salvage that ends any other way (an answer, a fatal error). The memory
+        also answers a SECOND Converter run: after a guardrail retry crewai exports the
+        new answer (task.py:1602) and, when the guardrail then passes, exports it again
+        (task.py:1549) with no LLM call in between; NLRF's guardrails return
+        (True, str) (tasks.py:171, 204, 212), so that second salvage re-raises the
+        stored give-up at once (one budget saved; 1.15.44 swallows both, same outcome).
+        """
+        token = _active_llm_rate_limit_retry.set(True)
+        try:
+            salvage_model = self._salvage_response_model(kwargs)
+            remembered, self._salvage_give_up = self._salvage_give_up, None
+            if salvage_model is None:
+                return self._call_cleaned(messages, *args, **kwargs)
+            if remembered is not None and remembered[0] is salvage_model:
+                self._salvage_give_up = remembered
+                logger.warning(
+                    "[LLM_RETRY] %s: salvage call not sent again; the previous attempt gave up "
+                    "after the provider retries (%s) (workflow %s)", self.model, type(remembered[1]).__name__,
+                    (self.additional_params.get("metadata") or {}).get("workflow_id"),
+                )
+                raise remembered[1]
+            kwargs.pop("response_model")
+            previous_format = self.response_format
+            self.response_format = salvage_model
+            try:
+                return self._call_cleaned(messages, *args, **kwargs)
+            except Exception as exc:
+                if report_of(exc) is not None:
+                    self._salvage_give_up = (salvage_model, exc)
+                raise
+            finally:
+                self.response_format = previous_format
+        finally:
+            _active_llm_rate_limit_retry.reset(token)
+
+    call._crewai_rate_limit_wrapped = True  # type: ignore[attr-defined]
+
+    def _salvage_response_model(self, kwargs: dict) -> type | None:
+        """The Pydantic model of a crewai salvage call to send as a schema call, else None.
+
+        crewai's Converter calls llm.call(messages=..., response_model=Model) and
+        passes neither from_task nor from_agent (crewai/utilities/converter.py:103-106).
+        The agent executor always passes both keys (utilities/agent_utils.py:766-773),
+        and crewai's unsupported-'stop' re-entry (llm.py:2072-2080) passes them as
+        None, so key PRESENCE decides: exactly the complement of the scoped
+        response_model pop in _call_cleaned, and the two compose. Only models
+        LiteLLM says enforce a response schema are routed; others keep crewai's path.
+        """
+        response_model = kwargs.get("response_model")
+        if response_model is None:
+            return None
+        if "from_task" in kwargs or "from_agent" in kwargs:
+            return None
+        try:
+            from litellm.utils import supports_response_schema
+            if not supports_response_schema(model=self.model):
+                return None
+        except Exception:
+            logger.warning("Response-schema check failed for %s; salvage call left to crewai",
+                           self.model, exc_info=True)
+            return None
+        return response_model
+
+    def _prepare_completion_params(self, messages, tools=None, skip_file_processing=False):
+        """crewai's request params, with a Gemini route's schema class sent as litellm's strict dict.
+
+        Built from self.response_format at call time (crewai/llm.py:808), so the planner, the
+        assembler and a routed salvage (call() swaps self.response_format) all get it; call and
+        acall both come here. self.response_format itself stays the class.
+        """
+        params = super()._prepare_completion_params(messages, tools, skip_file_processing)
+        schema = params.get("response_format")
+        # Strict schema (every field required, nullable): for a class, litellm 1.105.3's Gemini override
+        # sends the raw model_json_schema() (2 of 9 step fields required) and gemini-3.8-flash folds the
+        # plan into one step (probe, 45 calls each: 16 folded or timed out raw, 0 strict, p = 6.0e-6).
+        # shortcut: remove when litellm ships a fix — BerriAI/litellm#34943 (PR #38255)
+        # Gemini family only, read on the routed string: Vertex also serves Claude / Llama / Mistral, which litellm converts its own way.
+        if (isinstance(schema, type) and issubclass(schema, BaseModel)
+                and (self.model.startswith("gemini/")
+                     or (self.model.startswith("vertex_ai/") and "gemini" in self.model.lower()))):
+            try:
+                from litellm.utils import type_to_response_format_param
+                params["response_format"] = type_to_response_format_param(schema)
+            except Exception:
+                logger.warning("Could not build the strict schema for %s on %s; sending the class",
+                               schema.__name__, self.model, exc_info=True)
+        return params
+
+    def _call_cleaned(self, messages, *args, **kwargs) -> str:
         """
         CrewAI LLM.call wrapper. Applies Action/ActionInput cleaning and retries
         on empty responses (None / "" / whitespace), which Vertex AI Gemini —
@@ -558,8 +655,27 @@ class CleanedLLMWrapper(LLM):
           • Provider errors: a cloud wrapper retries timeouts and rejections per its policy (_call_provider); everything else propagates unchanged.
           • Non-string non-None returns (structured tool calls) skip retry and cleaning.
           • If every attempt empties, the empty result is returned so CrewAI raises
-            its existing "None or empty" error — failures are loud, never silent.
+            EmptyLLMResponseError after one more ask of its own — failures are loud, never silent.
         """
+        # crewai >=1.10 maps task.output_pydantic onto response_model (agent/core.py:1407,
+        # 1451) and the agent executor forwards it here. LLM._handle_non_streaming_response
+        # (llm.py:1309) then routes the whole agent call through `instructor` for a litellm
+        # LLM. On that path nothing but model/response_model/messages reaches LiteLLM: the
+        # Vertex thinking guard, num_retries, our per-try timeout (self.timeout), api_key
+        # and base_url are dropped, native response_format becomes TOOLS-mode function
+        # calling, and the token accumulator can read zero. Strip it — but ONLY on the
+        # agent-executor path. crewai's Converter (utilities/converter.py:103, the salvage
+        # step when the model's raw text fails validation) also passes response_model. For a
+        # model that enforces a response schema (vertex/gemini) call() has already made it
+        # a native schema call (_salvage_response_model); any other model still relies on
+        # instructor here, and stripping it costs extra LLM calls and then raises
+        # ConverterError. The executor always passes from_task/from_agent
+        # (utilities/agent_utils.py:766-772); the Converter passes neither. The pop also
+        # strips response_model for planner_observer.py:159 and agent_executor.py:2815;
+        # our agents (agents.py) set no planning, so neither path is reached.
+        if "from_task" in kwargs or "from_agent" in kwargs:
+            kwargs.pop("response_model", None)
+
         from src.backend.core.config import settings  # lazy import: avoids circular import
         max_retries = settings.LLM_EMPTY_RESPONSE_MAX_RETRIES
         # One budget per call(): the empty-response retries below share its deadline.
@@ -626,8 +742,8 @@ class CleanedLLMWrapper(LLM):
             self._monitor.log_response(was_cleaned=False)
             return result
 
-        # Whitespace-only ("   ", "\n") is empty for our purposes but CrewAI only
-        # raises its "None or empty" error on == "" (agent_utils.py). Normalise so a
+        # Whitespace-only ("   ", "\n") is empty for our purposes but CrewAI
+        # treats only a falsy answer as empty (agent_utils.py:546-550). Normalise so a
         # persistent whitespace-only response fails loudly instead of being formatted.
         if not result.strip():
             self._monitor.log_response(was_cleaned=False)
@@ -644,8 +760,8 @@ class CleanedLLMWrapper(LLM):
         """One crewai LLM.call; with a budget, retried per the provider policy.
 
         The timeout is set per try on self.timeout, which crewai forwards to
-        litellm.completion on every call (crewai/llm.py:682). A failed try never
-        reaches crewai's token accounting (llm.py:1146-1150) or the LiteLLM
+        litellm.completion on every call (crewai/llm.py:797). A failed try never
+        reaches crewai's token accounting (llm.py:1356-1361) or the LiteLLM
         success callback, so nothing here can double-count. The exception that
         ends the call is re-raised UNCHANGED: crewai passes litellm.* errors
         straight through, but re-runs the whole task on any other type.

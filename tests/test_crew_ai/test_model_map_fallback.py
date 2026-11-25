@@ -1,12 +1,13 @@
-"""gemini-3.5-flash stays known to LiteLLM when its model-list download fails.
+"""The model-list fallback after the litellm 1.105.3 upgrade.
 
-LiteLLM downloads its model list at import and, on any failure, silently loads
-the copy bundled in the package, which lacks gemini-3.5-flash: schema
-enforcement then turns off and the model's cost reads $0. The fixture below
-recreates that state by removing the three keys; patch.dict restores the map.
+litellm 1.105.3 bundles gemini-3.5-flash and gemini-3.8-flash, so the fallback is
+a no-op for both (owner decision 5). For an UNMAPPED gemini name litellm builds a
+schema-True, price-0 entry instead of raising, so "known" means "has a price" and
+the startup ERROR fires on a missing price too. Exact prices come from the repo's
+pin file, never from the loaded table (litellm's shipped list, which a litellm upgrade changes).
 
 Referenced by: none (leaf test module).
-Depends on: src/backend/crew_ai/model_map_fallback.py, litellm 1.75.3.
+Depends on: src/backend/crew_ai/model_map_fallback.py, litellm 1.105.3.
 """
 
 import json
@@ -23,61 +24,91 @@ KEYS = (
     "vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "gemini-3.5-flash",
     "vertex_ai/gemini-3.8-flash", "gemini/gemini-3.8-flash", "gemini-3.8-flash",
 )
+UNMAPPED = "vertex_ai/foo-bar"  # litellm 1.105.3 leaves a non-gemini name unmapped
+
+
+def _invalidate():
+    """litellm caches get_model_info lookups; model_cost edits are invisible until they are cleared."""
+    litellm.utils._invalidate_model_cost_lowercase_map()
 
 
 @pytest.fixture
-def failed_download():
-    """litellm.model_cost as after a failed download; restored afterwards."""
+def keys_removed():
+    """litellm.model_cost without our six keys; restored (and caches cleared) afterwards."""
+    _invalidate()
     with patch.dict(litellm.model_cost), patch.object(fallback, "_checked", set()):
         for key in KEYS:
             litellm.model_cost.pop(key, None)
+        _invalidate()
         yield
+    _invalidate()
+
+
+@pytest.fixture
+def fresh_checks():
+    _invalidate()
+    with patch.dict(litellm.model_cost), patch.object(fallback, "_checked", set()):
+        yield
+    _invalidate()
 
 
 def _cost(model):
     return litellm.cost_per_token(model=model, prompt_tokens=1000, completion_tokens=100)
 
 
-def test_the_fixture_reproduces_the_defect(failed_download):
-    """Control: without the fallback the model has no schema support and no price."""
-    assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is False
-    with pytest.raises(Exception, match="isn't mapped yet"):
-        _cost("vertex_ai/gemini-3.5-flash")
-    assert supports_response_schema(model="vertex_ai/gemini-3.8-flash") is False
+def _pin_doc(model_name="foo-bar"):
+    """A pin file holding one entry for a model litellm does not map (copy of a real entry)."""
+    doc = json.loads(fallback.PINNED_FILE.read_text(encoding="utf-8"))
+    template = doc["entries"]["vertex_ai/gemini-3.8-flash"]
+    return {"pinned_on": "2026-10-01", "entries": {f"vertex_ai/{model_name}": template}}
 
 
-def test_vertex_gets_schema_and_cost_back(failed_download, caplog):
+@pytest.mark.parametrize("provider, model", [
+    ("vertex", "vertex_ai/gemini-3.5-flash"),
+    ("gemini", "gemini/gemini-3.5-flash"),
+    ("vertex", "vertex_ai/gemini-3.8-flash"),
+    ("gemini", "gemini/gemini-3.8-flash"),
+])
+def test_the_loaded_map_gives_schema_and_cost_and_the_fallback_does_nothing(
+        fresh_checks, caplog, provider, model):
+    """Schema enforcement and a price are there without us. Asserts only 'schema True, price > 0':
+    the loaded table is litellm's shipped list (tests/conftest.py), so exact prices would turn CI red on a
+    litellm upgrade."""
+    assert supports_response_schema(model=model) is True
+    assert all(price > 0 for price in _cost(model))
+    before = dict(litellm.model_cost)
+    with caplog.at_level(logging.DEBUG, logger=fallback.__name__):
+        fallback.ensure_model_entry(provider, model)
+    assert litellm.model_cost == before
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("provider, model", [
+    ("vertex", "vertex_ai/gemini-3.8-flash"),
+    ("gemini", "gemini/gemini-3.8-flash"),
+])
+def test_a_pinned_gemini_model_missing_from_the_map_gets_its_pin_back(keys_removed, caplog, provider, model):
+    """litellm answers an absent gemini name with price 0; the fallback must still put the pinned price in."""
+    entry = json.loads(fallback.PINNED_FILE.read_text(encoding="utf-8"))["entries"][model]
     with caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
-    assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is True
-    assert _cost("vertex_ai/gemini-3.5-flash") == pytest.approx((0.0015, 0.0009))
+        fallback.ensure_model_entry(provider, model)
+    assert supports_response_schema(model=model) is True
+    assert _cost(model) == pytest.approx((entry["input_cost_per_token"] * 1000,
+                                          entry["output_cost_per_token"] * 100))
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+
+
+def test_an_unmapped_model_gets_the_pinned_entry_and_a_warning(fresh_checks, caplog, tmp_path):
+    """The fallback's mechanics, on a model the bundled map really lacks."""
+    pin = tmp_path / "pin.json"
+    pin.write_text(json.dumps(_pin_doc()), encoding="utf-8")
+    with patch.object(fallback, "PINNED_FILE", pin), \
+         caplog.at_level(logging.WARNING, logger=fallback.__name__):
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+    assert supports_response_schema(model=UNMAPPED) is True
+    assert _cost(UNMAPPED) == pytest.approx((0.00075, 0.000375))
     assert [r.levelname for r in caplog.records] == ["WARNING"]
     assert "2026-10-01" in caplog.records[0].getMessage()
-
-
-def test_gemini_gets_schema_and_cost_back(failed_download, caplog):
-    with caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("gemini", "gemini/gemini-3.5-flash")
-    assert supports_response_schema(model="gemini/gemini-3.5-flash") is True
-    assert _cost("gemini/gemini-3.5-flash") == pytest.approx((0.0015, 0.0009))
-    assert [r.levelname for r in caplog.records] == ["WARNING"]
-
-
-def test_vertex_gets_gemini_3_8_schema_and_cost_back(failed_download, caplog):
-    with caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.8-flash")
-    assert "vertex_ai/gemini-3.5-flash" not in litellm.model_cost
-    assert supports_response_schema(model="vertex_ai/gemini-3.8-flash") is True
-    assert _cost("vertex_ai/gemini-3.8-flash") == pytest.approx((0.00075, 0.000375))
-    assert [r.levelname for r in caplog.records] == ["WARNING"]
-
-
-def test_gemini_gets_gemini_3_8_schema_and_cost_back(failed_download, caplog):
-    with caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("gemini", "gemini/gemini-3.8-flash")
-    assert supports_response_schema(model="gemini/gemini-3.8-flash") is True
-    assert _cost("gemini/gemini-3.8-flash") == pytest.approx((0.00075, 0.000375))
-    assert [r.levelname for r in caplog.records] == ["WARNING"]
 
 
 def test_a_known_model_is_left_alone(caplog):
@@ -90,17 +121,23 @@ def test_a_known_model_is_left_alone(caplog):
     assert caplog.records == []
 
 
-def test_an_unknown_cloud_model_logs_one_error(failed_download, caplog):
+@pytest.mark.parametrize("model, schema_off", [
+    ("vertex_ai/gemini-9-flash", False),  # litellm builds a schema-True, price-0 entry
+    (UNMAPPED, True),                     # litellm raises "isn't mapped"
+])
+def test_an_unknown_cloud_model_logs_one_error(fresh_checks, caplog, model, schema_off):
     before = dict(litellm.model_cost)
     with caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-9-flash")
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-9-flash")
+        fallback.ensure_model_entry("vertex", model)
+        fallback.ensure_model_entry("vertex", model)
     assert litellm.model_cost == before
     assert [r.levelname for r in caplog.records] == ["ERROR"]
-    assert "cost reads $0" in caplog.records[0].getMessage()
+    message = caplog.records[0].getMessage()
+    assert "cost reads $0" in message
+    assert ("WITHOUT schema enforcement" in message) is schema_off
 
 
-def test_local_is_ignored(failed_download, caplog):
+def test_local_is_ignored(fresh_checks, caplog):
     before = dict(litellm.model_cost)
     with caplog.at_level(logging.DEBUG, logger=fallback.__name__):
         fallback.ensure_model_entry("local", "ollama/gemini-3.5-flash")
@@ -108,43 +145,49 @@ def test_local_is_ignored(failed_download, caplog):
     assert caplog.records == []
 
 
-def test_present_keys_are_never_overwritten(failed_download):
+def test_present_keys_are_never_overwritten(fresh_checks, tmp_path):
     """A key LiteLLM already has is kept; only the missing ones are added."""
-    litellm.model_cost["gemini/gemini-3.5-flash"] = {"sentinel": True}
-    fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
-    assert litellm.model_cost["gemini/gemini-3.5-flash"] == {"sentinel": True}
-    assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is True
+    doc = _pin_doc()
+    doc["entries"]["gemini/foo-bar"] = doc["entries"]["vertex_ai/foo-bar"]
+    pin = tmp_path / "pin.json"
+    pin.write_text(json.dumps(doc), encoding="utf-8")
+    litellm.model_cost["gemini/foo-bar"] = {"sentinel": True}
+    with patch.object(fallback, "PINNED_FILE", pin):
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+    assert litellm.model_cost["gemini/foo-bar"] == {"sentinel": True}
+    assert "vertex_ai/foo-bar" in litellm.model_cost
+    assert supports_response_schema(model=UNMAPPED) is True
 
 
-def test_a_known_but_incomplete_entry_is_kept_and_reported(failed_download, caplog):
-    """LiteLLM resolves vertex_ai/gemini-3.5-flash to the bare key when present, so an
-    entry there without schema support makes the model "known": nothing is
-    overwritten, and the ERROR says schema enforcement is off."""
-    litellm.model_cost["gemini-3.5-flash"] = {"sentinel": True}
+def test_an_incomplete_entry_without_a_pin_is_kept_and_reported(fresh_checks, caplog):
+    """An entry with no price or schema flag for a model we hold no pin for: nothing is
+    overwritten, and the ERROR says both schema enforcement and the price are off."""
+    litellm.model_cost["vertex_ai/foo-bar"] = {"sentinel": True}
+    _invalidate()
     with caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
-    assert litellm.model_cost["gemini-3.5-flash"] == {"sentinel": True}
-    assert "vertex_ai/gemini-3.5-flash" not in litellm.model_cost
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+    assert litellm.model_cost["vertex_ai/foo-bar"] == {"sentinel": True}
     assert [r.levelname for r in caplog.records] == ["ERROR"]
-    assert "WITHOUT schema enforcement." in caplog.records[0].getMessage()
+    message = caplog.records[0].getMessage()
+    assert "WITHOUT schema enforcement" in message and "cost reads $0" in message
 
 
-def test_a_broken_pin_file_never_raises(failed_download, caplog, tmp_path):
+def test_a_broken_pin_file_never_raises(fresh_checks, caplog, tmp_path):
     broken = tmp_path / "pinned_model_entries.json"
     broken.write_text("{not json", encoding="utf-8")
     with patch.object(fallback, "PINNED_FILE", broken), \
          caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
+        fallback.ensure_model_entry("vertex", UNMAPPED)
     assert any(r.exc_info for r in caplog.records)
     failure = [r for r in caplog.records if r.exc_info]
     assert [r.levelname for r in failure] == ["ERROR"]
     assert "may be off" in failure[0].getMessage()
 
 
-def test_a_failed_attempt_is_retried_on_the_next_call(failed_download, caplog):
+def test_a_failed_attempt_is_retried_on_the_next_call(fresh_checks, caplog):
     """A one-off failure (here: the pin file cannot be read once) must not leave the
     model unknown for the life of the process: the next call retries."""
-    real_text = fallback.PINNED_FILE.read_text(encoding="utf-8")
+    real_text = json.dumps(_pin_doc())
 
     class FlakyFile:
         reads = 0
@@ -158,11 +201,32 @@ def test_a_failed_attempt_is_retried_on_the_next_call(failed_download, caplog):
     flaky = FlakyFile()
     with patch.object(fallback, "PINNED_FILE", flaky), \
          caplog.at_level(logging.WARNING, logger=fallback.__name__):
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
-        fallback.ensure_model_entry("vertex", "vertex_ai/gemini-3.5-flash")
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        fallback.ensure_model_entry("vertex", UNMAPPED)
     assert flaky.reads == 2
-    assert supports_response_schema(model="vertex_ai/gemini-3.5-flash") is True
+    assert supports_response_schema(model=UNMAPPED) is True
     assert [r.levelname for r in caplog.records if r.name == fallback.__name__] == ["ERROR", "WARNING"]
+
+
+def test_after_a_wholesale_swap_forgetting_the_checks_puts_the_pin_back(fresh_checks, tmp_path):
+    """litellm's adopt_model_cost_map REPLACES litellm.model_cost (the live price list after start),
+    so a pinned entry is gone and the remembered check would never add it again."""
+    from litellm.litellm_core_utils.get_model_cost_map import adopt_model_cost_map
+
+    pin = tmp_path / "pin.json"
+    pin.write_text(json.dumps(_pin_doc()), encoding="utf-8")
+    with patch.object(fallback, "PINNED_FILE", pin), \
+         patch.object(litellm, "model_cost", dict(litellm.model_cost)):
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        assert UNMAPPED in litellm.model_cost
+        adopt_model_cost_map({key: entry for key, entry in litellm.model_cost.items() if key != UNMAPPED})
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        assert UNMAPPED not in litellm.model_cost  # remembered as checked: nothing re-added
+        fallback.forget_checked_models()
+        fallback.ensure_model_entry("vertex", UNMAPPED)
+        assert supports_response_schema(model=UNMAPPED) is True
+        assert _cost(UNMAPPED) == pytest.approx((0.00075, 0.000375))
+    _invalidate()
 
 
 def test_the_pin_file_holds_both_models_entries():
@@ -180,7 +244,7 @@ def test_the_pin_file_holds_both_models_entries():
 
 
 @patch("src.backend.crew_ai.cleaned_llm_wrapper.CleanedLLMWrapper")
-def test_get_llm_keeps_the_schema_after_a_failed_download(MockCleanedLLMWrapper, failed_download):
+def test_get_llm_keeps_the_schema_when_the_models_keys_are_absent(MockCleanedLLMWrapper, keys_removed):
     from src.backend.crew_ai.cleaned_llm_wrapper import get_llm
     from src.backend.crew_ai.tasks import PlanOutput
 
@@ -212,6 +276,9 @@ def test_a_failing_check_never_blocks_startup(caplog):
 
     from src.backend import main
 
+    # the first import of main resets the root logger's handlers (structured logging): put caplog's back,
+    # or this test passes only when an earlier test already imported main
+    logging.getLogger().addHandler(caplog.handler)
     health = MagicMock(side_effect=RuntimeError("stop here"))
     with patch("src.backend.auth.security_posture.validate_security_posture"), \
          patch("src.backend.core.artifact_store.get_artifact_store"), \

@@ -4,7 +4,7 @@
 # every image. Anything that can appear at depth needs the `**/` prefix.
 #
 # Only these paths are ever COPYed by a Dockerfile: src/, tools/, clients/,
-# scripts/fastapi-entrypoint.sh, pyproject.toml. Everything else is context the
+# scripts/fastapi-entrypoint.sh, pyproject.toml, uv-overrides.txt. Everything else is context the
 # daemon transfers and discards, so exclude it.
 
 # Python

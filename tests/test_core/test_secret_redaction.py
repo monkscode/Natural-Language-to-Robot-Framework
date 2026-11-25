@@ -14,6 +14,7 @@ import pytest
 from src.backend.core.secret_redaction import redact_secrets, redact_processor
 
 _FAKE_KEY = "AIzaSy" + "B" * 33  # shaped like a Google API key, not a real one
+_FAKE_TYPED_VALUE = "Fake-Typed-Value-123"  # a fill() value: only our filter masks this shape
 
 
 class TestRedactSecrets:
@@ -209,10 +210,16 @@ class TestSecretRedactingFilter:
         litellm_logger.setLevel(stdlib_logging.INFO)
         try:
             litellm_logger.info("POST ...:generateContent?key=%s", _FAKE_KEY)
+            litellm_logger.info('locator.fill("%s") failed', _FAKE_TYPED_VALUE)
             handler.flush()
             written = stream.getvalue()
             assert _FAKE_KEY not in written
-            assert "[REDACTED]" in written
+            # litellm >= 1.10x filters its own loggers too and writes "?REDACTED",
+            # not our "[REDACTED]" marker, so the key being gone does not show OUR
+            # filter ran on this handler's records. A typed value is a shape only
+            # ours masks.
+            assert _FAKE_TYPED_VALUE not in written
+            assert 'locator.fill("***") failed' in written
         finally:
             litellm_logger.removeHandler(handler)
             litellm_logger.setLevel(previous_level)

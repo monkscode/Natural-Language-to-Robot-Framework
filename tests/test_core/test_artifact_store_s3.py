@@ -3,13 +3,21 @@
 Spins MinIO with the docker SDK already used for test execution. Marked
 integration so it can be selected/skipped; skips cleanly when Docker is absent.
 """
+import os
 import socket
 import time
 import uuid
 
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    # Docker Hub refuses minio/minio:latest anonymously (2026-11-24), so this is opt-in.
+    pytest.mark.skipif(
+        os.environ.get("NLRF_RUN_S3_IT") != "1",
+        reason="set NLRF_RUN_S3_IT=1 to run: Docker Hub refuses the minio/minio:latest image",
+    ),
+]
 
 
 def _free_port() -> int:

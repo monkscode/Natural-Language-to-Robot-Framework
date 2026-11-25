@@ -21,7 +21,8 @@ We appreciate all contributions, whether it's bug fixes, new features, documenta
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    
    # Install dependencies
-   pip install -r src/backend/requirements.txt
+   pip install uv
+   uv pip install --overrides uv-overrides.txt -r src/backend/requirements.txt
    ```
 4. **Configure your environment**:
    ```bash

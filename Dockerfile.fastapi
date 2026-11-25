@@ -61,8 +61,8 @@ WORKDIR /build
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Opt in to the S3 artifact-storage backend at build time. Default is off, so the
-# image ships without the AWS SDK (boto3 + botocore is ~50-80MB) unless requested:
+# Install the S3 extra at build time. litellm >=1.105 already pulls in boto3, so
+# this flag adds nothing today (kept for if litellm drops it):
 #   docker build --build-arg INSTALL_S3=true ...
 ARG INSTALL_S3=false
 
@@ -82,19 +82,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # requirements.txt is no longer used — uv pip compile resolves fresh at build time
 # from pyproject.toml, eliminating stale-lockfile conflicts like jsonschema pin mismatches.
 COPY pyproject.toml /build/pyproject.toml
+COPY uv-overrides.txt /build/uv-overrides.txt
 
 # Compile a consistent lockfile from pyproject.toml, then install from it.
 # Two-step: compile → install gives us fresh resolution (no stale pins) while
 # still using an exact lockfile for the install itself (reproducible layer).
-# ChromaDB will use its default ONNX-based embedding function (no pytorch needed).
 RUN --mount=type=cache,target=/root/.cache/uv \
     set --; \
     if [ "$INSTALL_S3" = "true" ]; then set -- --extra s3; fi; \
     uv pip compile /build/pyproject.toml \
+        --overrides /build/uv-overrides.txt \
         --no-header "$@" \
         --output-file /build/requirements-compiled.txt && \
     uv pip install --prefix=/build/install --no-cache \
-        -r /build/requirements-compiled.txt
+        --overrides /build/uv-overrides.txt -r /build/requirements-compiled.txt
 
 # ============================================================================
 # STAGE 3: Runtime

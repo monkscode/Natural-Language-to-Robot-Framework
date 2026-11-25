@@ -58,6 +58,9 @@ TEMPORARY_RAW = [
     '"status": "INTERNAL"}}',
     "An error occurred: litellm.Timeout: Connection timed out after 60.0 seconds.",
     "An error occurred: litellm.APIConnectionError: VertexAIException - 504 Deadline Exceeded",
+    # litellm 1.105.3 maps a vertex/gemini 5xx it has no class for (520, ...) to APIError; built by litellm itself
+    "An error occurred: " + str(litellm.APIError(status_code=520, message="VertexAIException - upstream 520",
+                                                 llm_provider="vertex_ai", model="gemini-3.8-flash", request=None)),
 ]
 
 
@@ -254,6 +257,9 @@ class TestClassify:
         '{"code": 400, "message": "Invalid JSON payload received.", "status": "INVALID_ARGUMENT"}}',
         "An error occurred: litellm.ContextWindowExceededError: litellm.BadRequestError: "
         "VertexAIException - 400 Request payload size exceeds the limit",
+        # litellm 1.105.3 maps an unnamed 4xx (409/422/499) to BadRequestError; the class cannot tell it from a 400
+        "An error occurred: " + str(litellm.BadRequestError(message="VertexAIException - 422 unprocessable",
+                                                            model="gemini-3.8-flash", llm_provider="vertex_ai")),
         'An error occurred: litellm.NotFoundError: VertexAIException - {"error": {"code": 404, '
         '"status": "NOT_FOUND"}}',
         'An error occurred: VertexAIException - {"error": {"code": 400, "status": "INVALID_ARGUMENT"}}',

@@ -194,6 +194,7 @@ def test_uvicorn_loggers_carry_the_redaction_filter_once():
 
 def test_a_secret_logged_on_uvicorn_error_arrives_redacted():
     fake_key = "AIzaSy" + "B" * 33  # shaped like a Google API key, not a real one
+    typed_value = "Fake-Typed-Value-123"
     setup_logging(log_dir=None)
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
@@ -201,13 +202,18 @@ def test_a_secret_logged_on_uvicorn_error_arrives_redacted():
     logger.addHandler(handler)
     try:
         logger.error("startup failed: GEMINI_API_KEY=%s rejected", fake_key)
+        logger.error('locator.fill("%s") failed', typed_value)
     finally:
         logger.removeHandler(handler)
 
     out = stream.getvalue()
     assert fake_key not in out
-    assert "[REDACTED]" in out
     assert "startup failed" in out
+    # litellm >= 1.10x filters uvicorn.error itself at import and writes its own
+    # text ("GEMINI_REDACTED"), not our "[REDACTED]" marker, so the key being gone
+    # does not show OUR filter ran. A typed value is a shape only ours masks.
+    assert typed_value not in out
+    assert 'locator.fill("***") failed' in out
 
 
 def test_uvicorn_colour_formatter_still_fills_in_the_startup_values():

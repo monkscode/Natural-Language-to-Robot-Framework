@@ -1,0 +1,8 @@
+# Packages the dependency graph pulls in that this project never loads; every uv pip compile AND every install from the compiled file passes --overrides uv-overrides.txt
+lancedb; sys_platform == 'never'
+pyarrow; sys_platform == 'never'
+lance-namespace; sys_platform == 'never'
+lance-namespace-urllib3-client; sys_platform == 'never'
+qdrant-client; sys_platform == 'never'
+crewai-cli; sys_platform == 'never'
+cel-python; sys_platform == 'never'

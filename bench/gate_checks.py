@@ -15,8 +15,9 @@ Gates (each a GateLine; PASS / FAIL / CANNOT):
   system prompt), rows ordered by start_time_ns (the capture has no ORDER BY), the
   last planner row with an answer is the one crewai converted, and it is unparsed
   when neither it nor its greedy {...} span is a JSON object with a "steps" list
-  (crewai 1.8.1's own extraction — exactly what reaches the Converter: over all
-  2,105 captures that leaves the 7 known 2026-08-01 salvage runs). Until W5.1
+  (crewai's own {...} extraction regex, the same on 1.8.1 and 1.15.44; the span is parsed as
+  1.15.44 does, see planner_state. The corpus replay of 2026-11-25 read 2,729 runs: 7 UNPARSED,
+  the 7 known 2026-08-01 salvage runs). Until W5.1
   ships, a 1.8.1 salvage row carries no workflow id, so the bench never captures
   it; an unparsed planner answer is then the only trace of it. A GENERATED run
   with no planner row or answer makes the line CANNOT, naming the run (never
@@ -72,7 +73,7 @@ LOST_DROP_PCT = 25.0      # a family's summed medians fall more than this -> CAN
 PLANNER_PROMPT = "You are Test Automation Planner"
 _CONVERTER_INSTRUCTIONS = {"Ensure your final answer": "1.8.1 wording",
                            "Format your final answer": "1.15 wording"}
-_JSON_SPAN = re.compile(r"({.*})", re.DOTALL)   # crewai 1.8.1 converter._JSON_PATTERN
+_JSON_SPAN = re.compile(r"({.*})", re.DOTALL)   # crewai converter._JSON_PATTERN (same on 1.8.1 and 1.15.44)
 _TIMESTAMP = re.compile(r'"timestamp": "(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})')
 SIGNATURE_429 = re.compile(r'429 Too Many|code\\?": 429|RateLimitError|RESOURCE_EXHAUSTED')
 SIGNATURE_503 = re.compile(r'503 Service|code\\?": 503|ServiceUnavailable')
@@ -162,9 +163,9 @@ def _is_planner(trace: dict) -> bool:
     return first is not None and first[0] == "system" and first[1].startswith(PLANNER_PROMPT)
 
 
-def _steps_object(text: str, *, strict: bool = True) -> bool:
+def _steps_object(text: str) -> bool:
     try:
-        answer = json.loads(text, strict=strict)
+        answer = json.loads(text, strict=False)
     except ValueError:
         return False
     return isinstance(answer, dict) and isinstance(answer.get("steps"), list)
@@ -173,12 +174,15 @@ def _steps_object(text: str, *, strict: bool = True) -> bool:
 def planner_state(traces: list) -> str:
     """'parsed' | 'UNPARSED' | 'no planner answer' | 'no planner row' (see module doc).
 
-    'parsed' mirrors crewai 1.8.1's own parse (converter.convert_to_model, then
+    'parsed' mirrors crewai 1.15.44's own parse (converter.convert_to_model, then
     handle_partial_json): the whole answer is JSON under json.loads(strict=False),
-    which takes a raw control character inside a string, or its greedy {...} span
-    is strict JSON — crewai validates the span with pydantic model_validate_json,
-    which rejects one (a pre-schema "Final Answer: {...}" answer never reached the
-    Converter). UNPARSED is exactly what reaches it.
+    which takes a raw control character inside a string (converter.py:253), or its
+    greedy {...} span is, also under json.loads(strict=False) before model_validate
+    (converter.py:322-336; a pre-schema "Final Answer: {...}" answer never reached
+    the Converter). An UNPARSED answer always reaches it (a steps object the schema
+    rejects can too). 1.8.1 read the span with
+    pydantic model_validate_json (its converter.py:256), which rejects a raw control
+    character; the gate reads candidate runs only, so it follows 1.15.44.
     """
     planner = [t for t in _ordered(traces) if _is_planner(t)]
     if not planner:
@@ -188,7 +192,7 @@ def planner_state(traces: list) -> str:
         return "no planner answer"
     text = answered[-1]["response_text"]
     span = _JSON_SPAN.search(text)
-    parsed = _steps_object(text, strict=False) or (span and _steps_object(span.group(1)))
+    parsed = _steps_object(text) or (span and _steps_object(span.group(1)))
     return "parsed" if parsed else "UNPARSED"
 
 

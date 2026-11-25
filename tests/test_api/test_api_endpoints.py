@@ -16,6 +16,7 @@ Tests:
 """
 
 import pytest
+from datetime import datetime
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 
@@ -272,6 +273,42 @@ class TestHealthPins:
             mock_settings.DRYRUN_ENABLED = False
             resp = health_app_client.get("/api/health")
         assert resp.json()["pins"]["optimization_enabled"] is True
+
+
+class TestHealthPriceList:
+    """/health says which LiteLLM price list prices runs (src/backend/core/price_list.py)."""
+
+    SOURCE_INFO = "litellm.litellm_core_utils.get_model_cost_map.get_model_cost_map_source_info"
+
+    @pytest.mark.parametrize("source, shown", [("remote", "live"), ("local", "shipped")])
+    def test_health_names_the_list_and_passes_loaded_at_through(self, health_app_client, source, shown):
+        info = {"source": source, "loaded_at": "2026-11-25T04:30:00.123456+00:00"}
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch(self.SOURCE_INFO, return_value=info):
+            resp = health_app_client.get("/health")
+        assert resp.json()["price_list"] == {"source": shown,
+                                             "loaded_at": "2026-11-25T04:30:00.123456+00:00"}
+
+    def test_a_failing_read_keeps_health_up(self, health_app_client):
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0), \
+             patch(self.SOURCE_INFO, side_effect=RuntimeError("boom")):
+            resp = health_app_client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["price_list"] == {"source": None, "loaded_at": None}
+
+    def test_litellms_real_source_info_reads_as_shipped(self, health_app_client):
+        """Unpatched: a litellm upgrade that renames "source" or "loaded_at" must turn this red, not show None.
+        tests/conftest.py pins LITELLM_LOCAL_MODEL_COST_MAP, so litellm loaded its shipped list."""
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0):
+            resp = health_app_client.get("/health")
+        price_list = resp.json()["price_list"]
+        assert price_list["source"] == "shipped"
+        assert datetime.fromisoformat(price_list["loaded_at"])
+
+    def test_api_health_is_unchanged(self, health_app_client):
+        with patch("src.backend.api.health.get_active_workflow_count", return_value=0):
+            resp = health_app_client.get("/api/health")
+        assert "price_list" not in resp.json()
 
 
 @pytest.fixture(scope="module")

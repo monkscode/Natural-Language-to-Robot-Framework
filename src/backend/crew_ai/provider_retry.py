@@ -69,6 +69,9 @@ _RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
 # A per-minute quota window never needs more than a minute.
 RETRY_DELAY_CAP_S = 60.0
 
+# Statuses a BadRequestError keeps as fatal: the caller's own fault (bad input, key, permission, model).
+_FATAL_BAD_REQUEST_STATUSES = frozenset({400, 401, 403, 404})
+
 FailureKind = Literal["timeout", "rejected", "fatal"]
 
 # Jitter only, not security; SystemRandom keeps static analysis quiet.
@@ -90,19 +93,27 @@ def classify_provider_error(exc: BaseException) -> FailureKind:
     """Sort one failed try: 'timeout', 'rejected' (retry after a backoff) or 'fatal'.
 
     Timeout is checked first because litellm.Timeout also descends from
-    openai.APIConnectionError. LiteLLM 1.75.3 maps Vertex/Gemini 408 to
-    Timeout, 429 to RateLimitError, 500 and "The model is overloaded." to
-    InternalServerError and 503 to ServiceUnavailableError; every other status
-    (502, 504, 520, ...) and anything else it cannot map becomes
-    APIConnectionError, its catch-all (litellm_core_utils/exception_mapping_utils.py;
-    gemini takes the vertex branch, which has no 504 case). APIConnectionError
-    is retried as a rejection, whatever caused it: a chain-based transport
-    test would make those gateway errors and Vertex token-fetch failures
-    fatal (probed 2026-09-25, PR #115 review).
+    openai.APIConnectionError. LiteLLM 1.105.3 (probed 2026-11-24) maps Vertex/Gemini
+    408 and 504 to Timeout, 429 to RateLimitError, 500 and "The model is
+    overloaded." to InternalServerError and 503 to ServiceUnavailableError; any
+    other 4xx (409, 422, 499, ...) and a 200 whose body is not JSON (synthetic 422)
+    become BadRequestError(status) through _map_exception_by_status, any other 5xx
+    (520, ...) APIError(status), 502 and what it cannot map APIConnectionError
+    (litellm_core_utils/exception_mapping_utils.py). 1.75.3 sent every status the
+    mapper did not name to APIConnectionError, which is retried; so is
+    APIConnectionError now, whatever caused it: a chain-based transport test would
+    make gateway errors and Vertex token-fetch failures fatal (probed 2026-09-25,
+    PR #115 review). To keep that outcome a BadRequestError whose status_code is an
+    int outside {400, 401, 403, 404} is a rejection. Never key on "status != 400":
+    litellm turns any error whose text contains "403" into BadRequestError(403).
     A 429 on a per-day quota is fatal: nothing succeeds before the daily reset.
     """
     if isinstance(exc, litellm.Timeout):
         return "timeout"
+    if isinstance(exc, litellm.BadRequestError):
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and status not in _FATAL_BAD_REQUEST_STATUSES:
+            return "rejected"
     if isinstance(exc, litellm.RateLimitError) and names_per_day_quota(str(exc)):
         return "fatal"
     if isinstance(exc, (litellm.RateLimitError, litellm.ServiceUnavailableError,

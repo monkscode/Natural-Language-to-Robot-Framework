@@ -97,8 +97,8 @@ def test_local_read_text_non_utf8_returns_none(store):
 # ===========================================================================
 # S3ArtifactStore — unit tests with a mocked boto3 client.
 #
-# boto3 is an optional ('s3' extra) dependency NOT installed in CI, and the real
-# round-trip (MinIO) is Docker-gated in test_artifact_store_s3.py. These tests
+# boto3 is installed (litellm >=1.105 requires it; the 's3' extra adds nothing today), but the
+# real round-trip (MinIO) is Docker-gated in test_artifact_store_s3.py. These tests
 # inject a fake boto3 via sys.modules so the S3 backend's branch logic (key
 # building, staging-vs-bucket fallback, range/ETag headers, the symlink-escape
 # guard, error swallowing) is covered deterministically with or without boto3.

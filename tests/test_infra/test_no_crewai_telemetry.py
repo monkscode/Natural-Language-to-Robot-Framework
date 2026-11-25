@@ -1,10 +1,16 @@
 """The test session never sends crewai telemetry.
 
-The defect (measured 2026-09-27): crewai 1.8.1 pings api.scarf.sh from a thread
-started at `import crewai`, and its module-level EventListener makes crewai's
-own TracerProvider the process's global one, so every span a test opened
-(create_workflow_span included) was exported to telemetry.crewai.com. Both are
-gated by crewai's Telemetry._is_telemetry_disabled(), which reads
+The defect (measured 2026-09-27 on crewai 1.8.1): crewai pinged api.scarf.sh from
+a thread started at `import crewai`, and its module-level EventListener made
+crewai's own TracerProvider the process's global one, so every span a test
+opened (create_workflow_span included) was exported to telemetry.crewai.com.
+
+On crewai 1.15.44 the scarf ping and the global-provider takeover are both gone
+(`Telemetry.set_tracer` no longer installs a global provider; no "scarf" in
+crewai or crewai_core). What remains: `Telemetry()` builds a private
+TracerProvider whose BatchSpanProcessor exports to telemetry.crewai.com:4319,
+and crewai's own spans (crew, flow, tool, ...) go through it. That path is gated
+by crewai's Telemetry._is_telemetry_disabled(), which reads
 CREWAI_DISABLE_TELEMETRY; tests/conftest.py forces it to "true".
 
 crewai is imported ONLY in child processes that refuse every non-loopback DNS
@@ -15,7 +21,7 @@ neither the check nor its control can send anything, even through a local or
 system proxy.
 
 Referenced by: none (leaf test module).
-Depends on: tests/conftest.py (the CREWAI_DISABLE_TELEMETRY pin), crewai 1.8.1.
+Depends on: tests/conftest.py (the CREWAI_DISABLE_TELEMETRY pin), crewai 1.15.44.
 `_crewai_in_child` forces LITELLM_LOCAL_MODEL_COST_MAP=True in the child's env
 so litellm's own GitHub cost-map fetch never runs there, keeping each child's
 attempt list about crewai alone.
@@ -31,10 +37,10 @@ import textwrap
 
 # Records every DNS lookup and connect, REFUSES every DNS lookup that is not
 # loopback and every connect except to a port the child itself bound (asyncio's
-# Windows self-pipe), imports crewai, waits for its install-ping thread, then
-# reports what crewai did.
+# Windows self-pipe), imports crewai, has crewai record one span through its own
+# telemetry and flushes its exporter, then reports what crewai did.
 _CHILD = textwrap.dedent("""
-    import json, socket, threading
+    import json, os, socket, threading, time
     LOOPBACK = ("127.0.0.1", "::1", "localhost")
     attempts = []
     _gai = socket.getaddrinfo
@@ -58,19 +64,31 @@ _CHILD = textwrap.dedent("""
             raise ConnectionRefusedError("refused by the test")
         return _connect(self, addr)
     socket.socket.connect = connect
-    import crewai  # noqa: F401  (starts the install-ping thread unless disabled)
-    for t in threading.enumerate():
-        if "_track_install" in t.name:
-            t.join(timeout=5)
+    import crewai  # noqa: F401
     from crewai.telemetry.telemetry import Telemetry
     from opentelemetry import trace
+    tel = Telemetry()
+    # One span through crewai's own span path (a no-op when telemetry is
+    # disabled), then flush its private provider: the export worker resolves
+    # telemetry.crewai.com here, where the guard records and refuses it.
+    tel.flow_creation_span("probe")
+    if tel.ready:
+        # The export retries with back-off for ~15 s against the refused host,
+        # so flush from a daemon thread and wait only for the first lookup.
+        threading.Thread(target=tel.provider.force_flush, daemon=True).start()
+        for _ in range(100):
+            if attempts:
+                break
+            time.sleep(0.05)
     resource = getattr(trace.get_tracer_provider(), "resource", None)
     print(json.dumps({
         "attempts": sorted(set(attempts)),
         "disabled": Telemetry._is_telemetry_disabled(),
-        "ready": Telemetry().ready,
+        "ready": tel.ready,
         "global_service": resource.attributes.get("service.name") if resource is not None else None,
-    }))
+    }), flush=True)
+    # Skip crewai's atexit flush and the still-retrying export thread.
+    os._exit(0)
 """)
 
 
@@ -112,18 +130,19 @@ def _unpinned_env() -> dict:
 
 
 def test_the_control_without_the_pin_would_have_sent():
-    """Proves the test above can fail: without the pin crewai tries api.scarf.sh
-    (refused by the child's guard, so nothing is sent) and makes its own
-    provider the global one."""
+    """Proves the test above can fail: without the pin crewai builds its telemetry
+    and its exporter looks up telemetry.crewai.com (refused by the child's guard,
+    so nothing is sent). crewai 1.15 no longer makes its provider the global one,
+    so the global provider stays unset here too."""
     seen = _crewai_in_child(_unpinned_env())
-    assert "api.scarf.sh" in seen["attempts"]
+    assert "telemetry.crewai.com" in seen["attempts"]
     assert seen["ready"] is True
-    assert seen["global_service"] == "crewAI-telemetry"
+    assert seen["global_service"] is None
 
 
 def test_the_control_cannot_leave_through_a_proxy():
-    """An inherited HTTPS_PROXY cannot carry the control's install ping out of
-    the child: `_crewai_in_child` strips it before the child runs, so the ping
+    """An inherited HTTPS_PROXY cannot carry the control's telemetry export out of
+    the child: `_crewai_in_child` strips it before the child runs, so the export
     goes direct and is refused at DNS (exactly like the plain control above),
     and nothing may ever reach a listener bound at the proxy's address.
 
@@ -153,6 +172,6 @@ def test_the_control_cannot_leave_through_a_proxy():
         except socket.timeout:
             reached = False
         assert not reached, "the control's ping reached the proxy listener"
-        assert "api.scarf.sh" in seen["attempts"]
+        assert "telemetry.crewai.com" in seen["attempts"]
     finally:
         srv.close()

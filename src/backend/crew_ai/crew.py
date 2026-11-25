@@ -185,6 +185,21 @@ def _extract_plan_steps(task_output) -> list:
     raise ValueError("Planner output contained no parsable steps")
 
 
+def _raise_salvage_give_up(llm) -> None:
+    """Raise the provider error that ended this stage's salvage call, if one did.
+
+    crewai 1.15 swallows the Converter's give-up and keeps the agent's raw answer
+    (crewai/utilities/converter.py ~421-431), so the stage's own "no output" error
+    would hide a timeout or a 503 behind a parse message. The wrapper still holds
+    the original litellm exception, with its W5 retry report, when its last call was
+    such a salvage (`_salvage_give_up`); raising that same object lets
+    workflow_service give the plain provider sentence.
+    """
+    give_up = getattr(llm, "_salvage_give_up", None)
+    if give_up is not None:
+        raise give_up[1]
+
+
 def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str = "", progress_queue=None, org_id: str | None = None):
     """
     Initializes and runs the CrewAI crew to generate Robot Framework test code.
@@ -489,6 +504,10 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     # Rotate crewai.log if it exceeds size limit (before creating the Crews)
     _rotate_crewai_log()
 
+    # step_callback is always None on crewai 1.15: the Flow AgentExecutor fires
+    # it only from its tool-calling branches and both our agents are tool-less.
+    # crewai_steps.log carries [TASK DONE] entries; per-LLM-call latency lives
+    # in llm_traces.duration_ms.
     step_callback, task_callback = get_crew_callbacks(llm=agents.llm)
 
     def _make_crew(agent, task):
@@ -513,7 +532,11 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
     try:
         try:
             planner_crew.kickoff()
-            plan_step_dicts = _extract_plan_steps(plan_steps.output)
+            try:
+                plan_step_dicts = _extract_plan_steps(plan_steps.output)
+            except ValueError:
+                _raise_salvage_give_up(agents.planner_llm)
+                raise
 
             # ── Deterministic element stage (Task 16) ──
             # ONE batch tool call, full contract merged onto the steps; tool
@@ -546,6 +569,11 @@ def run_crew(query: str, model_provider: str, model_name: str, workflow_id: str 
             # knows which kickoff is about to run.
             task_callback.mark_stage("assembler")
             result = assembler_crew.kickoff()
+            # No validated AssemblyOutput: the guardrail hands every export a {"code": ...}
+            # object, so its code is not a string and extract_and_normalize_robot_code will
+            # refuse it. A provider give-up behind that is the reason to report.
+            if assemble_code.output.pydantic is None:
+                _raise_salvage_give_up(agents.llm)
 
             logger.info("✅ CrewAI workflow completed successfully")
             logger.info("🏁 Crew execution finished")

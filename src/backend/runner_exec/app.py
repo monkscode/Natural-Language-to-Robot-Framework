@@ -10,7 +10,7 @@ Run as: uvicorn src.backend.runner_exec.app:app --host 0.0.0.0 --port 4998
 
 Referenced by: docker-compose.yml (runner-exec), run.sh, RunnerExecClient.
 Depends on: services/docker_service.py, services/dryrun_service.py,
-runner_exec/validation.py, core/build_info.py, core/secret_scrub.py.
+runner_exec/validation.py, core/build_info.py, core/secret_scrub.py, core/price_list.py.
 """
 import logging
 import os
@@ -23,6 +23,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from src.backend.core.price_list import use_shipped_price_list
+
+use_shipped_price_list()  # before dryrun_service below imports litellm; this process never prices anything
 
 from src.backend.config.logging_config import (
     bind_workflow_context,
