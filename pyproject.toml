@@ -40,7 +40,6 @@ dependencies = [
     # the same model ChromaDB used, so similarity behaviour and the 0.55 threshold
     # carry over unchanged.
     "fastembed",
-    "posthog>=2.4.0,<8.0.0",
     # LLM Observability — OTel-first (Enhancement #3)
     "traceloop-sdk>=0.30.0",
     "opentelemetry-api>=1.20.0",
