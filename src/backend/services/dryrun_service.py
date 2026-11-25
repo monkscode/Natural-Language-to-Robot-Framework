@@ -100,7 +100,7 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
       Strategy 1 — output.pydantic.code (AssemblyOutput)
       Strategy 2 — output.json_dict['code']
       Strategy 3 — raw JSON {"code": "..."} → code, else raw output as-is
-      then: escaped-newline/tab fix (only when the code holds no real newline; edge whitespace ignored) → normalize_robot_code → strip_redundant_css_prefix →
+      a code that is not a string ({"code": null}) raises ValueError, then: escaped-newline/tab fix (only when the code holds no real newline; edge whitespace ignored) → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
             rewrite_visibility_checks_to_wait → link_secret_fields → rewrite_select_text_reads →
             rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → rewrite_secret_fills → ensure_browser_timeout.
@@ -133,6 +133,10 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
         except (json.JSONDecodeError, TypeError):
             robot_code = raw_output
             logger.info("✅ Using raw output as robot code (not JSON)")
+
+    # {"code": null} (or any non-string) is left when crewai keeps an answer its Converter could not fix.
+    if not isinstance(robot_code, str):
+        raise ValueError("Assembler output contained no code")
 
     # Normalize escaped newlines/tabs to actual characters (LLMs emit literal \n),
     # only when the code holds no real newline (edge whitespace does not count): in a
