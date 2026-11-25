@@ -15,8 +15,9 @@ Gates (each a GateLine; PASS / FAIL / CANNOT):
   system prompt), rows ordered by start_time_ns (the capture has no ORDER BY), the
   last planner row with an answer is the one crewai converted, and it is unparsed
   when neither it nor its greedy {...} span is a JSON object with a "steps" list
-  (crewai's own extraction, the same on 1.8.1 and 1.15.44 — exactly what reaches the Converter: over all
-  2,105 captures that leaves the 7 known 2026-08-01 salvage runs). Until W5.1
+  (crewai's own {...} extraction regex, the same on 1.8.1 and 1.15.44; the span is parsed as
+  1.15.44 does, see planner_state. The corpus replay of 2026-11-25 read 2,729 runs: 7 UNPARSED,
+  the 7 known 2026-08-01 salvage runs). Until W5.1
   ships, a 1.8.1 salvage row carries no workflow id, so the bench never captures
   it; an unparsed planner answer is then the only trace of it. A GENERATED run
   with no planner row or answer makes the line CANNOT, naming the run (never
@@ -178,7 +179,8 @@ def planner_state(traces: list) -> str:
     which takes a raw control character inside a string (converter.py:253), or its
     greedy {...} span is, also under json.loads(strict=False) before model_validate
     (converter.py:322-336; a pre-schema "Final Answer: {...}" answer never reached
-    the Converter). UNPARSED is exactly what reaches it. 1.8.1 read the span with
+    the Converter). An UNPARSED answer always reaches it (a steps object the schema
+    rejects can too). 1.8.1 read the span with
     pydantic model_validate_json (its converter.py:256), which rejects a raw control
     character; the gate reads candidate runs only, so it follows 1.15.44.
     """
