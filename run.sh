@@ -155,14 +155,15 @@ _install_backend() {
         && uv pip install pytest pytest-asyncio pytest-cov
 }
 VENV_STAMP="$VENV_DIR/.requirements-hash"
-BACKEND_HASH="$(_req_hash "$BACKEND_REQ")"
+# Both files _install_backend reads: an overrides-only change must reinstall too.
+BACKEND_HASH="$(_req_hash "$BACKEND_REQ")-$(_req_hash uv-overrides.txt)"
 
 # Check if venv exists and is valid
 if [ -d "$VENV_DIR" ] && [ -f "$VENV_ACTIVATE" ]; then
     echo "Using existing virtual environment..."
     source "$VENV_ACTIVATE"
     if [ "$(cat "$VENV_STAMP" 2>/dev/null)" != "$BACKEND_HASH" ]; then
-        echo "$BACKEND_REQ changed — updating virtual environment..."
+        echo "$BACKEND_REQ or uv-overrides.txt changed — updating virtual environment..."
         command -v uv >/dev/null 2>&1 || pip install uv
         if _install_backend; then
             echo "$BACKEND_HASH" > "$VENV_STAMP"
