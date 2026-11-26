@@ -1509,6 +1509,16 @@ class TestAMessageIsNoEvidence:
                      "    msg=expected ${expected}\n", "${expected}    20\n")
         assert shapes(code, Q10) == {READ_NOT_PERFORMED}
 
+    def test_a_count_named_only_by_a_message_is_not_a_compared_count(self):
+        code = books("    ${elements_count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be Equal As Integers    20    20    msg=count ${elements_count}\n")
+        assert shapes(code, Q10) == {READ_NOT_PERFORMED}
+
+    def test_a_compared_count_with_a_message_is_still_a_check(self):
+        code = books("    ${elements_count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be Equal As Integers    ${elements_count}    20    msg=count ${elements_count}\n")
+        assert shapes(code, Q10) == set()
+
     def test_a_counted_assertion_with_a_message_is_still_a_check(self):
         code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20    msg=count\n")
         assert shapes(code, Q10) == set()

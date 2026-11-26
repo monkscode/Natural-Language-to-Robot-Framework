@@ -67,6 +67,8 @@ def test_names_are_deduplicated_in_first_seen_order(condition, names):
     f"    Should Be True    {_COND}\n    ...    msg=mine",          # continued line
     "    Should Be True    'abc in $x",                             # the tokenizer refuses it
     "    Should Be True    $",                                      # a `$` with no name
+    f"    Should Be True    {_COND}\n...    Custom message",       # an UNINDENTED continuation: Robot reads it as the message
+    f"    Should Be True    {_COND}\n    # why\n\n...    Custom message",  # a comment and a blank line between
     f"    ${{r}}=    Should Be True    {_COND}",                    # an assignment
 ])
 def test_a_line_that_does_not_qualify_is_left_alone(step):
@@ -105,10 +107,11 @@ def test_a_test_with_a_template_is_left_alone():
     lambda raw: raw.replace("id=delivery", "%NLRF_SECRET_X"),
     lambda raw: raw.replace("Close Browser", "Fill Secret    id=p    %{X}"),
     lambda raw: raw.replace("Close Browser", "fill_secret    id=p    %{X}"),
+    lambda raw: raw.replace("Close Browser", "Fill ſecret    id=p    %{X}"),  # casefold: the long s is an s
     lambda raw: raw.replace("Close Browser", "Type Secret    id=p    %{X}"),
     lambda raw: raw + "\n*** Keywords ***\nShould Be True\n    Log    hi\n",
     lambda raw: raw.replace("    Close Browser", "    TRY\n        Close Browser\n    EXCEPT\n        Log    x\n    END"),
-], ids=["language", "language upper", "placeholder", "env secret", "Fill Secret", "fill_secret", "Type Secret",
+], ids=["language", "language upper", "placeholder", "env secret", "Fill Secret", "fill_secret", "Fill long-s Secret", "Type Secret",
         "own Should Be True", "TRY"])
 def test_a_file_guard_leaves_the_whole_file_alone(mutate):
     raw = mutate(BASE)

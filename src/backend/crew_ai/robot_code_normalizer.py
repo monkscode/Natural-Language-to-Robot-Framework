@@ -1792,6 +1792,16 @@ def _should_be_true_line(step: _Step) -> str | None:
     return "".join(parts) + step.eol
 
 
+def _is_continued_below(lines: list[str], line_no: int) -> bool:
+    """True when the next line Robot reads after `line_no` (blank and comment lines skipped) starts with `...`:
+    the step has more cells. The reader marks an indented `...` line on the step, an unindented one only on its test."""
+    for text in lines[line_no + 1:]:
+        stripped = text.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped.startswith("...")
+    return False
+
+
 def _should_be_true_rewrites(suite: _Suite) -> dict[int, str]:
     """line number of each accepted `Should Be True` line -> that line with the message cell."""
     rewrites = {}
@@ -1800,7 +1810,7 @@ def _should_be_true_rewrites(suite: _Suite) -> dict[int, str]:
         if any(step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[template]" for step in test.steps):
             continue
         for step in test.steps:
-            line = _should_be_true_line(step)
+            line = None if _is_continued_below(suite.lines, step.line_no) else _should_be_true_line(step)
             if line is not None:
                 rewrites[step.line_no] = line
     return rewrites
@@ -1823,20 +1833,22 @@ def rewrite_should_be_true_messages(robot_code: str) -> str:
     The cell is added after the condition with the line's own separator, before any trailing comment; indent
     and line end are kept.
 
-    Left alone: a condition holding `${`, `@{`, `&{`, `%{` or a backslash (Robot substitutes and unescapes those before
-    it reads the expression, so the `$name` found here may not be a variable at all), a second argument or `msg=`
-    (which also makes the rewrite idempotent), `Run Keyword If …` and
-    `Wait Until Keyword Succeeds … Should Be True`, a step in a user keyword, a `...`-continued line, a test with a
-    `[Template]` line, and whole files that hold `language:`, a secret (`{{`, `NLRF_SECRET` in either env form,
-    `Fill Secret`, `Type Secret`), `TEST MESSAGE` or `KEYWORD MESSAGE`, a `TRY`, their own keywords under an error-catching wrapper or their own `Should Be True`, or
-    that the reader refuses.
+    Left alone: a line continued by a `...` line below it, indented or not (the continuation is more cells, so
+    the step already has a message), a condition holding `${`, `@{`, `&{`, `%{` or a backslash (Robot substitutes
+    and unescapes those before it reads the expression, so the `$name` found here may not be a variable at all),
+    a second argument or `msg=` (which also makes the rewrite idempotent), `Run Keyword If …` and
+    `Wait Until Keyword Succeeds … Should Be True`, a step in a user keyword, a test with a `[Template]` line,
+    and whole files that hold `language:`, a secret (`{{`, `NLRF_SECRET` in either env form, `Fill Secret`,
+    `Type Secret`), `TEST MESSAGE` or `KEYWORD MESSAGE`, a `TRY`, their own keywords under an error-catching
+    wrapper or their own `Should Be True`, or that the reader refuses.
     """
     if not robot_code or "$" not in robot_code:
         return robot_code
-    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.lower())
+    # casefold, as Robot matches names: `ſ` (U+017F) survives lower() and is an `s` to Robot.
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.casefold())
     if "shouldbetrue" not in squashed:
         return robot_code
-    if "language:" in robot_code.lower() or any(marker in squashed for marker in _SECRET_FILE_MARKERS):
+    if "language:" in robot_code.casefold() or any(marker in squashed for marker in _SECRET_FILE_MARKERS):
         return robot_code
     suite = _parse_suite(robot_code)
     if suite is None:
