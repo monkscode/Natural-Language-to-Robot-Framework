@@ -814,7 +814,9 @@ def _count_is_checked(query: str, variables: dict[str, str], stmts: list[_Statem
             continue
         # A counting keyword's first argument is what it counts, never the number expected.
         if _is_assertion(stmt):
-            texts = _resolved_arguments(stmt.args[1:] if counter else stmt.args, declared)
+            # A `msg=` argument is a message, never a comparison: it is no evidence of a checked count.
+            args = tuple(a for a in (stmt.args[1:] if counter else stmt.args) if not a.startswith("msg="))
+            texts = _resolved_arguments(args, declared)
             if texts is None or wanted & _whole_numbers("  ".join(texts)):
                 return True
         counts.update(stmt.assigned)

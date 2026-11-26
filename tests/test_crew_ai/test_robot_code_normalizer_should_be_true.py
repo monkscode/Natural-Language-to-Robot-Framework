@@ -27,7 +27,7 @@ _HEAD = (
 )
 _COND = "'undefined' not in $delivery_text"
 _LINE = f"    Should Be True    {_COND}"
-_MSG = f"msg={_COND} should be true. delivery_text: ${{delivery_text}}"
+_MSG = f"msg='{_COND}' should be true. delivery_text: ${{delivery_text}}"
 _REWRITTEN = f"{_LINE}    {_MSG}"
 _TAIL = "\n    Close Browser\n"
 
@@ -52,7 +52,7 @@ def test_control_the_base_file_is_rewritten():
 def test_names_are_deduplicated_in_first_seen_order(condition, names):
     out = rewrite_should_be_true_messages(_file(f"    Should Be True    {condition}"))
     values = "; ".join(f"{n}: ${{{n}}}" for n in names)
-    assert out == _file(f"    Should Be True    {condition}    msg={condition} should be true. {values}")
+    assert out == _file(f"    Should Be True    {condition}    msg='{condition}' should be true. {values}")
 
 
 @pytest.mark.parametrize("step", [
@@ -134,7 +134,7 @@ def test_every_qualifying_line_is_rewritten_and_the_others_are_not():
     raw = _file(f"{_LINE}\n    Should Be True    ${{n}} == 2\n    Should Be True    $a == 1")
     out = rewrite_should_be_true_messages(raw)
     assert out == _file(f"{_REWRITTEN}\n    Should Be True    ${{n}} == 2\n"
-                        "    Should Be True    $a == 1    msg=$a == 1 should be true. a: ${a}")
+                        "    Should Be True    $a == 1    msg='$a == 1' should be true. a: ${a}")
 
 
 def test_a_file_the_reader_refuses_and_empty_input_are_left_alone():
@@ -147,3 +147,51 @@ def test_a_rewrite_is_logged(caplog):
     with caplog.at_level(logging.INFO, logger=LOGGER):
         rewrite_should_be_true_messages(BASE)
     assert any("Should Be True" in r.getMessage() and "rewrote 1" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("condition", [
+    "${q}$undefined_name${q} != 'a'",   # Robot substitutes ${q} first: the name sits inside a string, no variable
+    "'${x}' in $y",
+    "$y == @{items}[0]",
+    "$y == &{pairs}[k]",
+    "$y == %{HOME}",
+    "'a\\\\b' in $y",
+    "$y == 'a\\'b'",
+])
+def test_a_condition_robot_changes_before_it_reads_is_left_alone(condition):
+    raw = _file(f"    Should Be True    {condition}")
+    assert rewrite_should_be_true_messages(raw) == raw
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda raw: raw.replace("Close Browser", "Set Variable    %{NLRF_SECRET_PW}"),
+    lambda raw: raw.replace("Close Browser", "Set Variable    %NLRF_SECRET_PW"),
+    lambda raw: raw.replace("    Close Browser", "    [Teardown]    Log    ${TEST MESSAGE}"),
+    lambda raw: raw.replace("    Close Browser", "    [Teardown]    Log    ${test_message}"),
+    lambda raw: raw.replace("    Close Browser", "    [Teardown]    Log    ${KEYWORD MESSAGE}"),
+], ids=["braced env secret", "bare env secret", "TEST MESSAGE", "test_message", "KEYWORD MESSAGE"])
+def test_a_secret_or_message_reading_file_is_left_alone(mutate):
+    raw = mutate(BASE)
+    assert "$delivery_text" in raw
+    assert rewrite_should_be_true_messages(raw) == raw
+
+
+def test_a_name_robot_reads_as_the_same_variable_is_listed_once_with_its_first_spelling():
+    out = rewrite_should_be_true_messages(_file("    Should Be True    $Delivery_Text == $delivery_text"))
+    assert out == _file("    Should Be True    $Delivery_Text == $delivery_text"
+                        "    msg='$Delivery_Text == $delivery_text' should be true. Delivery_Text: ${Delivery_Text}")
+
+
+def test_the_message_is_robots_own_default_text_plus_the_values():
+    # the classifier and the user-facing sentence read Robot's `'<condition>' should be true`
+    from src.backend.core.failure_sentences import failure_category, failure_sentence
+
+    value = "Delivery: Arrives by undefined"
+    for condition in (_COND, "$a == $b", "len($a) == 20 and $b"):
+        out = rewrite_should_be_true_messages(_file(f"    Should Be True    {condition}"))
+        cell = next(line for line in out.split("\n") if "msg=" in line).split("    msg=", 1)[1]
+        shown = cell.replace("${delivery_text}", value).replace("${a}", "x").replace("${b}", "y")
+        robot_default = f"'{condition}' should be true."
+        assert shown.startswith(robot_default)
+        assert failure_category(shown) == failure_category(robot_default) == "E1"
+        assert failure_sentence(shown) == failure_sentence(robot_default) is not None

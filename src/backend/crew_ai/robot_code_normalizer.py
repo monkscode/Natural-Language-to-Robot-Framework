@@ -1751,24 +1751,26 @@ def rewrite_empty_loop_checks(robot_code: str) -> str:
 # ---------------------------------------------------------------------------
 
 _SHOULD_BE_TRUE_GUARD = ("Should Be True",)
-# A file naming a secret never has a value copied into a failure text, compared without spaces or underscores.
-_SECRET_FILE_MARKERS = ("{{", "%nlrfsecret", "fillsecret", "typesecret")
+# A file naming a secret never has a value copied into a failure text (`%NLRF_SECRET_X` and `%{NLRF_SECRET_X}` both
+# hold `nlrfsecret`); a file that reads the test or keyword message could branch on the new text. Compared without
+# spaces or underscores, any case.
+_SECRET_FILE_MARKERS = ("{{", "nlrfsecret", "fillsecret", "typesecret", "testmessage", "keywordmessage")
 
 
 def _bare_variable_names(condition: str) -> list[str]:
     """The `$name` variables of an evaluated expression, deduplicated in first-seen order, the way Robot finds them:
     a `$` token (OP or ERRORTOKEN, by Python version) followed by a NAME token; a string literal holds none. An
-    expression the tokenizer refuses has none."""
+    expression the tokenizer refuses has none. Robot reads two spellings as one variable (case, spaces and
+    underscores ignored): the first spelling is kept."""
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(condition).readline))
     except (tokenize.TokenError, SyntaxError):
         return []
-    names: list[str] = []
+    names: dict[str, str] = {}
     for token, following in zip(tokens, tokens[1:]):
-        if (token.string == "$" and token.type in (tokenize.OP, tokenize.ERRORTOKEN)
-                and following.type == tokenize.NAME and following.string not in names):
-            names.append(following.string)
-    return names
+        if token.string == "$" and token.type in (tokenize.OP, tokenize.ERRORTOKEN) and following.type == tokenize.NAME:
+            names.setdefault(_canon_variable(following.string), following.string)
+    return list(names.values())
 
 
 def _should_be_true_line(step: _Step) -> str | None:
@@ -1776,13 +1778,17 @@ def _should_be_true_line(step: _Step) -> str | None:
     if (step.setting or step.continued or step.assigns or step.keyword != "should be true"
             or step.prefix not in _BUILTIN_PREFIXES or len(step.args) != 1 or step.args[0].startswith("msg=")):
         return None
+    # Robot substitutes `${x}` and removes `\` escapes BEFORE it tokenizes, so a `$name` read here can sit inside a
+    # string for Robot (`${q}$x${q}`): naming it in the message would fail a check that passes.
+    if _ANY_VARIABLE_RE.search(step.args[0]) or "\\" in step.args[0]:
+        return None
     names = _bare_variable_names(step.args[0])
     if not names:
         return None
     first = step.arg_idx[0]
     shown = "; ".join(f"{name}: ${{{name}}}" for name in names)
     parts = list(step.parts)
-    parts[first + 1:first + 1] = [parts[first - 1], f"msg={step.args[0]} should be true. {shown}"]
+    parts[first + 1:first + 1] = [parts[first - 1], f"msg='{step.args[0]}' should be true. {shown}"]
     return "".join(parts) + step.eol
 
 
@@ -1801,14 +1807,15 @@ def _should_be_true_rewrites(suite: _Suite) -> dict[int, str]:
 
 
 def rewrite_should_be_true_messages(robot_code: str) -> str:
-    """Add `msg=<condition> should be true. name: ${name}` to a `Should Be True` that reads a bare `$name`.
+    """Add `msg='<condition>' should be true. name: ${name}` to a `Should Be True` that reads a bare `$name`.
 
     A bare `$name` is Robot's evaluation-namespace form, and Robot does not put its value in the failure text:
-    `Should Be True    'undefined' not in $delivery_text` fails as `'undefined' not in $delivery_text should be
+    `Should Be True    'undefined' not in $delivery_text` fails as `''undefined' not in $delivery_text' should be
     true.` and the tester never sees what the page showed. A braced `${x}` is substituted before the expression
-    runs, so its failure text already holds the value. The new cell names each bare `$name` (deduplicated, first
-    seen first, joined by `; `) with its braced value, which Robot substitutes into the message only when the
-    check fails. Pass or fail never changes.
+    runs, so its failure text already holds the value. The new cell is Robot's own default text (the failure
+    classifier reads `'<condition>' should be true`) followed by each bare `$name` (deduplicated the way Robot
+    compares names, first seen first, joined by `; `) with its braced value. Robot resolves the message before the
+    check runs; the value is shown only when the check fails. Pass or fail never changes.
 
     Rewritten: a test-body step, not continued, with no assignment, `Should Be True` (any case, spaces or
     underscores; no library prefix or `BuiltIn.`), exactly one argument, holding a `$` followed by a name found by
@@ -1816,10 +1823,12 @@ def rewrite_should_be_true_messages(robot_code: str) -> str:
     The cell is added after the condition with the line's own separator, before any trailing comment; indent
     and line end are kept.
 
-    Left alone: a second argument or `msg=` (which also makes the rewrite idempotent), `Run Keyword If …` and
+    Left alone: a condition holding `${`, `@{`, `&{`, `%{` or a backslash (Robot substitutes and unescapes those before
+    it reads the expression, so the `$name` found here may not be a variable at all), a second argument or `msg=`
+    (which also makes the rewrite idempotent), `Run Keyword If …` and
     `Wait Until Keyword Succeeds … Should Be True`, a step in a user keyword, a `...`-continued line, a test with a
-    `[Template]` line, and whole files that hold `language:`, a secret (`{{`, `%NLRF_SECRET`, `Fill Secret`,
-    `Type Secret`), a `TRY`, their own keywords under an error-catching wrapper or their own `Should Be True`, or
+    `[Template]` line, and whole files that hold `language:`, a secret (`{{`, `NLRF_SECRET` in either env form,
+    `Fill Secret`, `Type Secret`), `TEST MESSAGE` or `KEYWORD MESSAGE`, a `TRY`, their own keywords under an error-catching wrapper or their own `Should Be True`, or
     that the reader refuses.
     """
     if not robot_code or "$" not in robot_code:

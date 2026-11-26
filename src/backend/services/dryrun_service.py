@@ -216,8 +216,8 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
     # Then a text check on a Get Text read becomes a whole-word, any-letter-case
     # Should Match Regexp — after the select rewrite, which must see the
     # select's Should Contain first.
-    # Last, the empty-loop guard: a positive check inside a FOR over a Get Elements
-    # list gets one Should Not Be Empty line. It runs last so that, on generation,
+    # Then the empty-loop guard: a positive check inside a FOR over a Get Elements
+    # list gets one Should Not Be Empty line. It runs after those so that, on generation,
     # the rewrites above see the code exactly as they did before it existed.
     # Same place as the visibility rewrite, for the same reason: every repair
     # round passes through here too. After the empty-loop guard, a `Should Be True` on a bare

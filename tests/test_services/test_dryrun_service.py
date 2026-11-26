@@ -886,7 +886,7 @@ class TestExtractAndNormalize:
                "    Should Be True    'undefined' not in $delivery_text")
         out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
         assert ("    Should Be True    'undefined' not in $delivery_text    "
-                "msg='undefined' not in $delivery_text should be true. delivery_text: ${delivery_text}") in out
+                "msg=''undefined' not in $delivery_text' should be true. delivery_text: ${delivery_text}") in out
         assert ds.extract_and_normalize_robot_code(self._task_output(pydantic=out)) == out
 
     def test_the_secret_rewrite_runs_last_in_the_chain(self):
