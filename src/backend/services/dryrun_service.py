@@ -56,6 +56,7 @@ from src.backend.crew_ai.robot_code_normalizer import (
     rewrite_empty_loop_checks,
     rewrite_secret_fills,
     rewrite_select_text_reads,
+    rewrite_should_be_true_messages,
     rewrite_text_checks_whole_word,
     rewrite_typed_value_reads,
     rewrite_visibility_checks_to_wait,
@@ -103,7 +104,7 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
       a code that is not a string ({"code": null}) raises ValueError, then: escaped-newline/tab fix (only when the code holds no real newline; edge whitespace ignored) → normalize_robot_code → strip_redundant_css_prefix →
             Settings-block trim → trailing-empty-line strip → trailing-JSON-artifact strip →
             rewrite_visibility_checks_to_wait → link_secret_fields → rewrite_select_text_reads →
-            rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → rewrite_secret_fills → ensure_browser_timeout.
+            rewrite_typed_value_reads → rewrite_text_checks_whole_word → rewrite_empty_loop_checks → rewrite_should_be_true_messages → rewrite_secret_fills → ensure_browser_timeout.
 
     `secret_fields` (`RunCrewResult.secret_fields`, #166): the plan's typing steps on found fields; () links
     nothing, so the code comes out exactly as before.
@@ -219,8 +220,10 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
     # list gets one Should Not Be Empty line. It runs last so that, on generation,
     # the rewrites above see the code exactly as they did before it existed.
     # Same place as the visibility rewrite, for the same reason: every repair
-    # round passes through here too. All five are optional and skip-only, so one
-    # that raises costs only its own rewrite, never the generation.
+    # round passes through here too. After the empty-loop guard, a `Should Be True` on a bare
+    # `$name` gets a `msg=` cell that shows the value it checked (Robot shows none for `$name`).
+    # All of them are optional and skip-only, so one that raises costs only its own rewrite,
+    # never the generation.
     # The very last: a typed `{{NAME}}` org secret becomes `Fill Secret … %NLRF_SECRET_NAME`
     # (#131) and every other `{{NAME}}` becomes `%{NLRF_SECRET_NAME}`, after every rewrite
     # above has seen the placeholder form it reads.
@@ -231,6 +234,7 @@ def extract_and_normalize_robot_code(task_output, secret_fields=()) -> str:
                           ("rewrite_typed_value_reads", rewrite_typed_value_reads),
                           ("rewrite_text_checks_whole_word", rewrite_text_checks_whole_word),
                           ("rewrite_empty_loop_checks", rewrite_empty_loop_checks),
+                          ("rewrite_should_be_true_messages", rewrite_should_be_true_messages),
                           ("rewrite_secret_fills", rewrite_secret_fills)):
         try:
             robot_code = rewrite(robot_code)
