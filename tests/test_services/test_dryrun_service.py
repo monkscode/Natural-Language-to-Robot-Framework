@@ -841,10 +841,12 @@ class TestExtractAndNormalize:
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
         ("rewrite_empty_loop_checks", _Q08_RAW,
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
+        ("rewrite_should_be_true_messages", _Q08_RAW,
+         "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
         ("rewrite_secret_fills", _Q08_RAW,
          "    ${selected_option}=    Get Selected Options    css=#dropdown    label\n"),
     ], ids=["select read rewrite raises", "typed value rewrite raises", "text check rewrite raises",
-            "empty loop rewrite raises", "secret fill rewrite raises"])
+            "empty loop rewrite raises", "should-be-true message rewrite raises", "secret fill rewrite raises"])
     def test_a_read_rewrite_that_raises_leaves_the_code_to_the_rest_of_cleanup(
             self, caplog, failing, raw, still_rewritten):
         with (patch.object(ds, failing, side_effect=RuntimeError("unexpected")),
@@ -878,6 +880,15 @@ class TestExtractAndNormalize:
         assert "    Fill Text    id=user-name    standard_user\n" in out
         assert ds.extract_and_normalize_robot_code(self._task_output(pydantic=out)) == out
 
+    def test_a_failed_should_be_true_check_shows_the_value_it_checked_on_every_round(self):
+        raw = ("*** Settings ***\nLibrary    Browser\n\n*** Test Cases ***\nT\n"
+               "    ${delivery_text}=    Get Text    id=delivery\n"
+               "    Should Be True    'undefined' not in $delivery_text")
+        out = ds.extract_and_normalize_robot_code(self._task_output(raw=raw))
+        assert ("    Should Be True    'undefined' not in $delivery_text    "
+                "msg=''undefined' not in $delivery_text' should be true. delivery_text: ${delivery_text}") in out
+        assert ds.extract_and_normalize_robot_code(self._task_output(pydantic=out)) == out
+
     def test_the_secret_rewrite_runs_last_in_the_chain(self):
         calls = []
 
@@ -885,7 +896,7 @@ class TestExtractAndNormalize:
             return lambda code: calls.append(name) or code
 
         names = ("rewrite_select_text_reads", "rewrite_typed_value_reads", "rewrite_text_checks_whole_word",
-                 "rewrite_empty_loop_checks", "rewrite_secret_fills")
+                 "rewrite_empty_loop_checks", "rewrite_should_be_true_messages", "rewrite_secret_fills")
         with patch.multiple(ds, **{n: spy(n) for n in names}):
             ds.extract_and_normalize_robot_code(self._task_output(raw=self._SECRET_RAW))
         assert calls == list(names)

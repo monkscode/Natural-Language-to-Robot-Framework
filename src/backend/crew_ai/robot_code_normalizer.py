@@ -32,10 +32,10 @@ Runs AFTER the Code Assembler returns. Complements the prompt guidance in
 `library_context/browser_context.py` as a belt-and-suspenders guarantee, since
 the LLM occasionally ignores prompt rules.
 
-The same cleanup step also applies seven smaller deterministic rules defined
+The same cleanup step also applies eight smaller deterministic rules defined
 here: `ensure_browser_timeout`, `strip_redundant_css_prefix`,
 `rewrite_visibility_checks_to_wait`, `rewrite_select_text_reads`,
-`rewrite_typed_value_reads`, `rewrite_text_checks_whole_word` and `rewrite_empty_loop_checks`.
+`rewrite_typed_value_reads`, `rewrite_text_checks_whole_word`, `rewrite_empty_loop_checks` and `rewrite_should_be_true_messages`.
 The org-secret rules have their own section: `link_secret_fields` (first in that step, #166),
 `rewrite_secret_fills` (last, #131), `restore_secret_placeholders` (for the repair LLM) and
 `typed_secret_names` (the workflow's secret-not-typed signal).
@@ -61,8 +61,10 @@ Depends on:
         (check_pass_quality, norm_locator — standard library only)
 """
 
+import io
 import logging
 import re
+import tokenize
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -1740,6 +1742,120 @@ def rewrite_empty_loop_checks(robot_code: str) -> str:
     return _apply_rewrites(
         robot_code, suite, _empty_loop_rewrites(suite), _EMPTY_LOOP_GUARD,
         "Empty loop normalizer", "loop(s)", "a Should Not Be Empty guard (signal: empty-loop-guard)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Should Be True messages: a failed check on a bare `$name` shows no value.
+# Runs on the shared suite reader above.
+# ---------------------------------------------------------------------------
+
+_SHOULD_BE_TRUE_GUARD = ("Should Be True",)
+# A file naming a secret never has a value copied into a failure text (`%NLRF_SECRET_X` and `%{NLRF_SECRET_X}` both
+# hold `nlrfsecret`); a file that reads the test or keyword message could branch on the new text. Compared without
+# spaces or underscores, any case.
+_SECRET_FILE_MARKERS = ("{{", "nlrfsecret", "fillsecret", "typesecret", "testmessage", "keywordmessage")
+
+
+def _bare_variable_names(condition: str) -> list[str]:
+    """The `$name` variables of an evaluated expression, deduplicated in first-seen order, the way Robot finds them:
+    a `$` token (OP or ERRORTOKEN, by Python version) followed by a NAME token; a string literal holds none. An
+    expression the tokenizer refuses has none. Robot reads two spellings as one variable (case, spaces and
+    underscores ignored): the first spelling is kept."""
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(condition).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return []
+    names: dict[str, str] = {}
+    for token, following in zip(tokens, tokens[1:]):
+        if token.string == "$" and token.type in (tokenize.OP, tokenize.ERRORTOKEN) and following.type == tokenize.NAME:
+            names.setdefault(_canon_variable(following.string), following.string)
+    return list(names.values())
+
+
+def _should_be_true_line(step: _Step) -> str | None:
+    """The step's line with the `msg=` cell added, or None unless it qualifies (see rewrite_should_be_true_messages)."""
+    if (step.setting or step.continued or step.assigns or step.keyword != "should be true"
+            or step.prefix not in _BUILTIN_PREFIXES or len(step.args) != 1 or step.args[0].startswith("msg=")):
+        return None
+    # Robot substitutes `${x}` and removes `\` escapes BEFORE it tokenizes, so a `$name` read here can sit inside a
+    # string for Robot (`${q}$x${q}`): naming it in the message would fail a check that passes.
+    if _ANY_VARIABLE_RE.search(step.args[0]) or "\\" in step.args[0]:
+        return None
+    names = _bare_variable_names(step.args[0])
+    if not names:
+        return None
+    first = step.arg_idx[0]
+    shown = "; ".join(f"{name}: ${{{name}}}" for name in names)
+    parts = list(step.parts)
+    parts[first + 1:first + 1] = [parts[first - 1], f"msg='{step.args[0]}' should be true. {shown}"]
+    return "".join(parts) + step.eol
+
+
+def _is_continued_below(lines: list[str], line_no: int) -> bool:
+    """True when the next line Robot reads after `line_no` (blank and comment lines skipped) starts with `...`:
+    the step has more cells. The reader marks an indented `...` line on the step, an unindented one only on its test."""
+    for text in lines[line_no + 1:]:
+        stripped = text.strip()
+        if stripped and not stripped.startswith("#"):
+            return stripped.startswith("...")
+    return False
+
+
+def _should_be_true_rewrites(suite: _Suite) -> dict[int, str]:
+    """line number of each accepted `Should Be True` line -> that line with the message cell."""
+    rewrites = {}
+    for test in suite.tests:
+        # Robot runs every row of a templated test as the template's arguments.
+        if any(step.setting and re.sub(_SPACE_UNDERSCORE, "", step.keyword) == "[template]" for step in test.steps):
+            continue
+        for step in test.steps:
+            line = None if _is_continued_below(suite.lines, step.line_no) else _should_be_true_line(step)
+            if line is not None:
+                rewrites[step.line_no] = line
+    return rewrites
+
+
+def rewrite_should_be_true_messages(robot_code: str) -> str:
+    """Add `msg='<condition>' should be true. name: ${name}` to a `Should Be True` that reads a bare `$name`.
+
+    A bare `$name` is Robot's evaluation-namespace form, and Robot does not put its value in the failure text:
+    `Should Be True    'undefined' not in $delivery_text` fails as `''undefined' not in $delivery_text' should be
+    true.` and the tester never sees what the page showed. A braced `${x}` is substituted before the expression
+    runs, so its failure text already holds the value. The new cell is Robot's own default text (the failure
+    classifier reads `'<condition>' should be true`) followed by each bare `$name` (deduplicated the way Robot
+    compares names, first seen first, joined by `; `) with its braced value. Robot resolves the message before the
+    check runs; the value is shown only when the check fails. Pass or fail never changes.
+
+    Rewritten: a test-body step, not continued, with no assignment, `Should Be True` (any case, spaces or
+    underscores; no library prefix or `BuiltIn.`), exactly one argument, holding a `$` followed by a name found by
+    Python's `tokenize` (a `$` inside a string literal is no variable; a condition the tokenizer refuses has none).
+    The cell is added after the condition with the line's own separator, before any trailing comment; indent
+    and line end are kept.
+
+    Left alone: a line continued by a `...` line below it, indented or not (the continuation is more cells, so
+    the step already has a message), a condition holding `${`, `@{`, `&{`, `%{` or a backslash (Robot substitutes
+    and unescapes those before it reads the expression, so the `$name` found here may not be a variable at all),
+    a second argument or `msg=` (which also makes the rewrite idempotent), `Run Keyword If …` and
+    `Wait Until Keyword Succeeds … Should Be True`, a step in a user keyword, a test with a `[Template]` line,
+    and whole files that hold `language:`, a secret (`{{`, `NLRF_SECRET` in either env form, `Fill Secret`,
+    `Type Secret`), `TEST MESSAGE` or `KEYWORD MESSAGE`, a `TRY`, their own keywords under an error-catching
+    wrapper or their own `Should Be True`, or that the reader refuses.
+    """
+    if not robot_code or "$" not in robot_code:
+        return robot_code
+    # casefold, as Robot matches names: `ſ` (U+017F) survives lower() and is an `s` to Robot.
+    squashed = re.sub(_SPACE_UNDERSCORE, "", robot_code.casefold())
+    if "shouldbetrue" not in squashed:
+        return robot_code
+    if "language:" in robot_code.casefold() or any(marker in squashed for marker in _SECRET_FILE_MARKERS):
+        return robot_code
+    suite = _parse_suite(robot_code)
+    if suite is None:
+        return robot_code
+    return _apply_rewrites(
+        robot_code, suite, _should_be_true_rewrites(suite), _SHOULD_BE_TRUE_GUARD,
+        "Should Be True message normalizer", "check(s)", "carry the value they checked (signal: should-be-true-message)",
     )
 
 

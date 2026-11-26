@@ -28,6 +28,7 @@ from src.backend.core.pass_quality import (
     norm_locator,
     pass_suggestions,
 )
+from src.backend.crew_ai.robot_code_normalizer import rewrite_should_be_true_messages
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -992,7 +993,7 @@ class TestAValueTheBoundStopsIsNotRead:
                 "*** Test Cases ***\nT\n"
                 "    New Page    https://x\n"
                 "    ${count}=    Get Element Count    css=li.book\n"
-                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}\n")
+                "    Should Be Equal As Integers    ${count}    ${expected}    values=${pad}\n")
 
     @pytest.mark.parametrize("pad", [9_000, 10_001])
     def test_a_long_sibling_argument_hides_no_count(self, pad):
@@ -1010,7 +1011,7 @@ class TestAValueTheBoundStopsIsNotRead:
                 "*** Test Cases ***\nT\n"
                 "    New Page    https://x\n"
                 "    ${count}=    Get Element Count    css=li.book\n"
-                "    Should Be Equal As Integers    ${count}    ${expected}    msg=${pad}    values=${pad2}\n")
+                "    Should Be Equal As Integers    ${count}    ${expected}    base=${pad}    values=${pad2}\n")
         assert [f.shape for f in check_pass_quality(code, self.COUNT_QUERY)] == found
 
     def test_many_arguments_each_under_the_bound_are_not_all_resolved(self):
@@ -1485,3 +1486,39 @@ def test_importing_the_checker_loads_no_config_database_or_llm_client():
                          text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "[]"
+
+
+class TestAMessageIsNoEvidence:
+    """A `msg=` argument never compares anything. The should-be-true message rewrite writes `${name}` for each bare
+    `$name` into one, so the checker must answer the same before and after it (and for a `msg=` the LLM wrote)."""
+
+    N_EXPECTED = "    ${n}=    Get Length    ${elements}\n"
+
+    @pytest.mark.parametrize("check", [
+        "    Should Be True    $n == $expected\n",
+        "    Should Be True    len($elements) == $expected\n",
+    ])
+    def test_the_answer_is_the_same_before_and_after_the_message_rewrite(self, check):
+        code = books(GET_ELEMENTS + self.N_EXPECTED + check, "${expected}    20\n")
+        rewritten = rewrite_should_be_true_messages(code)
+        assert rewritten != code
+        assert shapes(code, Q10) == shapes(rewritten, Q10) == {READ_NOT_PERFORMED}
+
+    def test_a_number_held_only_by_a_message_checks_nothing(self):
+        code = books(GET_LENGTH + "    Should Be Equal As Integers    ${elements_count}    5"
+                     "    msg=expected ${expected}\n", "${expected}    20\n")
+        assert shapes(code, Q10) == {READ_NOT_PERFORMED}
+
+    def test_a_count_named_only_by_a_message_is_not_a_compared_count(self):
+        code = books("    ${elements_count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be Equal As Integers    20    20    msg=count ${elements_count}\n")
+        assert shapes(code, Q10) == {READ_NOT_PERFORMED}
+
+    def test_a_compared_count_with_a_message_is_still_a_check(self):
+        code = books("    ${elements_count}=    Get Element Count    ${books_locator}\n"
+                     "    Should Be Equal As Integers    ${elements_count}    20    msg=count ${elements_count}\n")
+        assert shapes(code, Q10) == set()
+
+    def test_a_counted_assertion_with_a_message_is_still_a_check(self):
+        code = books(GET_LENGTH + "    Should Be True    ${elements_count} == 20    msg=count\n")
+        assert shapes(code, Q10) == set()
